@@ -1,0 +1,6 @@
+# Minimal dependencies for the verified HWAoI entry point, not upstream installers.
+numpy==2.5.4
+lz4==4.4.5
+zstandard==0.25.0
+capstone==5.0.7
+# Optional independent prototype validation: unicorn==2.1.4

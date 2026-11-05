@@ -1,0 +1,13 @@
+# HWAoI local inputs. Copy to config.local.toml only if needed by your own tooling.
+# tools/hwaoi.py currently accepts --exefs directly and does not parse this file.
+[input]
+nup = 'E:\Games\HyruleWarriors.nup'
+exefs = 'work/game/exefs'
+
+[work]
+dir = 'work'
+
+[tools]
+python = 'F:\Python\python.exe'
+llvm = 'F:\llvm-mingw'
+ninja = 'F:\Ninja\ninja.exe'

@@ -1,0 +1,32 @@
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -244,7 +244,8 @@
+                 // TOTK (2026-10-20): an image declared without a format (QueryHostSupportsImageLoadFormatted) that the
+                 // shader stores to needs StorageImageWriteWithoutFormat; upstream never declares it, so spirv-val rejects
+                 // 22 agl_technique_pfx compute shaders with formatted SUST. Vulkan's shaderStorageImageWriteWithoutFormat
+-                // feature backs it. Reads without a format need no capability under Vulkan 1.3 (format feature flags 2).
++                // feature backs it. Unknown-format reads separately require StorageImageReadWithoutFormat;
++                // GenerateImageLoad declares that capability only when it emits such a read.
+                 writeWithoutFormat |= image.Format == TextureFormat.Unknown && image.Flags.HasFlag(TextureUsageFlags.ImageStore);
+ 
+                 SpvInstruction imagePointerType = context.TypePointer(StorageClass.UniformConstant, imageType);
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -688,6 +688,15 @@
+         {
+             AstTextureOperation texOp = (AstTextureOperation)operation;
+ 
++            // OpImageRead with an Unknown image format requires this capability,
++            // including under Vulkan 1.3. The host must enable the matching device
++            // feature. Declare it at the read so write-only and typed images do
++            // not acquire an unnecessary read-without-format requirement.
++            if (texOp.Format == TextureFormat.Unknown)
++            {
++                context.AddCapability(Capability.StorageImageReadWithoutFormat);
++            }
++
+             AggregateType componentType = texOp.Format.GetComponentType();
+ 
+             bool isArray = (texOp.Type & SamplerType.Array) != 0;

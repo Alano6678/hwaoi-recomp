@@ -1,0 +1,4 @@
+/* Application manifest retained from the upstream Windows runtime.
+   The HWAoI source distribution does not include the legacy game artwork/icon.
+   tools/build_game.py compiles this resource with the runtime objects. */
+1 24 "totk.manifest"

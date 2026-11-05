@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/Lucas-blip-png/dkb-pc-recomp",
+  "branch": "bananza",
+  "commit": "42fcd9d78b4b44c2831b68ba21e5807d74a96f45",
+  "imported_on": "2026-11-05",
+  "tracked_files_imported": 781,
+  "license": "GPL-3.0-or-later overall; inherited MIT and third-party notices retained",
+  "adaptation": "Hyrule Warriors: Age of Imprisonment; full native build and initial 3D rendering verified, gameplay unverified"
+}

@@ -1,0 +1,57 @@
+name: Other bug
+description: Building, audio, controls, movies, saves, performance or game logic.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the pinned issues first.
+
+        Do not attach or link game files, keys, firmware, builds, shader caches or screenshots of the game. Issues that do are closed.
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Existing issues
+      options:
+        - label: I read the HWAoI README and searched this repository for existing reports.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Building from source
+        - Audio
+        - Controls and input
+        - Movies
+        - Saves
+        - Performance and stutter
+        - Game logic
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you built, from `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What happened and how to reproduce it
+      description: For a build problem, paste the command and the last lines of its output.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste relevant text from interactive or probe logs under work/reports/. Remove private paths; do not attach the whole folder.

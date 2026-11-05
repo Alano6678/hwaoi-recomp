@@ -1,0 +1,25 @@
+name: Feature request
+description: Something the port does not do yet, or a change to how it works.
+labels: [enhancement]
+body:
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Existing issues
+      options:
+        - label: I read the HWAoI README and searched this repository for existing reports.
+          required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: What you want and why
+    validations:
+      required: true
+  - type: dropdown
+    id: help
+    attributes:
+      label: Would you work on it?
+      options:
+        - "Yes, I would like to send a pull request"
+        - "I can help test it"
+        - "No"

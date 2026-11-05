@@ -1,0 +1,69 @@
+name: Crash
+description: The game closes, freezes, shows a FATAL message or loses the GPU.
+labels: [bug, crash]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        HWAoI Recomp is not ready to play. A good report helps identify the next problem.
+        Read the HWAoI README and CONTRIBUTING.md for current status, commands and report locations.
+
+        Do not attach or link game files, keys, firmware, builds, shader caches or screenshots of the game. Issues that do are closed.
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Existing issues
+      options:
+        - label: I read the HWAoI README and searched this repository for existing reports.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you built, from `git rev-parse --short HEAD`. Include the validated HWAoI input profile; NCM version is not a display version.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+      description: For example "Radeon RX 7800 XT, Adrenalin 25.10.1, Windows 11 24H2".
+    validations:
+      required: true
+  - type: dropdown
+    id: when
+    attributes:
+      label: When does it crash?
+      options:
+        - At startup, before any picture
+        - Before or on the title screen
+        - Loading the first 3D scene
+        - In a 3D scene
+        - During or right after a guide movie
+        - Further into the game
+    validations:
+      required: true
+  - type: dropdown
+    id: repeat
+    attributes:
+      label: Does it happen every time?
+      options:
+        - "Yes, at the same point every run"
+        - "Sometimes"
+        - "Only once so far"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did before the crash
+      description: Fresh profile or an existing save? Keyboard or controller? Any settings changed?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste relevant text from work/reports/interactive-<timestamp>/ or the probe output directory. Remove private paths; do not attach the whole folder.
+    validations:
+      required: true

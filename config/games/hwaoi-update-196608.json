@@ -1,0 +1,29 @@
+{
+  "title": "Hyrule Warriors: Age of Imprisonment",
+  "title_id": "04003F40232DE000",
+  "ncm_version": 196608,
+  "npdm_sha256": "c979f3c1bc4803349d8f1c6eeba941759aa0a5109144b563770239d568d48091",
+  "display_version": null,
+  "note": "NCM version is opaque; no display version is present in the supplied NUP metadata.",
+  "modules": {
+    "main": "4c33cfd4c818d9ed62822af792782b4ea443417ed24acea6f1cee739cde604c3",
+    "rtld": "b01d53da100a51eb40d408d7011cd5b09d7f4ee2578ef536d089855b51ee5e0f",
+    "sdk": "4617761033cab45951a19fa7797fa79ad691c46f324048f832484877d3df034c",
+    "subsdk0": "8f72c818479fa3410020a9c7bffe8dd2f6224d16f366bd0fe73adeb0201e0dee"
+  },
+  "validation_functions": [
+    {"module": "main", "address": 864, "size": 12, "label": "nndetailRoGetRoDataStart"},
+    {"module": "main", "address": 880, "size": 12, "label": "nndetailRoGetRoDataEnd"},
+    {"module": "subsdk0", "address": 1676, "size": 8, "label": "Buffer::SetCapacity"},
+    {"module": "subsdk0", "address": 1684, "size": 8, "label": "buffer_load_w_at_8"},
+    {"module": "subsdk0", "address": 1692, "size": 8, "label": "buffer_store_w_at_8"},
+    {"module": "subsdk0", "address": 1700, "size": 8, "label": "buffer_load_x_at_32"},
+    {"module": "subsdk0", "address": 1708, "size": 8, "label": "buffer_store_x_at_32"},
+    {"module": "subsdk0", "address": 1716, "size": 8, "label": "buffer_load_w_at_12"},
+    {"module": "subsdk0", "address": 1724, "size": 8, "label": "Buffer::SetUint32Data"},
+    {"module": "subsdk0", "address": 1732, "size": 8, "label": "buffer_store_x_at_48"},
+    {"module": "subsdk0", "address": 1740, "size": 8, "label": "buffer_store_x_at_56"},
+    {"module": "subsdk0", "address": 1748, "size": 8, "label": "buffer_load_x_at_48"},
+    {"module": "subsdk0", "address": 1756, "size": 8, "label": "buffer_load_x_at_56"}
+  ]
+}

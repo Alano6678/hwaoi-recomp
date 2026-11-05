@@ -1,0 +1,44 @@
+name: Graphics glitch
+description: Missing or broken objects, wrong textures or colours, flicker, black or frozen picture.
+labels: [bug, graphics]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read docs/hwaoi/port-status.md for the current rendering milestone and limitations. Lighting and performance remain under investigation.
+
+        Do not attach or link game files, keys, firmware, builds, shader caches or screenshots of the game. Describe what you see instead. Issues that break this are closed.
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Existing issues
+      options:
+        - label: I read the HWAoI README and searched this repository for existing reports.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you built, from `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What looks wrong, where and when
+      description: Which scene, what should be there, what is there instead. Does it show all the time or after some time?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste relevant text from interactive or probe logs under work/reports/. Include validation, shader or nvn2 diagnostics; do not attach shader payloads or the whole folder.
+    validations:
+      required: true

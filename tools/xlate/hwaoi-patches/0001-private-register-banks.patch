@@ -1,0 +1,441 @@
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs
+index 8bf5671..c1a418e 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs
+@@ -3810,6 +3810,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
+     {
+         private readonly ulong _opcode;
+         public InstMovR(ulong opcode) => _opcode = opcode;
++        public ulong RawOpcode => _opcode;
+         public int Dest => (int)(_opcode & 0xFF);
+         public int SrcA => (int)((_opcode >> 20) & 0xFF);
+         public int Pred => (int)((_opcode >> 16) & 0x7);
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs
+index 416fba9..b804860 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs
+@@ -2,12 +2,15 @@ namespace Ryujinx.Graphics.Shader.Decoders
+ {
+     static class RegisterConsts
+     {
+-        public const int GprsCount = 255;
++        // Native Maxwell still has R0..R254 and RZ=255. HWAoI's explicitly
++        // gated lowering protocol adds two IR-only banks, not hardware GPRs.
++        public const int ArchitecturalGprsCount = 255;
++        public const int GprsCount = 3 * 256;
+         public const int PredsCount = 7;
+         public const int FlagsCount = 4;
+         public const int TotalCount = GprsCount + PredsCount + FlagsCount;
+ 
+-        public const int RegisterZeroIndex = GprsCount;
++        public const int RegisterZeroIndex = ArchitecturalGprsCount;
+         public const int PredicateTrueIndex = PredsCount;
+     }
+ }
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs
+index 4c71272..d458f71 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs
+@@ -13,6 +13,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         {
+             InstMovR op = context.GetOp<InstMovR>();
+ 
++            if (HwaoiPrivateRegisters.TryDecodeMove(op.RawOpcode, context.TranslatorContext.Options.Flags,
++                                                   out int destination, out int source))
++            {
++                if (destination != RegisterConsts.RegisterZeroIndex)
++                    context.Copy(Register(destination, RegisterType.Gpr), Register(source, RegisterType.Gpr));
++                return;
++            }
+             context.Copy(GetDest(op.Dest), GetSrcReg(context, op.SrcA));
+         }
+ 
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/HwaoiPrivateRegisters.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/HwaoiPrivateRegisters.cs
+new file mode 100644
+index 0000000..1f689f5
+--- /dev/null
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/HwaoiPrivateRegisters.cs
+@@ -0,0 +1,132 @@
++// HWAoI private lowering protocol. Original adapter/probes; no game content.
++using Ryujinx.Graphics.Shader.Decoders;
++using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
++
++namespace Ryujinx.Graphics.Shader.Translation
++{
++    public static class HwaoiPrivateRegisters
++    {
++        private const ulong Marker = 0x5c98a00000070000UL;
++        private const ulong VariableBits = 0xffUL | (0xfUL << 8) | (0xffUL << 20);
++
++        internal static bool TryDecodeMove(ulong opcode, TranslationFlags flags, out int destination, out int source)
++        {
++            destination = source = 0;
++            if (((opcode >> 44) & 15) != 10) return false;
++            if (!flags.HasFlag(TranslationFlags.HwaoiPrivateRegisters))
++                throw new InvalidOperationException("HWAoI private register MOV requires hwaoi_ir_banks=1");
++            // Only the exact PT, non-inverted, zero-quadmask private MOV encoding
++            // is recognized. Do not reinterpret arbitrary Maxwell mode bits.
++            if ((opcode & ~VariableBits) != Marker)
++                throw new InvalidOperationException("Malformed HWAoI private register MOV");
++            int destinationBank = (int)((opcode >> 8) & 3), sourceBank = (int)((opcode >> 10) & 3);
++            if (destinationBank > 2 || sourceBank > 2)
++                throw new InvalidOperationException("HWAoI private register bank must be 0, 1 or 2");
++            destination = destinationBank * 256 + (int)(opcode & 255);
++            source = sourceBank * 256 + (int)((opcode >> 20) & 255);
++            return true;
++        }
++
++        private static ulong Encode(int destinationBank, int destination, int sourceBank, int source) =>
++            Marker | (ulong)(uint)destination | ((ulong)(uint)destinationBank << 8) |
++            ((ulong)(uint)sourceBank << 10) | ((ulong)(uint)source << 20);
++
++        // Pure translation/IR tests, exposed only to the command-line probe.
++        public static string Probe()
++        {
++            int checks = 0;
++            void Check(bool value, string reason)
++            {
++                checks++;
++                if (!value) throw new InvalidOperationException("IR-bank probe: " + reason);
++            }
++            void Reject(ulong instruction, TranslationFlags flags)
++            {
++                bool rejected = false;
++                try { TryDecodeMove(instruction, flags, out _, out _); }
++                catch (InvalidOperationException) { rejected = true; }
++                Check(rejected, "private encoding accepted without exact feature/shape");
++            }
++
++            Check(RegisterConsts.GprsCount == 768 && RegisterConsts.TotalCount == 779, "IR capacity");
++            Check(RegisterConsts.RegisterZeroIndex == 255, "architectural RZ changed");
++            Check(Register(255, RegisterType.Gpr).Type == OperandType.Constant, "bank0 RZ is not zero");
++            Check(Register(511, RegisterType.Gpr).Type == OperandType.Register, "bank1 register255 became RZ");
++            Check(Register(767, RegisterType.Gpr).GetRegister().Index == 767, "bank2 register255 lost");
++            int[] bytes = {0, 63, 64, 127, 128, 191, 192, 254, 255};
++            foreach (int db in Enumerable.Range(0, 3)) foreach (int sb in Enumerable.Range(0, 3))
++            foreach (int d in bytes) foreach (int s in bytes)
++            {
++                Check(TryDecodeMove(Encode(db, d, sb, s), TranslationFlags.HwaoiPrivateRegisters,
++                                    out int destination, out int source) &&
++                      destination == db * 256 + d && source == sb * 256 + s, "bank move mapping");
++            }
++            Reject(Encode(1, 255, 0, 1), TranslationFlags.None);
++            Reject(Encode(3, 1, 0, 1), TranslationFlags.HwaoiPrivateRegisters);
++            Reject(Encode(0, 1, 3, 1), TranslationFlags.HwaoiPrivateRegisters);
++            Reject(Encode(1, 1, 0, 1) ^ (1UL << 16), TranslationFlags.HwaoiPrivateRegisters);
++            Reject(Encode(1, 1, 0, 1) | (1UL << 39), TranslationFlags.HwaoiPrivateRegisters);
++            Check(!TryDecodeMove(0x5c98078000170000UL, TranslationFlags.None, out _, out _), "ordinary MOV changed");
++
++            // Test every live-mask boundary across all twelve 64-bit GPR masks.
++            int[] boundaries = {0, 63, 64, 127, 128, 191, 192, 254, 256, 319, 320, 383,
++                                384, 447, 448, 511, 512, 575, 576, 639, 640, 703, 704, 767};
++            foreach (int index in boundaries)
++            {
++                BasicBlock block = new(0);
++                int output = (index + 128) % 768;
++                if (output == RegisterConsts.RegisterZeroIndex) output--;
++                block.Operations.AddLast(new Operation(Instruction.Copy, Register(output, RegisterType.Gpr),
++                                                       Register(index, RegisterType.Gpr)));
++                block.Operations.AddLast(new Operation(Instruction.Return, (Operand)null));
++                var usage = RegisterUsage.RunPass(new ControlFlowGraph(new[] {block}));
++                Check(usage.InArguments.Any(r => r.Type == RegisterType.Gpr && r.Index == index), "live input mask crossing");
++                Check(usage.OutArguments.Any(r => r.Type == RegisterType.Gpr && r.Index == output), $"live output mask crossing {index}->{output}");
++            }
++
++            BasicBlock entry = new(0), left = new(1), right = new(2), join = new(3);
++            entry.Next = left; entry.Branch = right; left.Branch = join; right.Branch = join;
++            entry.Operations.AddLast(new Operation(Instruction.BranchIfTrue, Label(), Register(0, RegisterType.Predicate)));
++            foreach ((BasicBlock block, int gpr, int predicate, int flag) in new[] {
++                (left, 0x111, 0, 0x333), (right, 0x222, 1, 0x444)})
++            {
++                block.Operations.AddLast(new Operation(Instruction.Copy, Register(511, RegisterType.Gpr), Const(gpr)));
++                block.Operations.AddLast(new Operation(Instruction.Copy, Register(0, RegisterType.Predicate), Const(predicate)));
++                block.Operations.AddLast(new Operation(Instruction.Copy, Register(0, RegisterType.Flag), Const(flag)));
++                block.Operations.AddLast(new Operation(Instruction.Branch, Label()));
++            }
++            Operation readGpr = new(Instruction.Copy, Register(767, RegisterType.Gpr), Register(511, RegisterType.Gpr));
++            Operation readPredicate = new(Instruction.Copy, Register(512, RegisterType.Gpr), Register(0, RegisterType.Predicate));
++            Operation readFlag = new(Instruction.Copy, Register(513, RegisterType.Gpr), Register(0, RegisterType.Flag));
++            join.Operations.AddLast(readGpr); join.Operations.AddLast(readPredicate); join.Operations.AddLast(readFlag);
++            join.Operations.AddLast(new Operation(Instruction.Return, (Operand)null));
++            ControlFlowGraph cfg = new(new[] {entry, left, right, join});
++            Dominance.FindDominators(cfg);
++            Dominance.FindDominanceFrontiers(cfg.Blocks);
++            Ssa.Rename(cfg.Blocks);
++            Check(join.Operations.OfType<PhiNode>().Count() == 3, "three distinct GPR/predicate/flag phis required");
++            HashSet<int> Values(Operation read)
++            {
++                if (read.GetSource(0).AsgOp is not PhiNode phi) throw new InvalidOperationException("expected SSA phi");
++                HashSet<int> values = new();
++                for (int i = 0; i < phi.SourcesCount; i++)
++                {
++                    if (phi.GetSource(i).AsgOp is not Operation definition || definition.Inst != Instruction.Copy ||
++                        definition.GetSource(0).Type != OperandType.Constant)
++                        throw new InvalidOperationException("unexpected SSA defining operation");
++                    values.Add(definition.GetSource(0).Value);
++                }
++                return values;
++            }
++            Check(Values(readGpr).SetEquals(new[] {0x111, 0x222}), "GPR511 phi was aliased");
++            Check(Values(readPredicate).SetEquals(new[] {0, 1}), "predicate phi was aliased");
++            Check(Values(readFlag).SetEquals(new[] {0x333, 0x444}), "flag phi was aliased");
++            Check(!ReferenceEquals(readGpr.GetSource(0), readPredicate.GetSource(0)), "SSA GPR and predicate share a slot");
++            return $"probe-hwaoi-ir-banks: passed ({checks} checks; RZ255, GPR511/767, 12 live masks, SSA phis)";
++        }
++    }
++}
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs
+index c6bbb49..ecbfc08 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs
+@@ -9,108 +9,74 @@ namespace Ryujinx.Graphics.Shader.Translation
+ {
+     static class RegisterUsage
+     {
+-        private const int RegsCount = 256;
+-        private const int RegsMask = RegsCount - 1;
+-
+-        private const int GprMasks = 4;
++        private const int GprMasks = (RegisterConsts.GprsCount + 63) / 64;
+         private const int PredMasks = 1;
+         private const int FlagMasks = 1;
+         private const int TotalMasks = GprMasks + PredMasks + FlagMasks;
+ 
++        // Value storage is essential: a long[] here would alias when these masks
++        // are copied by the dataflow fixed-point operators.
++        [System.Runtime.CompilerServices.InlineArray(TotalMasks)]
++        private struct MaskStorage { private long _first; }
++
+         private struct RegisterMask : IEquatable<RegisterMask>
+         {
+-            public long GprMask0 { get; set; }
+-            public long GprMask1 { get; set; }
+-            public long GprMask2 { get; set; }
+-            public long GprMask3 { get; set; }
+-            public long PredMask { get; set; }
+-            public long FlagMask { get; set; }
+-
+-            public RegisterMask(long gprMask0, long gprMask1, long gprMask2, long gprMask3, long predMask, long flagMask)
++            private MaskStorage _bits;
++
++            public RegisterMask(long fill)
+             {
+-                GprMask0 = gprMask0;
+-                GprMask1 = gprMask1;
+-                GprMask2 = gprMask2;
+-                GprMask3 = gprMask3;
+-                PredMask = predMask;
+-                FlagMask = flagMask;
++                _bits = default;
++                for (int i = 0; i < TotalMasks; i++) _bits[i] = fill;
+             }
+ 
+             public readonly long GetMask(int index)
+             {
+-                return index switch
+-                {
+-                    0 => GprMask0,
+-                    1 => GprMask1,
+-                    2 => GprMask2,
+-                    3 => GprMask3,
+-                    4 => PredMask,
+-                    5 => FlagMask,
+-                    _ => throw new ArgumentOutOfRangeException(nameof(index)),
+-                };
++                if ((uint)index >= TotalMasks) throw new ArgumentOutOfRangeException(nameof(index));
++                return _bits[index];
+             }
+ 
+-            public static RegisterMask operator &(RegisterMask x, RegisterMask y)
++            public void SetMask(int index, long mask)
+             {
+-                return new RegisterMask(
+-                    x.GprMask0 & y.GprMask0,
+-                    x.GprMask1 & y.GprMask1,
+-                    x.GprMask2 & y.GprMask2,
+-                    x.GprMask3 & y.GprMask3,
+-                    x.PredMask & y.PredMask,
+-                    x.FlagMask & y.FlagMask);
++                if ((uint)index >= TotalMasks) throw new ArgumentOutOfRangeException(nameof(index));
++                _bits[index] = mask;
+             }
+ 
+-            public static RegisterMask operator |(RegisterMask x, RegisterMask y)
+-            {
+-                return new RegisterMask(
+-                    x.GprMask0 | y.GprMask0,
+-                    x.GprMask1 | y.GprMask1,
+-                    x.GprMask2 | y.GprMask2,
+-                    x.GprMask3 | y.GprMask3,
+-                    x.PredMask | y.PredMask,
+-                    x.FlagMask | y.FlagMask);
+-            }
+-
+-            public static RegisterMask operator ~(RegisterMask x)
++            public static RegisterMask operator &(RegisterMask x, RegisterMask y)
+             {
+-                return new RegisterMask(
+-                    ~x.GprMask0,
+-                    ~x.GprMask1,
+-                    ~x.GprMask2,
+-                    ~x.GprMask3,
+-                    ~x.PredMask,
+-                    ~x.FlagMask);
++                RegisterMask result = default;
++                for (int i = 0; i < TotalMasks; i++) result._bits[i] = x._bits[i] & y._bits[i];
++                return result;
+             }
+ 
+-            public static bool operator ==(RegisterMask x, RegisterMask y)
++            public static RegisterMask operator |(RegisterMask x, RegisterMask y)
+             {
+-                return x.Equals(y);
++                RegisterMask result = default;
++                for (int i = 0; i < TotalMasks; i++) result._bits[i] = x._bits[i] | y._bits[i];
++                return result;
+             }
+ 
+-            public static bool operator !=(RegisterMask x, RegisterMask y)
++            public static RegisterMask operator ~(RegisterMask x)
+             {
+-                return !x.Equals(y);
++                RegisterMask result = default;
++                for (int i = 0; i < TotalMasks; i++) result._bits[i] = ~x._bits[i];
++                return result;
+             }
+ 
+-            public readonly override bool Equals(object obj)
+-            {
+-                return obj is RegisterMask regMask && Equals(regMask);
+-            }
++            public static bool operator ==(RegisterMask x, RegisterMask y) => x.Equals(y);
++            public static bool operator !=(RegisterMask x, RegisterMask y) => !x.Equals(y);
++            public readonly override bool Equals(object obj) => obj is RegisterMask other && Equals(other);
+ 
+             public readonly bool Equals(RegisterMask other)
+             {
+-                return GprMask0 == other.GprMask0 &&
+-                       GprMask1 == other.GprMask1 &&
+-                       GprMask2 == other.GprMask2 &&
+-                       GprMask3 == other.GprMask3 &&
+-                       PredMask == other.PredMask &&
+-                       FlagMask == other.FlagMask;
++                for (int i = 0; i < TotalMasks; i++) if (_bits[i] != other._bits[i]) return false;
++                return true;
+             }
+ 
+             public readonly override int GetHashCode()
+             {
+-                return HashCode.Combine(GprMask0, GprMask1, GprMask2, GprMask3, PredMask, FlagMask);
++                HashCode hash = new();
++                for (int i = 0; i < TotalMasks; i++) hash.Add(_bits[i]);
++                return hash.ToHashCode();
+             }
+         }
+ 
+@@ -174,7 +140,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             RegisterMask[] globalOutputs = new RegisterMask[cfg.Blocks.Length];
+ 
+             RegisterMask allOutputs = new();
+-            RegisterMask allCmnOutputs = new(-1L, -1L, -1L, -1L, -1L, -1L);
++            RegisterMask allCmnOutputs = new(-1L);
+ 
+             bool modified;
+ 
+@@ -348,24 +314,24 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         private static RegisterMask GetMask(Register register)
+         {
+-            Span<long> gprMasks = stackalloc long[4];
+-            long predMask = 0;
+-            long flagMask = 0;
++            RegisterMask result = default;
+ 
+             switch (register.Type)
+             {
+                 case RegisterType.Gpr:
+-                    gprMasks[register.Index >> 6] = 1L << (register.Index & 0x3f);
++                    if ((uint)register.Index >= RegisterConsts.GprsCount)
++                        throw new ArgumentOutOfRangeException(nameof(register));
++                    result.SetMask(register.Index >> 6, 1L << (register.Index & 0x3f));
+                     break;
+                 case RegisterType.Predicate:
+-                    predMask = 1L << register.Index;
++                    result.SetMask(GprMasks, 1L << register.Index);
+                     break;
+                 case RegisterType.Flag:
+-                    flagMask = 1L << register.Index;
++                    result.SetMask(GprMasks + 1, 1L << register.Index);
+                     break;
+             }
+ 
+-            return new RegisterMask(gprMasks[0], gprMasks[1], gprMasks[2], gprMasks[3], predMask, flagMask);
++            return result;
+         }
+ 
+         private static bool Exchange(RegisterMask[] masks, int blkIndex, RegisterMask value)
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs
+index 89aaa3b..8a3eb15 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Graphics.Shader.Decoders;
+ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using System;
+ using System.Collections.Generic;
+ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
+ 
+@@ -344,6 +345,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+         {
+             if (reg.Type == RegisterType.Gpr)
+             {
++                if ((uint)reg.Index >= RegisterConsts.GprsCount)
++                    throw new ArgumentOutOfRangeException(nameof(reg), "IR GPR index exceeds all three banks");
+                 return reg.Index;
+             }
+             else if (reg.Type == RegisterType.Predicate)
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/TranslationFlags.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/TranslationFlags.cs
+index df1e76a..e66519a 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/TranslationFlags.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/TranslationFlags.cs
+@@ -10,5 +10,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         VertexA = 1 << 0,
+         Compute = 1 << 1,
+         DebugMode = 1 << 2,
++        // Private Ampere-lowering wire protocol, accepted only with explicit job metadata.
++        HwaoiPrivateRegisters = 1 << 3,
+     }
+ }
+diff --git a/xlate/Program.cs b/xlate/Program.cs
+index 3476564..f366a93 100644
+--- a/xlate/Program.cs
++++ b/xlate/Program.cs
+@@ -263,6 +263,12 @@ static class SwshXlate
+                 // 作业 debug = false：关 DebugMode（DebugMode 会跳过 AST 优化器，产物满是临时变量；不改语义）
+                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
+                 var flags = (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0);
++                if (job.TryGetPropertyValue("hwaoi_ir_banks", out JsonNode bankVersion))
++                {
++                    if (bankVersion is not JsonValue value || !value.TryGetValue<int>(out int version) || version != 1)
++                        throw new InvalidDataException("hwaoi_ir_banks must be integer protocol version 1");
++                    flags |= TranslationFlags.HwaoiPrivateRegisters;
++                }
+                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                 if (acc.GeometryVersion == 2)
+                     ctx.SetGeometryPassthroughAttributes(acc.GeometryPassthroughAttributes);
+@@ -336,6 +342,11 @@ static class SwshXlate
+ 
+     static int Main(string[] args)
+     {
++        if (args.Length == 1 && args[0] == "--probe-hwaoi-ir-banks")
++        {
++            Console.WriteLine(HwaoiPrivateRegisters.Probe());
++            return 0;
++        }
+         if (args.Length == 1 && args[0] == "--probe-nvn2-c0") return ProbeNvn2C0();
+         if (args.Length == 1 && args[0] == "--serve")
+         {
