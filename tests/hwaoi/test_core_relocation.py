@@ -73,6 +73,7 @@ static uint64_t kern_now_ns(void) { return ++now; }
 static void lock(void) { CHECK(!lock_depth); lock_depth++; }
 static void unlock(void) { CHECK(lock_depth == 1); lock_depth--; }
 static int eff_prio(const RtThread *t) { return t->effective; }
+static void priority_diag_site(unsigned site) { (void)site; }
 static int cores_enabled(void) { return 1; }
 static void acct(RtThread *t, int st) { (void)t; (void)st; }
 static void plat_cond_signal(int *cv) { (*cv)++; signals++; }

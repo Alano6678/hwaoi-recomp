@@ -23,6 +23,7 @@ def source():
 #include <stdlib.h>
 #include <stdarg.h>
 #include "vk_exec.h"
+#include "tex.h"
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"check line %d: %s\n",__LINE__,#x);exit(1); } } while(0)
 static unsigned logs, lookup_calls, storage_calls;
 static int resolve=1, accept=1;
@@ -32,6 +33,13 @@ static VkTexImage texture={.image=(VkImage)(uintptr_t)88,.addr=0x12340000,.forma
     .type=VK_IMAGE_TYPE_2D,.view_type=VK_IMAGE_VIEW_TYPE_CUBE_ARRAY,.usage=VK_IMAGE_USAGE_SAMPLED_BIT};
 static view_t selected={.set_format=1,.format=37,.set_levels=1,.base_level=2,.nlevels=1,
     .set_layers=1,.min_layer=6,.nlayers=6};
+int tex_vk_format(int format,TexVkFormat *out) {
+    memset(out,0,sizeof *out);
+    if(format==37)out->vk=out->ideal=VK_FORMAT_R8G8B8A8_UNORM;
+    else if(format==56)out->vk=out->ideal=VK_FORMAT_R8G8B8A8_SRGB;
+    else return 0;
+    return 1;
+}
 void rt_log(const char *fmt,...) {va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof line,fmt,ap);va_end(ap);logs++;}
 const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool,int id,view_t *v,int *hv) {
     CHECK(pool->addr==0x10000 && pool->count==16 && id==5);lookup_calls++;
@@ -56,7 +64,7 @@ static VkImageView storage_dummy(int index,int code) {(void)index;(void)code;ret
     main = r'''
 int main(int argc,char **argv) {
     CHECK(argc==2);const char *mode=argv[1];
-    _putenv_s("HWAOI_IMAGE_DIAG",!strcmp(mode,"off") ? "0" : "1");
+    _putenv_s("HWAOI_IMAGE_DIAG",strstr(mode,"off") ? "0" : "1");
     Z.samp=(VkSampler)(uintptr_t)11;Z.samp_shadow=(VkSampler)(uintptr_t)22;
     for(int i=0;i<DV_COUNT;i++)Z.img[i].view=(VkImageView)(uintptr_t)(100+i);
     VkExec ex={.tex_pool={.addr=0x10000,.count=16}};
@@ -69,6 +77,7 @@ int main(int argc,char **argv) {
     else if(!strcmp(mode,"ordinary-depth"))texture.aspect=VK_IMAGE_ASPECT_DEPTH_BIT,r.type=0x105;
     else if(!strcmp(mode,"storage"))storage=1;
     else if(!strcmp(mode,"separate"))separate=1;
+    else if(!strncmp(mode,"format",6))r.type=0x105,selected.format=!strcmp(mode,"format-unknown")?255:56;
     else CHECK(!strcmp(mode,"off") || !strcmp(mode,"colour") || !strcmp(mode,"limit"));
     const VkTexImage expected_texture=texture;const view_t expected_view=selected;
     VkDescriptorImageInfo out;VkImage image;
@@ -81,7 +90,23 @@ int main(int argc,char **argv) {
     CHECK(lookup_calls==(h?1u:0u) && storage_calls==(storage?1u:0u));
     int expect_log=strcmp(mode,"off") && !storage && (r.type&0x400) &&
         (fallback || !(texture.aspect&VK_IMAGE_ASPECT_DEPTH_BIT));
-    CHECK(logs==(unsigned)expect_log);
+    int format_log=!strncmp(mode,"format",6) && !strstr(mode,"off");
+    CHECK(logs==(unsigned)(expect_log+format_log));
+    if(format_log) {
+        CHECK(strstr(line,"image-diag: sampled-format binding=18 slot=8"));
+        CHECK(strstr(line,"format_policy=explicit-compatible"));
+        CHECK(strstr(line,!strcmp(mode,"format-unknown")?"requested_known=0":"requested_known=1"));
+        for(int i=0;i<100;i++)tex_info_full(&ex,&r,h,storage,separate,&out,&image);
+        CHECK(logs==1 && out.imageView==(VkImageView)(uintptr_t)99 && out.sampler==(VkSampler)(uintptr_t)33);
+        if(!strcmp(mode,"format-limit")) {
+            for(int i=1;i<160;i++) {
+                texture.image=(VkImage)(uintptr_t)(88+i);
+                tex_info_full(&ex,&r,h,storage,separate,&out,&image);
+            }
+            CHECK(logs==129 && strstr(line,"observation limit reached"));
+            CHECK(out.imageView==(VkImageView)(uintptr_t)99 && out.sampler==(VkSampler)(uintptr_t)33);
+        }
+    }
     if(expect_log) {
         CHECK(strstr(line,"binding=18 slot=8 shader_handle=0x18 type=0x505"));
         CHECK(strstr(line,fallback?"fallback=1":"fallback=0"));
@@ -98,7 +123,8 @@ int main(int argc,char **argv) {
 '''
     return (preamble + enums + body + function(draw, "static VkImageViewType res_view_type(") +
             function(draw, "static int dummy_index(") + function(draw, "VkImageAspectFlags vk_exec_view_aspect(") +
-            function(draw, "static void image_binding_diag(") + function(full, "static void tex_info_full(") + main)
+            function(draw, "static void sampled_format_diag(") + function(draw, "static void image_binding_diag(") +
+            function(full, "static void tex_info_full(") + main)
 
 
 @unittest.skipUnless(os.name == "nt" and CC.is_file() and DEPS.is_dir(), "Windows Clang and Vulkan headers required")
@@ -114,7 +140,7 @@ class ImageBindingDiagnosticTests(unittest.TestCase):
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                 for case in ("off", "colour", "unbound", "missing", "rejected-view", "depth", "ordinary-depth",
-                             "storage", "separate", "limit"):
+                             "storage", "separate", "limit", "format", "format-off", "format-unknown", "format-limit"):
                     with self.subTest(opt=opt,case=case):
                         result=subprocess.run([str(exe),case],capture_output=True,text=True,timeout=10)
                         self.assertEqual(result.returncode,0,result.stdout+result.stderr)

@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "game_target.h"
+#include "cfg.h"
+#include "hwaoi_rate.h"
 
 #include "gfx.h"
 #include "host.h"
@@ -800,6 +803,20 @@ NVN_API(nvnWindowSetCrop) {
 // 2nd or 3rd tick would only add latency and 50 ms frames.
 #define VSYNC_HZ 60ull
 static uint64_t present_period(const win_t *o) {
+#if RT_TARGET_HWAOI
+    const char *rate_experiment = cfg_get("TOTK_EXPERIMENTAL_RATE");
+    if (rate_experiment && !strcmp(rate_experiment, "1")) {
+        uint64_t period;
+        const char *value = cfg_get("TOTK_FPS_LIMIT");
+        if (!hwaoi_rate_period(value, &period))
+            rt_fatal("HWAoI experimental rate requires FPS_LIMIT 30, 60, 90 or 120");
+        static volatile int64_t previous;
+        if ((uint64_t)plat_xchg64(&previous, (int64_t)period) != period) {
+            rt_log("HWAoI: experimental presentation target %s FPS; game-speed qualification is pending", value ? value : "60");
+        }
+        return period;
+    }
+#endif
     if (frame_step_realtime()) return frame_step_cap_ns();
     return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * 1000000000ull / VSYNC_HZ;
 }

@@ -282,9 +282,11 @@ static void series_shot(const tex_t *t, const int crop[4], uint64_t n) {
     static int parsed;
     static unsigned long long lo, hi, step, next;
     static const char *dir;
-    static int full, world;
+    static int full, world, latest;
     if (!parsed) {
         full = cfg_get("TOTK_SHOTS_FULL") != NULL;
+        const char *keep_latest = cfg_get("TOTK_SHOTS_LATEST");
+        latest = keep_latest && !strcmp(keep_latest, "1");
         const char *e = cfg_get("TOTK_SHOTS");
         double wl, wh, ws;
         if (e && e[0] == 'w' && sscanf(e + 1, "%lf-%lf:%lf", &wl, &wh, &ws) == 3 && ws > 0)   // world-clock seconds
@@ -331,8 +333,17 @@ static void series_shot(const tex_t *t, const int crop[4], uint64_t n) {
             o[3] = 255;
         }
     char path[PLAT_PATH_MAX];
-    snprintf(path, sizeof path, "%s/f%05llu.png", dir, (unsigned long long)n);
+    if (latest) snprintf(path, sizeof path, "%s/latest.tmp.png", dir);
+    else snprintf(path, sizeof path, "%s/f%05llu.png", dir, (unsigned long long)n);
     rt_write_png(path, out, ow, oh);
+    if (latest) {
+        char target[PLAT_PATH_MAX];
+        snprintf(target, sizeof target, "%s/latest.png", dir);
+        if (!plat_file_replace(path, target)) {
+            static unsigned warnings;
+            if (++warnings <= 4) rt_log("boot: could not replace diagnostic snapshot %s", target);
+        }
+    }
     free(out);
     free(px);
 }

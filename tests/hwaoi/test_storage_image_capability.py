@@ -136,6 +136,7 @@ static Chain *make(void) {
  VkPhysicalDeviceFeatures *h=&c->f2.features;
  h->shaderStorageImageReadWithoutFormat=h->shaderStorageImageWriteWithoutFormat=1;
  h->shaderInt64=h->samplerAnisotropy=h->independentBlend=h->geometryShader=h->textureCompressionBC=1;
+ h->drawIndirectFirstInstance=1;
  return c;
 }
 int main(void) {
@@ -147,6 +148,8 @@ int main(void) {
  c=make();c->f2.features.shaderStorageImageReadWithoutFormat=0;
  c->f2.features.shaderStorageImageWriteWithoutFormat=0;
  assert(!accept(c));assert(!strcmp(missing,"shaderStorageImageReadWithoutFormat"));
+ c=make();c->f2.features.drawIndirectFirstInstance=0;
+ assert(!accept(c));assert(!strcmp(missing,"drawIndirectFirstInstance"));
  puts("device unformatted image feature checks passed");return 0;
 }
 '''

@@ -68,6 +68,7 @@ struct RtThread {
     uint32_t wtag, wres;
     uint64_t wseq;             // registration order: equal priority wakes first come first
     RtThread *next;            // wait list
+    RtThread *lock_next;       // W_LOCK subset of the wait list, in the same order (holding G)
     RtThread *all;             // every thread
     // virtual core
     int cur_core;              // core held while running guest code, -1 while blocked
@@ -113,6 +114,7 @@ static _Thread_local RtThread *tcur;
 _Static_assert(offsetof(RtThread, preempt) == 0, "host.h kern_preempt_pending reads the first int");
 _Static_assert(offsetof(RtThread, host_depth) == sizeof(int), "host.h kern_host_depth reads the second int");
 static RtThread *g_all, *g_wait, *g_main;
+static RtThread *g_lock_wait;   // only mutex waiters can donate priority; no cached priority/owner word
 static uint64_t g_next_id = 0x51, g_wseq, g_created;
 static uint64_t g_main_stack;
 
@@ -208,7 +210,25 @@ static RtThread *cur(uint32_t svc) {
 }
 
 // ---- wait primitives (holding G)
+static void wait_lock_link(RtThread *t) {
+    // Preserve g_wait's order, including a condvar waiter converted in place. A newly blocked thread is at the
+    // head, so the usual insertion is O(1); only a condvar-to-lock conversion walks the preceding waiters.
+    RtThread **p = &g_lock_wait;
+    for (RtThread *w = g_wait; w != t; w = w->next)
+        if (w->wkind == W_LOCK) p = &w->lock_next;
+    t->lock_next = *p;
+    *p = t;
+}
+
 static void wait_unlink(RtThread *t) {
+    if (t->wkind == W_LOCK) {
+        for (RtThread **p = &g_lock_wait; *p; p = &(*p)->lock_next)
+            if (*p == t) {
+                *p = t->lock_next;
+                break;
+            }
+        t->lock_next = NULL;
+    }
     for (RtThread **p = &g_wait; *p; p = &(*p)->next)
         if (*p == t) {
             *p = t->next;
@@ -255,6 +275,7 @@ static uint32_t block_inner(RtThread *t, int kind, int64_t ns) {
     t->wseq = ++g_wseq;
     t->next = g_wait;
     g_wait = t;
+    if (kind == W_LOCK) wait_lock_link(t);
     if (ns == 0) {
         wait_unlink(t);
         t->wkind = W_NONE;
@@ -339,6 +360,12 @@ static int core_allowed(const RtThread *t, int c) { return (int)((t->mask >> c) 
 #define AP_FIRST_NS 250000ull   // the waiter spins this long before the first interruption (most waits end sooner)
 #define AP_GAP_NS 1000000ull    // and interrupts the same owner at most this often
 static int g_ap = -1, g_ap_int;   // g_ap_int: interrupt owners (TOTK_ASYNC_PREEMPT=2: inheritance and disable only)
+// Opt-in counters only: no per-query clock reads, allocation, or cached owners/priorities.
+typedef struct PriorityDiag { uint64_t calls, visits, loads, donations; } PriorityDiag;
+static PriorityDiag g_priority_counts[2]; // [0] all callers, [1] calls executing on the guest main thread
+static uint64_t g_priority_sites[2][3]; // core_grant, core_better_waiter, core_kick entries
+static uint64_t g_priority_yields[2][6]; // argument 0/-1/-2/other, then give/keep outcomes
+static int g_priority_diag;
 static int g_ap_log;              // redirects logged so far (AP_LOG_N)
 #define AP_LOG_N 40
 static uintptr_t g_gen_lo, g_gen_hi;   // host code of the lifted modules: first and last function start
@@ -347,6 +374,8 @@ void kern_ap_stub(void);
 
 static void ap_init(void) {
     if (g_ap >= 0) return;
+    const char *pd = cfg_get("TOTK_PRIORITY_DIAG");
+    g_priority_diag = pd && !strcmp(pd, "1");
     const char *e = cfg_value("TOTK_ASYNC_PREEMPT");
     g_ap = strcmp(e, "0") != 0;
     g_ap_int = g_ap && strcmp(e, "2") != 0;
@@ -381,11 +410,35 @@ static void ap_init(void) {
 }
 
 // Horizon's priority inheritance: o counts at the priority of the best thread blocked on a guest mutex it owns (the
-// owner is read from the mutex word, so it follows hand-offs). Holding G.
-static int eff_prio(const RtThread *o) {
+// owner is read from the mutex word, so it follows hand-offs). The index skips other wait kinds but preserves the
+// original one-hop calculation and reads current priorities/owner words on every call. Holding G.
+static int priority_diag_eval(const RtThread *o) {
     int p = o->prio;
-    for (const RtThread *w = g_wait; w; w = w->next)
-        if (w->wkind == W_LOCK && w->prio < p && w->waddr &&
+    PriorityDiag sample = {.calls = 1};
+    for (const RtThread *w = g_lock_wait; w; w = w->lock_next) {
+        sample.visits++;
+        if (w->prio < p && w->waddr) {
+            sample.loads++;
+            if ((__atomic_load_n((const uint32_t *)(uintptr_t)w->waddr, __ATOMIC_RELAXED) & ~WAITERS_BIT) == o->handle)
+                p = w->prio;
+        }
+    }
+    sample.donations = p < o->prio;
+    for (int i = 0; i < 2; i++) {
+        if (i && (!g_main || tcur != g_main)) break;
+        g_priority_counts[i].calls += sample.calls;
+        g_priority_counts[i].visits += sample.visits;
+        g_priority_counts[i].loads += sample.loads;
+        g_priority_counts[i].donations += sample.donations;
+    }
+    return p;
+}
+
+static int eff_prio(const RtThread *o) {
+    if (g_priority_diag) return priority_diag_eval(o);
+    int p = o->prio;
+    for (const RtThread *w = g_lock_wait; w; w = w->lock_next)
+        if (w->prio < p && w->waddr &&
             (__atomic_load_n((const uint32_t *)(uintptr_t)w->waddr, __ATOMIC_RELAXED) & ~WAITERS_BIT) == o->handle)
             p = w->prio;
     return p;
@@ -393,6 +446,79 @@ static int eff_prio(const RtThread *o) {
 
 // The priority the virtual cores go by: raw with TOTK_ASYNC_PREEMPT=0, as before.
 static int prio_of(const RtThread *t) { return g_ap > 0 ? eff_prio(t) : t->prio; }
+
+static void priority_diag_site(unsigned site) {
+    if (!g_priority_diag) return;
+    g_priority_sites[0][site]++;
+    if (g_main && tcur == g_main) g_priority_sites[1][site]++;
+}
+
+// Called while G is held, before the host yield. These counts establish which
+// yield path is exercised; they do not infer a duration from a syscall sample.
+static void priority_diag_yield(int64_t ns, int give) {
+    if (!g_priority_diag) return;
+    unsigned kind = ns == 0 ? 0 : ns == -1 ? 1 : ns == -2 ? 2 : 3;
+    for (unsigned i = 0; i < 2; i++) {
+        if (i && (!g_main || tcur != g_main)) break;
+        g_priority_yields[i][kind]++;
+        g_priority_yields[i][give ? 4 : 5]++;
+    }
+}
+
+// Holding G. Counts are exact over the reporting interval; the waiter distribution is only a snapshot.
+// Address storage is capped, with an explicit lower-bound marker. No mutex word is read by this snapshot.
+static void priority_diag_snapshot(char *dst, size_t size, uint64_t frame) {
+    if (size) dst[0] = 0;
+    if (!g_priority_diag) return;
+    uint64_t addresses[256];
+    unsigned naddr = 0, capped = 0, waits = 0, locks = 0, invalid = 0, prios[64] = {0};
+    for (const RtThread *w = g_wait; w; w = w->next) waits++;
+    for (const RtThread *w = g_lock_wait; w; w = w->lock_next) {
+        locks++;
+        if ((unsigned)w->prio < 64) prios[w->prio]++; else invalid++;
+        if (!w->waddr) continue;
+        unsigned i = 0;
+        while (i < naddr && addresses[i] != w->waddr) i++;
+        if (i == naddr) {
+            if (naddr < sizeof addresses / sizeof addresses[0]) addresses[naddr++] = w->waddr;
+            else capped = 1;
+        }
+    }
+    char distribution[1024] = ""; // all 64 priorities fit even with 10-digit counts
+    size_t used = 0;
+    for (unsigned p = 0; p < 64; p++) if (prios[p]) {
+        int n = snprintf(distribution + used, sizeof distribution - used, "%s%u:%u", used ? "," : "", p, prios[p]);
+        if (n < 0 || (size_t)n >= sizeof distribution - used) break;
+        used += (size_t)n;
+    }
+    const PriorityDiag *all = &g_priority_counts[0], *main = &g_priority_counts[1];
+    snprintf(dst, size, "priority-diag: frame %llu calls=%llu visits=%llu owner_loads=%llu donated_queries=%llu "
+             "main_calls=%llu main_visits=%llu main_owner_loads=%llu main_donated_queries=%llu "
+             "waiters=%u lock_waiters=%u unique_mutexes=%u%s priorities=%s invalid_priorities=%u snapshot=instantaneous",
+             (unsigned long long)frame, (unsigned long long)all->calls, (unsigned long long)all->visits,
+             (unsigned long long)all->loads, (unsigned long long)all->donations,
+             (unsigned long long)main->calls, (unsigned long long)main->visits,
+             (unsigned long long)main->loads, (unsigned long long)main->donations,
+             waits, locks, naddr, capped ? "+" : "", used ? distribution : "none", invalid);
+    size_t used_text = strlen(dst);
+    if (used_text < size)
+        snprintf(dst + used_text, size - used_text,
+                 " sources_grant_better_kick=%llu/%llu/%llu main_sources=%llu/%llu/%llu "
+                 "yield_0_m1_m2_other_give_keep=%llu/%llu/%llu/%llu/%llu/%llu "
+                 "main_yields=%llu/%llu/%llu/%llu/%llu/%llu",
+                 (unsigned long long)g_priority_sites[0][0], (unsigned long long)g_priority_sites[0][1],
+                 (unsigned long long)g_priority_sites[0][2], (unsigned long long)g_priority_sites[1][0],
+                 (unsigned long long)g_priority_sites[1][1], (unsigned long long)g_priority_sites[1][2],
+                 (unsigned long long)g_priority_yields[0][0], (unsigned long long)g_priority_yields[0][1],
+                 (unsigned long long)g_priority_yields[0][2], (unsigned long long)g_priority_yields[0][3],
+                 (unsigned long long)g_priority_yields[0][4], (unsigned long long)g_priority_yields[0][5],
+                 (unsigned long long)g_priority_yields[1][0], (unsigned long long)g_priority_yields[1][1],
+                 (unsigned long long)g_priority_yields[1][2], (unsigned long long)g_priority_yields[1][3],
+                 (unsigned long long)g_priority_yields[1][4], (unsigned long long)g_priority_yields[1][5]);
+    memset(g_priority_counts, 0, sizeof g_priority_counts);
+    memset(g_priority_sites, 0, sizeof g_priority_sites);
+    memset(g_priority_yields, 0, sizeof g_priority_yields);
+}
 
 // TLR+0x100 disable_count, +0x102 interrupt_flag (any thread may read them; the flag is set from outside as the
 // kernel does).
@@ -838,6 +964,7 @@ static struct DgRel g_dg_rel;   // TOTK_CORE_DIAG: the owner core_put is releasi
 static void core_kick(void);
 
 static void core_grant(int c) {
+    priority_diag_site(0);
     RtThread *b = NULL, **bp = NULL;
     int bpri = 0;
     for (RtThread **p = &g_core_wait; *p; p = &(*p)->cnext) {
@@ -898,6 +1025,7 @@ static int core_can_relocate(const RtThread *t, int from) {
 // Whether a waiter may displace t on core c. Recheck idle capacity here: another
 // thread may have taken the alternative core since core_kick requested a yield.
 static int core_better_waiter(const RtThread *t, int c) {
+    priority_diag_site(1);
     int tp = prio_of(t);
     for (const RtThread *w = g_core_wait; w; w = w->cnext)
         if (core_allowed(w, c)) {
@@ -912,6 +1040,7 @@ static int core_better_waiter(const RtThread *t, int c) {
 // holder is eligible only if it can relocate to an idle allowed core. Asking every worse holder made several drop
 // their cores for one waiter; the spare cores went to worse waiters, which asked again.
 static void core_kick(void) {
+    priority_diag_site(2);
     RtThread *w[64];
     int wp[64], op[NCORE], n = 0, claimed = 0;
     for (int i = 0; i < NCORE; i++) op[i] = g_core_owner[i] ? prio_of(g_core_owner[i]) : 0;
@@ -1262,6 +1391,7 @@ void kern_sched_report(uint64_t frame) {
     Row rows[REP_N + 1];
     WaitRec rw[2][4] = {0};   // the render and the main thread's longest waits
     int nr = 0;
+    char priority_text[2048];
     RtThread *self = tcur;
     lock();
     if (g_render != self) {
@@ -1275,6 +1405,7 @@ void kern_sched_report(uint64_t frame) {
         unlock();
         return;
     }
+    priority_diag_snapshot(priority_text, sizeof priority_text, frame);
     uint64_t now = kern_now_ns(), span = last ? now - last : 0;
     last = now;
     RtThread *top[REP_N + 1] = {0};
@@ -1343,6 +1474,7 @@ void kern_sched_report(uint64_t frame) {
     g_pre_req = g_pre_n = g_pre_ns = g_pre_max = g_pre_stale = 0;
     g_sync_calls = g_sync_blocks = 0;
     unlock();
+    if (priority_text[0]) rt_log("%s", priority_text);
     if (!span) return;
     rt_log("sched: frame %llu: %.2f s, cores busy %.2f of %d, core wait %.2f thread-s, preempt req %llu released %llu "
            "avg %.2f ms max %.2f ms, WaitSynchronization %llu calls %llu blocks, stale preempt %llu%s",
@@ -1422,6 +1554,7 @@ static void lock_acquire_for(RtThread *t, uint64_t addr, uint32_t tag) {
     t->waddr = addr;
     t->wtag = tag;
     t->wseq = ++g_wseq;
+    wait_lock_link(t);
 }
 
 // ---- threads
@@ -1756,6 +1889,7 @@ int kern_svc(Cpu *c, uint32_t imm) {
             core_put(t);
             core_take(t);
         }
+        priority_diag_yield(ns, give);
         unlock();
         if (!give) plat_yield();
         return 1;

@@ -108,6 +108,42 @@ static int host_off(void) {
     return v;
 }
 
+// Diagnostic observers retain the guest demuxer. Only imported JUMP_SLOT calls
+// are observed (not internal calls or vtable entries), and no source bytes or
+// output buffers are read. This distinguishes an extractor failure from a
+// decoder that was never constructed without claiming complete call coverage.
+static void movie_extract_observe(Cpu *c, unsigned which) {
+    static const char *const names[] = {"Extractor::ctor", "MediaExtractor::Initialize",
+        "MediaExtractor::SetUriMedia", "MediaExtractor::SetInMemoryMedia", "MediaExtractor::GetTrackCount",
+        "MediaExtractor::Start", "MediaExtractor::SetUpMediaSourceMode"};
+    static uint64_t counts[sizeof names / sizeof *names];
+    int enabled = (rt_trace & RT_TRACE_CODEC) != 0;
+    uint64_t count = enabled ? __atomic_add_fetch(&counts[which], 1, __ATOMIC_RELAXED) : 0;
+    int emit = enabled && (count <= 16 || !(count % 16384));
+    uint64_t object = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], caller = c->x[30];
+    if (emit) rt_log("movie-extract: enter %s call=%llu object=%#llx x1=%#llx x2=%#llx x3=%#llx caller=%#llx",
+                     names[which], (unsigned long long)count, (unsigned long long)object,
+                     (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)caller);
+    rt_original(c);
+    if (emit) rt_log("movie-extract: leave %s call=%llu object=%#llx x0=%#llx",
+                     names[which], (unsigned long long)count, (unsigned long long)object, (unsigned long long)c->x[0]);
+}
+
+static void movie_extract_ctor(Cpu *c) { movie_extract_observe(c, 0); }
+static void movie_extract_init(Cpu *c) { movie_extract_observe(c, 1); }
+static void movie_extract_uri(Cpu *c) { movie_extract_observe(c, 2); }
+static void movie_extract_memory(Cpu *c) { movie_extract_observe(c, 3); }
+static void movie_extract_tracks(Cpu *c) { movie_extract_observe(c, 4); }
+static void movie_extract_start(Cpu *c) { movie_extract_observe(c, 5); }
+static void movie_extract_source(Cpu *c) { movie_extract_observe(c, 6); }
+HOST_OBSERVER("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extract_ctor);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor10InitializeEPvmm", movie_extract_init);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor11SetUriMediaEPKci", movie_extract_uri);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor16SetInMemoryMediaEPKvm", movie_extract_memory);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor13GetTrackCountEPi", movie_extract_tracks);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor5StartEv", movie_extract_start);
+HOST_OBSERVER("_ZN2nn5movie14MediaExtractor20SetUpMediaSourceModeEv", movie_extract_source);
+
 static uint64_t need(const char *name) {
     uint64_t a = ldr_symbol(name);
     if (!a) rt_fatal("movie: guest symbol %s is not loaded", name);

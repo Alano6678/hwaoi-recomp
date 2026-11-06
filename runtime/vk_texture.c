@@ -428,6 +428,10 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     p->format = f.vk;
     p->type = type;
     p->usage = usage;
+    // No VkImageFormatListCreateInfo is chained: compatible mutable views remain
+    // available, including the existing uncompressed BC block views. Restricting
+    // that list to sRGB pairs would incorrectly prohibit those block views.
+    p->create_flags = ci.flags;
     p->aspect = aspect_of(&f);
     p->width = w, p->height = h, p->depth = depth, p->levels = levels, p->layers = layers, p->samples = samples;
     p->view_type = type == VK_IMAGE_TYPE_1D ? (d->target == NVN_TEXTURE_TARGET_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D)

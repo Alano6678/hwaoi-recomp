@@ -290,6 +290,9 @@ static int create_device(void) {
     else if (!h->independentBlend) miss = "independentBlend";
     else if (!h->geometryShader) miss = "geometryShader";
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
+    // Indirect arguments are GPU-authored and may carry a nonzero firstInstance.
+    // The supported core feature chain is passed through to vkCreateDevice.
+    else if (!h->drawIndirectFirstInstance) miss = "drawIndirectFirstInstance";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;

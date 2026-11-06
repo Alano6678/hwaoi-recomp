@@ -186,8 +186,11 @@ static void gp_prefix(uint8_t *memory, void *control, int indirect) {
     GP_CALL(nvnCommandBufferClearColor, GP_U(&gp_command), 0, GP_U(clear), 15);
     GP_CALL(nvnCommandBufferSetViewport, GP_U(&gp_command), 0, 0, GP_WIDTH, GP_HEIGHT);
     GP_CALL(nvnCommandBufferSetScissor, GP_U(&gp_command), 0, 0, GP_WIDTH, GP_HEIGHT);
+    // Binding only VS|FS retains an earlier GS. The plain program intentionally
+    // has no GS: select all graphics slots so the producer cannot keep writing
+    // argument records during a subsequent consumer/reference draw.
     GP_CALL(nvnCommandBufferBindProgram, GP_U(&gp_command), GP_U(indirect ? &gp_plain_program : &gp_full_program),
-        indirect ? NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT : NVN_SHADER_STAGE_ALL_GRAPHICS_BITS);
+        NVN_SHADER_STAGE_ALL_GRAPHICS_BITS);
     NVNvertexAttribState attr[2];
     NVNvertexStreamState stream;
     for (unsigned i = 0; i < 2; i++) {
@@ -259,7 +262,7 @@ static int gp_ordered(uint8_t *memory, void *control, uint64_t record_address,
     GP_CALL(nvnCommandBufferBarrier, GP_U(&gp_command),
         NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
     GP_CALL(nvnCommandBufferBindProgram, GP_U(&gp_command), GP_U(&gp_plain_program),
-        NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT);
+        NVN_SHADER_STAGE_ALL_GRAPHICS_BITS);
     GP_CALL(nvnCommandBufferBindVertexBuffer, GP_U(&gp_command), 0, GP_U(memory + GP_VERTEX), 96);
     GP_CALL(nvnCommandBufferDrawElementsIndirect, GP_U(&gp_command), NVN_DRAW_PRIMITIVE_TRIANGLES,
         NVN_INDEX_TYPE_UNSIGNED_SHORT, GP_U(memory + GP_INDEX), record_address);
@@ -272,6 +275,72 @@ static int gp_ordered(uint8_t *memory, void *control, uint64_t record_address,
     GP_REQUIRE(!memcmp(after, verified, sizeof after), "ordering round exact produced record and canaries");
     puts("probe-vkgeometry: verified zero reset -> GS -> NVN barrier -> indirect in one NVN recording/submission");
     ok = 1;
+done:
+    return ok;
+}
+
+
+// Original array-indirect fixture: the GPU copies the four argument words in
+// the same submission before the draw. CPU storage at the destination starts
+// with a zero-count command. Compare every pixel with the corresponding direct
+// draw, including a nonzero first/base instance and incomplete/zero quads.
+static int gp_arrays_indirect(uint8_t *memory, void *control) {
+    int ok = 0;
+    static const float vertices[8][8] = {
+        {9,9,0,1, 1,0,0,1}, {-0.5f,-0.5f,0,1, 0,1,0,1}, {0.5f,-0.5f,0,1, 0,1,0,1},
+        {0.5f,0.5f,0,1, 0,1,0,1}, {-0.5f,0.5f,0,1, 0,1,0,1},
+        {9,9,0,1, 1,0,0,1}, {9,9,0,1, 1,0,0,1}, {9,9,0,1, 1,0,0,1}};
+    const struct { int primitive; uint32_t count, instances, first, base; } cases[] = {
+        {NVN_DRAW_PRIMITIVE_TRIANGLES,3,2,1,3}, {NVN_DRAW_PRIMITIVE_TRIANGLES,0,1,1,3},
+        {NVN_DRAW_PRIMITIVE_TRIANGLES,3,0,1,3}, {NVN_DRAW_PRIMITIVE_QUADS,4,2,1,3},
+        {NVN_DRAW_PRIMITIVE_QUADS,7,2,1,3}, {NVN_DRAW_PRIMITIVE_QUADS,3,1,1,3},
+        {NVN_DRAW_PRIMITIVE_QUADS,4,0,1,3}, {NVN_DRAW_PRIMITIVE_QUADS,0,1,1,3}};
+    uint32_t direct[GP_WIDTH*GP_HEIGHT], actual[GP_WIDTH*GP_HEIGHT], after[4];
+    NVNcopyRegion region = {0,0,0,GP_WIDTH,GP_HEIGHT,1};
+    memcpy(memory+GP_VERTEX,vertices,sizeof vertices);
+    GP_CALL(nvnMemoryPoolFlushMappedRange,GP_U(&gp_memory_pool),GP_VERTEX,sizeof vertices);
+    for (unsigned ci=0; ci<sizeof cases/sizeof cases[0]; ci++) {
+        const uint32_t args[4]={cases[ci].count,cases[ci].instances,cases[ci].first,cases[ci].base};
+        printf("probe-vkgeometry: arrays case %u primitive=%d args={%u,%u,%u,%u}\n",
+               ci,cases[ci].primitive,args[0],args[1],args[2],args[3]);
+        uint32_t count=cases[ci].primitive==NVN_DRAW_PRIMITIVE_QUADS ? args[0]&~3u : args[0];
+        gp_prefix(memory,control,1);
+        GP_CALL(nvnCommandBufferBindVertexBuffer,GP_U(&gp_command),0,GP_U(memory+GP_VERTEX),sizeof vertices);
+        if (count && args[1]) GP_CALL(nvnCommandBufferDrawArraysInstanced,GP_U(&gp_command),
+            cases[ci].primitive,args[2],count,args[3],args[1]);
+        GP_REQUIRE(gp_submit(),"array reference completed");
+        GP_CALL(nvnTextureReadTexels,GP_U(&gp_color),0,GP_U(&region),GP_U(direct));
+        unsigned green=0;
+        for(unsigned i=0;i<GP_WIDTH*GP_HEIGHT;i++) green+=direct[i]==0xff00ff00u;
+        GP_REQUIRE((!count || !args[1]) ? green==0 :
+                   cases[ci].primitive==NVN_DRAW_PRIMITIVE_QUADS ? green==256 : green>=64,
+                   "array reference has expected independent coverage");
+        memset(memory+GP_RECORD,0,16);
+        memcpy(memory+GP_RESET,args,16);
+        GP_CALL(nvnMemoryPoolFlushMappedRange,GP_U(&gp_memory_pool),GP_RECORD,16);
+        GP_CALL(nvnMemoryPoolFlushMappedRange,GP_U(&gp_memory_pool),GP_RESET,16);
+        gp_prefix(memory,control,1);
+        GP_CALL(nvnCommandBufferBindVertexBuffer,GP_U(&gp_command),0,GP_U(memory+GP_VERTEX),sizeof vertices);
+        GP_CALL(nvnCommandBufferCopyBufferToBuffer,GP_U(&gp_command),GP_U(memory+GP_RESET),GP_U(memory+GP_RECORD),16,0);
+        GP_CALL(nvnCommandBufferBarrier,GP_U(&gp_command),NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
+        GP_CALL(nvnCommandBufferDrawArraysIndirect,GP_U(&gp_command),cases[ci].primitive,GP_U(memory+GP_RECORD),0xdeadbeef);
+        GP_REQUIRE(gp_submit(),"GPU-produced array indirect completed");
+        memset(actual,0xa5,sizeof actual);
+        GP_CALL(nvnTextureReadTexels,GP_U(&gp_color),0,GP_U(&region),GP_U(actual));
+        GP_REQUIRE(!memcmp(direct,actual,sizeof direct),"array indirect exact pixels match direct draw");
+        memset(after,0xa5,sizeof after);
+        int read_ok=gp_read_gpu(GP_U(memory+GP_RECORD),after,sizeof after);
+        if (!read_ok || memcmp(args,after,sizeof after)) {
+            uint32_t cpu_words[4];memcpy(cpu_words,memory+GP_RECORD,sizeof cpu_words);
+            printf("probe-vkgeometry: arrays case %u read_ok=%d GPU={%u,%u,%u,%u} CPU={%u,%u,%u,%u} expected={%u,%u,%u,%u}\n",
+                   ci,read_ok,after[0],after[1],after[2],after[3],cpu_words[0],cpu_words[1],cpu_words[2],cpu_words[3],
+                   args[0],args[1],args[2],args[3]);
+        }
+        GP_REQUIRE(read_ok && !memcmp(args,after,sizeof after),
+                   "array indirect preserves GPU argument words");
+    }
+    puts("probe-vkgeometry: arrays-indirect passed (8 cases, GPU-produced parameters, QUADS, zero counts/instances, 8192 exact pixels)");
+    ok=1;
 done:
     return ok;
 }
@@ -383,6 +452,8 @@ static int gp_run(int passthrough, int ordered) {
         GP_REQUIRE(gp_read_gpu(GP_U(memory + GP_GUARD), after, sizeof after), "post-indirect GPU record readback");
         GP_REQUIRE(!memcmp(guard, after, sizeof guard), "indirect consumption preserves argument record/canaries");
         if (ordered) GP_REQUIRE(gp_ordered(memory, control, record_address, guard, first_orientation), "same-submission ordering round");
+        const char *arrays = cfg_get("HWAOI_PROBE_ARRAYS_INDIRECT");
+        if (arrays && !strcmp(arrays,"1")) GP_REQUIRE(gp_arrays_indirect(memory,control),"array indirect fixture");
     } else printf("probe-vkgeometry: indexed-indirect SKIPPED: exact bounded argument preflight failed\n");
     GP_REQUIRE(gfx_shader_failures() == shader_failures, "no translation failures");
     if (gp_passthrough) {

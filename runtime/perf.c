@@ -7,6 +7,7 @@
 
 #include "cfg.h"
 #include "flight.h"
+#include "frametime_hist.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_mode_trace.h"
@@ -108,10 +109,9 @@ void perf_count(int kind) {
     if (__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) plat_inc64(&counts[kind]);
 }
 
-// ---- Frame-time summary, always on: every 60 s of play and at exit one line of frame count, mean fps, 1% low and the
+// ---- Frame-time summary, always on: every 60 s of play and at exit one line of frame count, mean fps, 1% low cutoff and the
 // frames over 25/50/100 ms, then the worst frames of the period with the render thread's waits in them. Per frame: a
 // histogram increment, the compare against the worst list, a memset of the wait array. No allocation.
-#define FT_BINS 1024              // 0.25 ms bins up to 256 ms; slower frames land in the last bin
 #define FT_WORST 5
 #define FT_PERIOD_NS 60000000000ull
 typedef struct { uint64_t frame, ns, wait[PERF_N], replay; } FtWorst;
@@ -125,13 +125,10 @@ static uint64_t summary_t0;   // start of the current period (0: not started)
 
 static void ft_report(uint64_t now, const char *tag) {
     if (ft.frames && ft.sum) {
-        uint64_t cut = (ft.frames + 99) / 100, acc = 0, low = 0;   // the slowest 1% of frames
-        for (int b = FT_BINS - 1; b >= 0; b--) {
-            acc += ft.hist[b];
-            if (acc >= cut) { low = (uint64_t)(b + 1) * 250000ull; break; }   // upper edge of the bin
-        }
-        rt_log("frametime: %s: %llu frames in %.1f s, mean %.1f fps, 1%% low %.1f fps, over 25 ms %llu, 50 ms %llu, 100 ms %llu",
-               tag, (unsigned long long)ft.frames, (now - ft.t0) / 1e9, ft.frames * 1e9 / ft.sum, low ? 1e9 / low : 0.0,
+        uint64_t low = ft_hist_low_cutoff_ns(ft.hist, ft.frames);
+        rt_log("frametime: %s: %llu frames in %.1f s, mean %.1f fps, 1%% low cutoff >= %.3f fps (bucket upper %.3f ms), over 25 ms %llu, 50 ms %llu, 100 ms %llu",
+               tag, (unsigned long long)ft.frames, (now - ft.t0) / 1e9, ft.frames * 1e9 / ft.sum,
+               ft_hist_low_fps(low), low / 1e6,
                (unsigned long long)ft.over25, (unsigned long long)ft.over50, (unsigned long long)ft.over100);
         for (int i = 0; i < ft.nworst; i++) {
             const FtWorst *w = &ft.worst[i];
@@ -165,8 +162,7 @@ static uint64_t ft_frame(uint64_t frame, uint64_t now, uint64_t d) {
     }
     ft.frames++;
     ft.sum += d;
-    uint64_t b = d / 250000ull;
-    ft.hist[b < FT_BINS ? b : FT_BINS - 1]++;
+    ft.hist[ft_hist_bin(d)]++;
     if (d > 25000000ull) ft.over25++;
     if (d > 50000000ull) ft.over50++;
     if (d > 100000000ull) ft.over100++;

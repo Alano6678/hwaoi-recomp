@@ -1,4 +1,70 @@
-# Live bring-up ledger — 2026-11-05
+# Live bring-up ledger — 2026-11-06
+
+## November 6: rendering, movie and bandwidth investigation
+
+- Corrected sampled UNORM/sRGB reinterpretation at explicit registered views.
+  Scene-23's pass 0475/0476 had requested UNORM reads of sRGB storage, but the
+  old get_view ignored that format. Material views also requested sRGB over BC1,
+  BC3, BC7 and RGBA8 linear storage. Native descriptor/failure tests and original
+  GPU pixel fixtures cover the supported pairs; other reinterpretations fail.
+- Fixed the present path's extra sRGB decode into the UNORM swapchain by copying
+  encoded RGBA/BGRA bytes to a matching UNORM intermediate before scaling.
+  The 72-frame original GPU fixture passes with active Vulkan validation,
+  including crop, resize, double-slot reuse, FSR and optional colour adjustment.
+  Scene-28 repeats the outdoor scene with visible shadow detail. This is not a
+  hardware-reference proof of all lighting/material semantics.
+- The interactive trial later reached a missing DrawArraysIndirect entry
+  (main+0x7293e4, QUADS). The new path consumes real GPU arguments; QUADS uses an
+  ordered 16-byte readback then indexed expansion, with visible limits and sync
+  cost. Original GPU-produced argument/pixel fixtures pass eight cases and 8,192
+  exact pixels with validation. An initial fixture retained a producer geometry
+  stage; binding all graphics stages for its plain program corrected the fixture.
+- Black opening video: RomFS opens succeeded, but MediaExtractor::Initialize
+  repeatedly returned 0x3ed00 with a null work buffer. Default-visible weak C++
+  singleton data/guard definitions were locally bound in subsdk0 and sdk, splitting
+  their allocator TLS state. Default-visible weak definitions now share the first
+  eligible load-order definition; local/hidden/protected own references retain
+  local binding. Synthetic multi-module tests and the old-policy mutation pass;
+  the actual initializer then returns zero and configures the VP9 decoder.
+- The newly reached SetCopyImageStride entry records a separate slice pitch and
+  applies it to buffer/image copy regions with checked bounds and overflow.
+  Original O0/O2 tests cover tight/padded/block layouts and rejected cases.
+- Bandwidth: the mirror flush tracker previously joined disjoint flushes into one
+  min/max envelope. Scene-33 uploaded about 2.8 GiB per displayed video frame
+  despite about 10 MiB of declared flushes and ran at about 4 FPS. The tracker now
+  retains sorted disjoint page intervals. Independent page-coverage/GPU-gap
+  canaries and old-envelope mutations pass at O0/O2. The later movie run transfers
+  about 9 MiB per present and presents around 59.9 FPS; the movie itself is 29.97
+  FPS. Earlier 60-FPS settings-only runs are not counted as video/3D performance.
+- Scene-35 plays the first opening WebM through EOS: 3,561 decoded frames,
+  zero decoder errors, 5 dropped to retain wall-clock pacing. It then displays a
+  second 1080p VP9 story clip. The 300-second supervisor requests close and gets
+  exit 0; timed_out remains true, so this is a bounded playback observation.
+- Current suite: 93 HWAoI tests pass with the verified translator and both opt-in
+  GPU probes enabled. Reports: scene-35-full-tests.log, scene-31-indirect-tests.log,
+  scene-36-loader. These checks do not establish combat or save round trips.
+- Scene-36-story-walk completes its 600-second owned run with no fatal error and
+  exit 0 after the supervisor closes the window (timed_out=true). Both movies
+  reach EOS: 3,561 and 7,068 frames, zero decode errors. The scene then responds to
+  movement and camera inputs at frames 33,000/33,900/34,200; images show a changed
+  character position and view. Final interval: 3,470 frames / 57.9s, 59.9 FPS.
+  The later attack events were beyond the presents reached before the deadline,
+  so this run does not validate attacks. Executable SHA-256:
+  e51b76614e947e156b3cff56701367b0ddd200e77306c84e45345acf9b82c703.
+- Scene-37/38 attempt early movie skips before attack input. The first movie
+  still plays to EOS; inputs sent while a movie is active are not gameplay
+  evidence. Desktop automation can capture the window but cannot activate it.
+  An explicit diagnostic input feed now permits expiring buttons/sticks without
+  desktop focus. It is off by default, bounds holds to 10 seconds, rejects stale
+  or malformed commands, and leaves the game to process normal HID input.
+  See diagnostic-input.md. Scene-39 uses this for controlled progression.
+
+The user's overnight priorities are FPS, rendering, crashes, controlled progression
+and movie playback. Multi-rate FPS patches and 720p–4K scene-resolution changes
+are conditional on qualifying those earlier milestones. Current window scaling
+and an FPS limit are not evidence of game-speed-correct high-FPS patches.
+
+## Earlier bring-up record
 
 The user requested continued implementation without stopping at intermediate
 milestones. Current code is still an experimental local port, not playable.

@@ -179,19 +179,42 @@ def launch_interactive(args, identity):
     env = dict(os.environ)
     # Environment overrides take precedence over inherited ini/probe settings.
     options = {"HWAOI_GPU": "vulkan", "HWAOI_FULLSCREEN": "0", "HWAOI_WINDOW_SIZE": "1280x720",
-               "HWAOI_INPUT": "auto", "HWAOI_RUMBLE": "0", "HWAOI_PIPE_SYNC": "1", "HWAOI_PROGRESS": "1",
+               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PIPE_SYNC": "1", "HWAOI_PROGRESS": "1",
                "HWAOI_EXEFS": str(args.exefs.resolve()),
-               "HWAOI_PROFILE_DIR": str(ROOT / "work/saves/hwaoi196608"),
+               "HWAOI_PROFILE_DIR": str(local_output(args.profile_dir, "saves")),
                "HWAOI_GSV_LOCAL_FRAME_POLICY": "1", "HWAOI_NATIVE_INFLATE": "1",
-               "HWAOI_ZLIB_DLL": str(zlib), "HWAOI_POOL_BACKPRESSURE": "1", "HWAOI_POOL_DIAG": "1",
-               "HWAOI_IR_BANKS": "1", "HWAOI_XLATE": str(translator), "HWAOI_TRACE": "sched,fs",
+               "HWAOI_ZLIB_DLL": str(zlib), "HWAOI_POOL_BACKPRESSURE": "1", "HWAOI_POOL_DIAG": "0",
+               "HWAOI_IR_BANKS": "1", "HWAOI_XLATE": str(translator), "HWAOI_TRACE": "sched,perf",
                "HWAOI_SHOTS": "60-1800:60", "HWAOI_SHOTS_DIR": str(report_dir / "presents"),
-               "HWAOI_SHOTS_FULL": "1", "HWAOI_CORE_STALL_DIAG": "1",
+               "HWAOI_SHOTS_FULL": "1", "HWAOI_CORE_STALL_DIAG": "0",
                "DKB_SHADER_FAILURE_DUMP": str(report_dir / "shader-failures")}
-    for setting in ("INPUT_SCRIPT", "INPUT_RECORD", "XLATE_ID"):
+    for setting in ("INPUT_SCRIPT", "INPUT_RECORD", "INPUT_FEED", "XLATE_ID"):
         for prefix in ("HWAOI_", "DKB_", "TOTK_"):
             env.pop(prefix + setting, None)
     env.update(options)
+    if args.input_feed is not None:
+        feed = local_output(args.input_feed, "reports").resolve(strict=True)
+        need(feed.is_file(), "diagnostic input feed must be a local file under work/reports")
+        options["HWAOI_INPUT_FEED"] = env["HWAOI_INPUT_FEED"] = str(feed)
+        # Long diagnostic progression needs observations after the startup clip.
+        # Keep them at 480x270 instead of writing full-size images each second.
+        options["HWAOI_SHOTS"] = env["HWAOI_SHOTS"] = "120-1000000000:120"
+        options["HWAOI_SHOTS_LATEST"] = env["HWAOI_SHOTS_LATEST"] = "1"
+        for prefix in ("HWAOI_", "DKB_", "TOTK_"):
+            env.pop(prefix + "SHOTS_FULL", None)
+        options.pop("HWAOI_SHOTS_FULL", None)
+        # The diagnostic controller can resize through cfg_set; forced environment
+        # values would take precedence over those live requests.
+        options.pop("HWAOI_WINDOW_SIZE", None)
+        for prefix in ("HWAOI_", "DKB_", "TOTK_"):
+            env.pop(prefix + "WINDOW_SIZE", None)
+    if args.experimental_rate_control:
+        need(args.input_feed is not None, "experimental rate control requires an explicit diagnostic input feed")
+        options["HWAOI_EXPERIMENTAL_RATE"] = env["HWAOI_EXPERIMENTAL_RATE"] = "1"
+    if args.input_script is not None:
+        script = local_output(args.input_script, "reports").resolve(strict=True)
+        need(script.is_file(), "diagnostic input script must be a local file under work/reports")
+        options["HWAOI_INPUT_SCRIPT"] = env["HWAOI_INPUT_SCRIPT"] = str(script)
     report = {"stage": "interactive experimental launch", "executable": str(exe), "sha256": sha256(exe),
               "exefs_sha256": identity["exefs_sha256"], "runtime_options": options,
               "dependencies": {"translator": sha256(translator), "zlib": sha256(zlib)},
@@ -235,6 +258,11 @@ def main(argv=None):
     launch = sub.add_parser("launch", help="Open the experimental game with live input and local logs")
     launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/hwaoi.exe")
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
+    launch.add_argument("--input-feed", type=Path, help="opt-in expiring diagnostic controls under work/reports")
+    launch.add_argument("--input", dest="input_mode", choices=("auto", "keyboard", "none"), default="auto", help="physical input policy; diagnostic scripts/feed remain available")
+    launch.add_argument("--experimental-rate-control", action="store_true", help="opt-in unqualified 30/60/90/120 presentation-rate experiments")
+    launch.add_argument("--input-script", type=Path, help="opt-in startup diagnostic script under work/reports")
+    launch.add_argument("--profile-dir", type=Path, default=ROOT / "work/saves/hwaoi196608", help="local save profile under work/saves")
     args = parser.parse_args(argv)
     try:
         identity = verify(args.exefs)

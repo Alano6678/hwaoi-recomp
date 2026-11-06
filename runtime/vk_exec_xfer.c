@@ -528,8 +528,19 @@ static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *
                   (unsigned long long)row, wb, s->bpb);
         return 0;
     }
-    uint64_t img = row * hb;
-    *size = img * (s->nz - 1) + row * (hb - 1) + (uint64_t)wb * (uint64_t)s->bpb;
+    if (!wb || !hb || !s->nz || ex->copy_stride < 0 || ex->copy_image_stride < 0 ||
+        row > UINT64_MAX / hb || row / (uint64_t)s->bpb > UINT32_MAX / (uint32_t)s->bw)
+        rt_fatal("vk: invalid or overflowing texture copy stride");
+    uint64_t img = ex->copy_image_stride ? (uint64_t)ex->copy_image_stride : row * hb;
+    // VkBufferImageCopy expresses a slice pitch as an integral number of block
+    // rows. Other layouts require separate slice commands and fail explicitly.
+    if (img < row * hb || img % row || img / row > UINT32_MAX / (uint32_t)s->bh)
+        rt_fatal("vk: unsupported copy image stride %llu for row %llu and %u block rows",
+                 (unsigned long long)img, (unsigned long long)row, hb);
+    uint64_t tail = row * (hb - 1) + (uint64_t)wb * (uint64_t)s->bpb;
+    if (s->nz > 1 && img > (UINT64_MAX - tail) / (s->nz - 1))
+        rt_fatal("vk: texture copy buffer extent overflows");
+    *size = img * (s->nz - 1) + tail;
     VkMemSpan m;
     if (!addr || !vk_mem_resolve(addr, *size, &m) || m.avail < *size) {
         warn_once(W_BUFFER, "texture copy buffer %#llx (%llu bytes) is not one backed span: skipped",
@@ -539,7 +550,7 @@ static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *
     VK_MEM_PICK(m);
     *span = m;
     *c = (VkBufferImageCopy){.bufferOffset = m.offset, .bufferRowLength = (uint32_t)(row / (uint64_t)s->bpb) * (uint32_t)s->bw,
-                             .bufferImageHeight = hb * (uint32_t)s->bh, .imageSubresource = sub_layers(s),
+                             .bufferImageHeight = (uint32_t)(img / row) * (uint32_t)s->bh, .imageSubresource = sub_layers(s),
                              .imageOffset = sub_offset(s), .imageExtent = sub_extent(s)};
     return 1;
 }
@@ -562,6 +573,7 @@ static void copy_buffer_image(VkExec *ex, const p_copy_b2t *p, int to_image) {
         uint64_t tight_row = (uint64_t)wb * (uint64_t)s.bpb;
         // vk_astc_record takes tight block rows (no row pitch); fall back to the skip warning on non-tight rows or layer strides.
         if ((ex->copy_stride > 0 && (uint64_t)ex->copy_stride != tight_row) ||
+            (ex->copy_image_stride > 0 && (uint64_t)ex->copy_image_stride != tight_row * ((s.h + s.bh - 1) / s.bh)) ||
             (c.bufferRowLength && c.bufferRowLength != wb * (uint32_t)s.bw) ||
             (c.bufferImageHeight && c.bufferImageHeight != hb * (uint32_t)s.bh)) {
             warn_once(W_FORMAT, "copy of format %#x texture (non-tight stride): skipped", p->tex->d.format);

@@ -32,6 +32,7 @@ enum { POOL_IMPORT = 1, POOL_PHYS, POOL_VIRT };
 enum { MS_NONE, MS_ON, MS_REFUSED };
 
 typedef struct { struct PoolRec *phys; uint64_t off; } VPage;   // virtual page -> physical pool and offset
+typedef struct { uint64_t lo, hi; } MirrorFlush;
 
 typedef struct PoolRec {
     const pool_t *key;
@@ -59,7 +60,8 @@ typedef struct PoolRec {
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
     uint32_t mgen;                     // gen_lock: every page write stamped up to this generation is in the mirror
                                        // (or in a copy queued before its next use)
-    uint64_t fl_lo, fl_hi;             // flush_lock: nvnMemoryPoolFlushMappedRange bytes not copied yet (fl_hi 0: none)
+    MirrorFlush *flush;                // flush_lock: sorted disjoint refresh intervals; never fill gaps between them
+    int nflush, cflush;
     // Shadow storage (POOL_IMPORT in shadow mode, "shadow storage" below): buf is a host-visible copy of the guest pages.
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
@@ -237,6 +239,7 @@ static void destroy_rec(VkCtx *c, PoolRec *r) {
     if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
     if (r->alloc) vmaFreeMemory(c->vma, r->alloc);
     free(r->pt);
+    free(r->flush);
     free(r);
 }
 
@@ -1322,6 +1325,45 @@ static int range_cmp(const void *x, const void *y) {
     return a->off < b->off ? -1 : a->off > b->off;
 }
 
+// flush_lock held. Preserve disjoint page ranges: a min/max envelope between
+// two video planes can cover gigabytes of unrelated pool storage. Besides the
+// bandwidth cost, those gaps may contain GPU-owned data that must not be copied
+// from a stale CPU image. Page granularity matches the existing write watcher.
+static void mirror_flush_add(PoolRec *r, uint64_t lo, uint64_t hi) {
+    if (lo < r->import_lo) lo = r->import_lo;
+    if (hi > r->import_hi) hi = r->import_hi;
+    if (lo >= hi) return;
+    lo &= ~UINT64_C(4095);
+    hi = hi > UINT64_MAX - 4095 ? r->import_hi : (hi + 4095) & ~UINT64_C(4095);
+    if (hi > r->import_hi) hi = r->import_hi;
+    int first = 0;
+    while (first < r->nflush && r->flush[first].hi < lo) first++;
+    int end = first;
+    while (end < r->nflush && r->flush[end].lo <= hi) {
+        if (r->flush[end].lo < lo) lo = r->flush[end].lo;
+        if (r->flush[end].hi > hi) hi = r->flush[end].hi;
+        end++;
+    }
+    if (first == end) {
+        if (r->nflush == r->cflush) grow((void **)&r->flush, &r->cflush, sizeof *r->flush);
+        memmove(r->flush + first + 1, r->flush + first, (size_t)(r->nflush - first) * sizeof *r->flush);
+        r->nflush++;
+    } else {
+        memmove(r->flush + first + 1, r->flush + end, (size_t)(r->nflush - end) * sizeof *r->flush);
+        r->nflush -= end - first - 1;
+    }
+    r->flush[first] = (MirrorFlush){lo, hi};
+}
+
+// Replay thread, flush_lock held. New CPU flushes after this drain remain queued
+// for the next sync; Vulkan queue order and the normal page-generation path are
+// unchanged. copy_ranges later merges overlap with write-watch copies as well.
+static void mirror_flush_drain(PoolRec *r) {
+    for (int i = 0; i < r->nflush; i++)
+        range_add(&pend, &npend, &cpend, r, r->flush[i].lo - r->import_lo, r->flush[i].hi - r->flush[i].lo);
+    r->nflush = 0;
+}
+
 // Records the ranges as one vkCmdCopyBuffer per pool, overlapping and adjacent ranges merged; to_mirror: buf -> mbuf,
 // else mbuf -> buf. Returns the commands recorded; adds what they move to *bytes and *copies.
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
@@ -1494,15 +1536,9 @@ static void mirror_sync(PoolRec *r) {
     r->mgen = gen_now;
     if (excl) plat_mutex_unlock(&gen_lock);
     else plat_mutex_unlock_shared(&gen_lock);
-    if (__atomic_load_n(&r->fl_hi, __ATOMIC_ACQUIRE)) {
-        plat_mutex_lock(&flush_lock);
-        uint64_t a = r->fl_lo, b = r->fl_hi;
-        r->fl_hi = 0;
-        plat_mutex_unlock(&flush_lock);
-        a = a > lo ? a & ~0xfffull : lo;
-        b = b < hi ? (b + 0xfff) & ~0xfffull : hi;
-        if (a < b) range_add(&pend, &npend, &cpend, r, a - lo, b - a);
-    }
+    plat_mutex_lock(&flush_lock);
+    mirror_flush_drain(r);
+    plat_mutex_unlock(&flush_lock);
     mrep.syncs++;
     mrep.sync_t += qpc() - t0;
 }
@@ -1530,14 +1566,48 @@ int vk_mem_mirror_probe(uint64_t addr) {
     return ((PoolRec *)sp.pool)->mstate == MS_ON;
 }
 
+// Replay-thread diagnostic only: these are potential shader/transfer write-back
+// ranges, not an assertion that the GPU touched every byte of the declaration.
+static void mirror_write_diag(const PoolRec *r, const VkMemSpan *sp, uint64_t size, uintptr_t caller) {
+    if (size < (UINT64_C(16) << 20)) return;
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *setting = cfg_get("TOTK_GPU_WRITE_DIAG");
+        enabled = setting && !strcmp(setting, "1");
+    }
+    if (!enabled) return;
+    typedef struct { uint64_t serial, offset, size; uintptr_t caller; } Key;
+    static Key seen[64];
+    static unsigned count, limited;
+    Key key;
+    memset(&key, 0, sizeof key);
+    key.serial = r->storage_serial, key.offset = sp->offset, key.size = size, key.caller = caller;
+    for (unsigned i = 0; i < count; i++) if (!memcmp(&seen[i], &key, sizeof key)) return;
+    if (count == sizeof seen / sizeof *seen) {
+        if (!limited++) rt_log("gpu-write-diag: mirror observation limit reached; later marks unobserved");
+        return;
+    }
+    seen[count++] = key;
+    uintptr_t base = plat_exe_base();
+    rt_log("gpu-write-diag: mirror mark=potential-writeback storage_serial=%llu pool=%#llx:%llu "
+           "import=%#llx:%llu offset=%llu size=%llu avail=%llu caller_exe_rva=%#llx observation=%u/64",
+           (unsigned long long)r->storage_serial, (unsigned long long)r->lo, (unsigned long long)r->size,
+           (unsigned long long)r->import_lo, (unsigned long long)(r->import_hi - r->import_lo),
+           (unsigned long long)sp->offset, (unsigned long long)size, (unsigned long long)sp->avail,
+           (unsigned long long)(caller >= base ? caller - base : 0), count);
+}
+
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
+    mirror_write_diag(r, sp, size, (uintptr_t)__builtin_return_address(0));
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
     if (!vk_mirror_on || !size || !p->mem) return;
+    if (off > p->size || size > p->size - off || (uintptr_t)p->mem > UINT64_MAX - off - size)
+        rt_fatal("vk: memory pool flush range exceeds its backing storage");
     plat_inc64(&m_flush_calls);
     plat_add64(&m_flush_bytes, (int64_t)size);
     plat_mutex_lock_shared(&pool_lock);
@@ -1546,11 +1616,7 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
     if (r && r->mstate == MS_ON) {
         uint64_t a = (uintptr_t)p->mem + off, b = a + size;
         plat_mutex_lock(&flush_lock);
-        if (!r->fl_hi) r->fl_lo = a, r->fl_hi = b;
-        else {
-            if (a < r->fl_lo) r->fl_lo = a;
-            if (b > r->fl_hi) r->fl_hi = b;
-        }
+        mirror_flush_add(r, a, b);
         plat_mutex_unlock(&flush_lock);
     }
     plat_mutex_unlock_shared(&pool_lock);

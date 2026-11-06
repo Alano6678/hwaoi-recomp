@@ -1,9 +1,11 @@
-# HWAoI port status — 2026-11-05
+# HWAoI port status — 2026-11-06
 
 Full native compilation and linking are complete for the current exact input
-profile. The runtime has displayed the Chinese settings/autosave interfaces and
-an actual outdoor 3D scene with characters, vegetation and ruins. **Responsive
-gameplay, combat and overall playability have not been verified.**
+profile. The runtime plays the two opening videos and renders the first outdoor
+3D scene around 60 FPS in measured intervals. Movement/camera input has changed
+the character position and view. **Combat and overall playability remain under
+investigation.** Later scenes, A/V synchronization, visual accuracy and save
+round trips still need verification.
 
 This is an adaptation of DKB Recomp at
 `42fcd9d78b4b44c2831b68ba21e5807d74a96f45`. Upstream Bananza/TotK results do not
@@ -21,9 +23,32 @@ blocker is still present.
 | Loader/resources | Selftest, RomFS and loader probes exit 0; zero strong unresolved imports | Startup does not read every resource or prove every ABI path |
 | Initialization/UI | All three DT_INIT callbacks, nnMain, Chinese settings and autosave UI reached | Earlier chat:u startup stop was superseded by later bring-up |
 | Rendering | hang-20 first shows a 3D scene; hang-21 repeats it after the capability fix | Lighting, shadows and output correctness need further checking |
-| Regression | Latest HWAoI suite: 79 tests pass with the current translator | Not a gameplay or long-running stability test |
+| Movies | Two opening clips reach EOS, 3,561 and 7,068 frames, zero decoder errors | Later clips and A/V synchronization remain unverified |
+| Control/performance | scene-36: movement/camera observed; final interval 59.9 FPS | Attacks were not reached before that run's deadline |
+| Regression | Latest HWAoI suite: 93 tests pass, including opt-in GPU probes | Not a whole-game playability test |
 
-## Latest completed runtime check
+## Latest completed progression check
+
+`scene-36-story-walk` runs for 600 seconds, completes both opening clips and
+enters the outdoor scene. Scripted left/right-stick input changes the character
+position and camera. The final interval is 3,470 frames in 57.9 seconds, 59.9 FPS.
+The supervisor requests close and receives exit 0, with no fatal errors;
+`timed_out=true` remains recorded. Vulkan validation is off for this measurement.
+Original colour/presentation and indirect-draw GPU probes separately pass with
+validation active. The test is not a combat or save-round-trip pass.
+
+Runtime SHA-256:
+`e51b76614e947e156b3cff56701367b0ddd200e77306c84e45345acf9b82c703`.
+Translator identity remains
+`22fe81c97e7c074efa43842cb71ad2b9c79425e9e9f3680183745f4dece44cba`.
+
+The main measured performance fix keeps disjoint memory flushes separate, rather
+than uploading a huge min/max envelope between distant ranges. The movie stage
+previously copied about 2.8 GiB per frame and presented around 4 FPS; later runs
+copy about 9 MiB per present and present near 60 FPS. This does not prove a
+game-speed-correct 90/120-FPS patch or a custom internal-resolution profile.
+
+## Earlier validation-enabled scene check
 
 Local report: `work/reports/hang-21/result.json`; scene capture:
 `work/reports/hang-21/presents/f01230.png`. These files are deliberately not part

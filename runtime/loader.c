@@ -22,7 +22,8 @@ enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, 
        DT_FINI_ARRAYSZ = 28, DT_RELRSZ = 0x23, DT_RELR = 0x24, DT_GNU_HASH = 0x6ffffef5 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 enum { K_RELATIVE, K_ABS64, K_GLOB_DAT, K_JUMP_SLOT, K_COUNT };
-enum { STB_WEAK = 2, STT_FUNC = 2 };
+enum { STB_GLOBAL = 1, STB_WEAK = 2, STT_FUNC = 2,
+       STV_DEFAULT = 0, STV_PROTECTED = 3 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
@@ -188,6 +189,34 @@ static uint64_t find_symbol(const char *name, int *which) {
 
 uint64_t ldr_symbol(const char *name) { return find_symbol(name, NULL); }
 
+// Default-visible weak definitions are preemptable, including references from
+// their defining module. C++ inline singleton data/guard pairs must select the
+// same definition in every module, rather than allocate separate SDK TLS slots.
+// Keep the established dynamic load order (first eligible definition, whether
+// global or weak); this is runtime lookup, not static-link strong-over-weak.
+// Hidden/internal/local candidates cannot preempt another module. Protected
+// definitions are exported but their own references remain locally bound.
+// ELF visibility: https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.symtab.html
+static uint64_t defined_guest_symbol(const Mod *m, uint32_t si) {
+    const Elf64Sym *s = &m->syms[si];
+    uint64_t own = m->pub.base + s->value;
+    if ((s->info >> 4) != STB_WEAK || (s->other & 3) != STV_DEFAULT || !*sym_name(m, si)) return own;
+    const char *name = sym_name(m, si);
+    for (int mi = 0; mi < nmods; mi++) {
+        const Mod *candidate = &mods[mi];
+        for (uint32_t p = fnv(name) & candidate->hash_mask; candidate->hash[p];
+             p = (p + 1) & candidate->hash_mask) {
+            uint32_t ci = candidate->hash[p];
+            const Elf64Sym *c = &candidate->syms[ci];
+            if (strcmp(name, sym_name(candidate, ci))) continue;
+            unsigned bind = c->info >> 4, vis = c->other & 3;
+            if ((bind == STB_GLOBAL || bind == STB_WEAK) && (vis == STV_DEFAULT || vis == STV_PROTECTED))
+                return candidate->pub.base + c->value;
+        }
+    }
+    return own;
+}
+
 static const Mod *sort_mod;
 static int by_value(const void *a, const void *b) {
     uint64_t x = sort_mod->syms[*(const uint32_t *)a].value, y = sort_mod->syms[*(const uint32_t *)b].value;
@@ -321,13 +350,14 @@ static void mark_used(int observers, const char *name) {
         if (!strcmp(hostfn_table_name(observers, i), name)) (observers ? obs_used : ovr_used)[i] = 1;
 }
 
-// Order (MNG loader.c:216-224): observer (JUMP_SLOT only), override by name, own definition, other modules in load
-// order, weak -> 0, strong -> named fatal stub. Overrides also replace a module's own symbols.
+// Order: observer (JUMP_SLOT only), override by name, guest definition (default
+// weak definitions share load-order binding), weak -> 0, strong -> fatal stub.
+// Overrides also replace a module's own symbols.
 static Res resolve(Mod *m, uint32_t si, int jump) {
     Res *cache = jump ? &m->res_jump[si] : &m->res_plain[si];
     if (cache->kind != RES_UNSET) return *cache;
     const char *name = sym_name(m, si);
-    uint64_t guest = sym_defined(m, si) ? m->pub.base + m->syms[si].value : find_symbol(name, NULL);
+    uint64_t guest = sym_defined(m, si) ? defined_guest_symbol(m, si) : find_symbol(name, NULL);
     GuestFn f;
     Res r;
     if (jump && (f = hostfn_observer(name))) {

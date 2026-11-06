@@ -312,6 +312,7 @@ int probe_gfx_abi(void);                                   // gfx_abi_probe.c
 int probe_vkdevice(void);                                 // vk_device.c
 int probe_nvn(void), probe_nvn_tex(void);                  // nvn_probe.c, nvn_tex_probe.c
 int probe_window(void);                                    // gfx_window_probe.c
+int probe_present_color(void);                             // gfx_window_probe.c; original GPU colour fixtures
 int probe_shader(void);                                    // gfx_shader.c
 int probe_geometry_shader(void);                           // gfx_geometry_probe.c: original GS service/cache roundtrip
 int probe_vkgeometry(void);                                // vk_geometry_probe.c: original ordinary-GS replay/readback

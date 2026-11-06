@@ -61,7 +61,8 @@ def close_owned_window(pid):
 
 
 def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
-            input_script=None, profile_sampling=False, threads_on_stall=False):
+            input_script=None, profile_sampling=False, threads_on_stall=False,
+            shot_every=30, profile_main_ip=False, profile_frames=None, extended_play=False, input_feed=None):
     if os.name != "nt":
         raise ValueError("this supervised runner currently requires Windows")
     executable = executable.resolve(strict=True)
@@ -70,18 +71,35 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
         raise ValueError("target must be the local work/build output")
     if not report_dir.is_relative_to(ROOT / "work/reports") or report_dir == ROOT / "work/reports":
         raise ValueError("report directory must be a child of work/reports")
-    max_timeout = 180 if mode == "--play-experimental" else 60
+    if extended_play and mode != "--play-experimental":
+        raise ValueError("extended deadline requires play-experimental")
+    max_timeout = (600 if extended_play else 180) if mode == "--play-experimental" else 60
     if report_dir.exists() or not 1 <= timeout <= max_timeout:
         raise ValueError(f"fresh report directory and timeout in 1..{max_timeout} seconds required")
     if not 1 <= frames <= 600:
         raise ValueError("frames must be in 1..600")
     if threads_on_stall and mode != "--play-experimental":
         raise ValueError("thread stall capture requires play-experimental")
+    if not 0 <= shot_every <= 600 or (shot_every != 30 and mode != "--play-experimental"):
+        raise ValueError("shot interval must be 0..600; changing it requires play-experimental")
+    if threads_on_stall and not shot_every:
+        raise ValueError("thread stall capture requires automatic screenshots")
+    if profile_main_ip and mode != "--play-experimental":
+        raise ValueError("main-thread IP sampling requires play-experimental")
+    if profile_frames is not None:
+        bounds = re.fullmatch(r"(0|[1-9][0-9]*)-([1-9][0-9]*)", profile_frames)
+        if (not (profile_sampling or profile_main_ip) or not bounds or
+                not 0 <= int(bounds[1]) < int(bounds[2]) <= 2**63 - 1):
+            raise ValueError("profile frames require sampling and a valid LO-HI range")
     if input_script is not None:
         input_script = input_script.resolve(strict=True)
         if mode != "--play-experimental" or not input_script.is_relative_to(ROOT / "work"):
             raise ValueError("scripted diagnostic input requires play-experimental and a file under work/")
         script_bytes = input_script.read_bytes()
+    if input_feed is not None:
+        input_feed = input_feed.resolve(strict=True)
+        if mode != "--play-experimental" or not input_feed.is_relative_to(ROOT / "work/reports") or not input_feed.is_file():
+            raise ValueError("diagnostic input feed requires play-experimental and a file under work/reports")
     with executable.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     kernel = c.WinDLL("kernel32", use_last_error=True)
@@ -122,7 +140,11 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
         start = time.monotonic()
         timed_out = False
         env = dict(os.environ)
+        for prefix in ("HWAOI_", "DKB_", "TOTK_"):
+            env.pop(prefix + "INPUT_FEED", None)
         env["HWAOI_PROFILE_DIR"] = str(ROOT / "work/saves/probe")
+        if input_feed is not None:
+            env["HWAOI_INPUT_FEED"] = str(input_feed)
         if mode == "--probe-input":
             env.update({"HWAOI_INPUT": "none", "HWAOI_MOTION": "0", "TOTK_RUMBLE": "1"})
             # The fixture toggles legacy names to check both policies. Input is
@@ -147,11 +169,11 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
             for name in ("HWAOI_SHOTS_FULL", "DKB_SHOTS_FULL", "TOTK_SHOTS_FULL"):
                 env.pop(name, None)
             if mode == "--play-experimental":
-                env["HWAOI_SHOTS"] = "30-100000:30"
+                env["HWAOI_SHOTS"] = f"{shot_every}-100000:{shot_every}" if shot_every else "0"
                 env["HWAOI_PROGRESS"] = "1"
                 if input_script is not None:
                     env["HWAOI_INPUT_SCRIPT"] = str(input_script)
-            if profile_sampling:
+            if profile_sampling or profile_main_ip:
                 env["HWAOI_PROFILE"] = str(report_dir / "sampling.txt")
                 # The inherited in-process stack unwinder crashes on this build.
                 # Keep instruction-pointer sampling; use the external snapshot
@@ -160,6 +182,11 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
                     for prefix in ("HWAOI_", "DKB_", "TOTK_"):
                         env.pop(prefix + setting, None)
                 env["HWAOI_PROFILE_CHAINS"] = "0"
+                env["HWAOI_PROFILE_IP_ONLY"] = "1"
+                if profile_main_ip:
+                    env["HWAOI_PROFILE_MAIN"] = "1"
+                if profile_frames is not None:
+                    env["HWAOI_PROFILE_FRAMES"] = profile_frames
             translator = executable.parent / "xlate-managed-irbanks/totk_xlate.exe"
             ir_banks = translator.is_file() and translator.with_suffix(".id").is_file()
             if not ir_banks:
@@ -234,10 +261,18 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
                     code = proc.wait(timeout=5)
         options = {name: env[name] for name in (
             "HWAOI_GSV_LOCAL_FRAME_POLICY", "HWAOI_NATIVE_INFLATE", "HWAOI_ZLIB_DLL",
+            "HWAOI_GPU", "HWAOI_FIX_C0", "HWAOI_EXPERIMENTAL_GEOMETRY", "HWAOI_MEMORY", "HWAOI_SHADOW",
+            "HWAOI_MOVIE_PACE",
             "HWAOI_POOL_DIAG", "HWAOI_POOL_BACKPRESSURE", "HWAOI_IR_BANKS", "HWAOI_XLATE",
             "HWAOI_TRACE", "HWAOI_NATIVE_INFLATE_TRACE", "HWAOI_RT_TRACE",
+            "HWAOI_FS_DIAG", "HWAOI_PRIORITY_DIAG", "HWAOI_PROBE_ARRAYS_INDIRECT",
             "HWAOI_PERF_SLOW_GPU_MS",
             "HWAOI_INPUT_SCRIPT", "HWAOI_PROFILE", "HWAOI_PROFILE_CHAINS",
+            "HWAOI_INPUT_FEED",
+            "HWAOI_PROFILE_IP_ONLY", "HWAOI_PROFILE_MAIN", "HWAOI_PROFILE_FRAMES",
+            "HWAOI_SHOTS", "HWAOI_SHOTS_FULL", "HWAOI_SHOTS_LATEST", "HWAOI_WINDOW_SIZE", "HWAOI_PIPE_SYNC",
+            "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO",
+            "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_TEX", "HWAOI_DUMP_BUF",
             "HWAOI_PROGRESS",
             "HWAOI_CORE_STALL_DIAG",
             "HWAOI_IMAGE_DIAG",
@@ -266,6 +301,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
                             with payload.open("rb") as stream:
                                 dependencies[name][payload.name] = hashlib.file_digest(stream, "sha256").hexdigest()
         result = {"executable": str(executable), "sha256": digest, "arguments": [mode],
+                  "timeout_seconds": timeout, "extended_play": extended_play,
                   "runtime_options": options, "dependencies": dependencies,
                   "linker_map": linker_map,
                   "exit_code": code, "timed_out": timed_out, "seconds": round(time.monotonic()-start, 3),
@@ -308,7 +344,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=["selftest", "probe-romfs", "probe-loader", "probe-cfg", "probe-kernel", "probe-services", "probe-input", "probe-storage", "probe-boot", "probe-render", "play-experimental", "boot"])
+    parser.add_argument("mode", choices=["selftest", "probe-romfs", "probe-loader", "probe-cfg", "probe-kernel", "probe-services", "probe-input", "probe-storage", "probe-boot", "probe-render", "probe-present-color", "probe-vkgeometry", "play-experimental", "boot"])
     parser.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/hwaoi.exe")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=45)
@@ -317,10 +353,16 @@ def main():
     parser.add_argument("--input-script", type=Path, help="scripted input under work/ for a bounded experimental run")
     parser.add_argument("--profile-sampling", action="store_true", help="collect native instruction-pointer samples until graceful close")
     parser.add_argument("--threads-on-stall", action="store_true", help="capture a pair of native thread snapshots after 8 s without a new diagnostic image")
+    parser.add_argument("--shot-every", type=int, default=30, help="experimental-play screenshot interval; 0 disables readbacks for timing")
+    parser.add_argument("--profile-main-ip", action="store_true", help="sample only guest main-thread instruction pointers; requires an IP_ONLY-capable runtime")
+    parser.add_argument("--profile-frames", help="sample only while presents LO..HI-1 are pending, e.g. 1400-2000")
+    parser.add_argument("--extended-play", action="store_true", help="explicitly allow up to 600 seconds for bounded movie/gameplay checks")
+    parser.add_argument("--input-feed", type=Path, help="expiring live diagnostic commands from a file under work/reports")
     args = parser.parse_args()
     try:
         result = capture(args.exe, "--" + args.mode, args.out, args.timeout, args.dump_shaders, args.frames,
-                         args.input_script, args.profile_sampling, args.threads_on_stall)
+                         args.input_script, args.profile_sampling, args.threads_on_stall,
+                         args.shot_every, args.profile_main_ip, args.profile_frames, args.extended_play, args.input_feed)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["exit_code"] == 0 and not result["timed_out"] else 1
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:

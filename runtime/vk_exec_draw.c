@@ -560,6 +560,20 @@ static nvn_hmap views_by_image;          // VkImage -> its first ViewNode
 
 // An image view of a registered texture for a shader resource of type `rtype` (GfxShaderRes.type); VK_NULL_HANDLE when
 // the image cannot serve it (the caller binds a stand-in). Texture lock held.
+// HWAoI scene-23 pass 0475/0476 requests linear samples of sRGB storage;
+// material draws request the reverse transfer for RGBA8, BC1 RGBA, BC3 and BC7.
+// These pairs are in the same Vulkan format compatibility class: the bytes and
+// addressing stay fixed; only sample-time interpretation changes. No BC2 or
+// arbitrary same-size reinterpretation is inferred from these observations.
+// https://docs.vulkan.org/spec/latest/chapters/formats.html#formats-compatibility
+static int sampled_format_compatible(VkFormat from, VkFormat to) {
+    return (from == VK_FORMAT_R8G8B8A8_SRGB && to == VK_FORMAT_R8G8B8A8_UNORM) ||
+           (from == VK_FORMAT_R8G8B8A8_UNORM && to == VK_FORMAT_R8G8B8A8_SRGB) ||
+           (from == VK_FORMAT_BC1_RGBA_UNORM_BLOCK && to == VK_FORMAT_BC1_RGBA_SRGB_BLOCK) ||
+           (from == VK_FORMAT_BC3_UNORM_BLOCK && to == VK_FORMAT_BC3_SRGB_BLOCK) ||
+           (from == VK_FORMAT_BC7_UNORM_BLOCK && to == VK_FORMAT_BC7_SRGB_BLOCK);
+}
+
 static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, int hv, uint16_t rtype, int storage) {
     (void)ex;
     VkFormat format = img->format;
@@ -570,6 +584,21 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
              !(img->format == VK_FORMAT_R8G8B8A8_SRGB && requested.vk == VK_FORMAT_R8G8B8A8_UNORM)))
             rt_fatal("vk: unsupported storage view format %u over Vulkan format %d", v->format, (int)img->format);
         format = requested.vk;
+    }
+    if (!storage && hv && v->set_format) {
+        TexVkFormat requested;
+        if (!tex_vk_format(v->format, &requested))
+            rt_fatal("vk: unknown sampled view format %u over Vulkan format %d", v->format, (int)img->format);
+        if (requested.vk != img->format) {
+            if (requested.vk != requested.ideal || requested.alpha_one || requested.expand_rgb || requested.chan[0] ||
+                img->alpha_one || img->chan[0] || img->aspect != VK_IMAGE_ASPECT_COLOR_BIT || img->samples != 1 ||
+                !(img->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
+                !sampled_format_compatible(img->format, requested.vk))
+                rt_fatal("vk: unsupported sampled view reinterpretation nvn=%u Vulkan %d -> %d "
+                         "flags=%#x aspect=%#x samples=%u", v->format, (int)img->format, (int)requested.vk,
+                         img->create_flags, img->aspect, img->samples);
+            format = requested.vk;
+        }
     }
     VkImageViewType vt = res_view_type(rtype);
     int ms = (rtype & 0x200) != 0;
@@ -627,6 +656,13 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     if (!view_of.klen) nvn_hm_init(&view_of, sizeof(ViewKey)), nvn_hm_init(&views_by_image, sizeof(VkImage));
     VkImageView found = (VkImageView)nvn_hm_get(&view_of, &k);
     if (found) return found;
+    if (!storage && format != img->format) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(vk_ctx()->phys, format, &props);
+        if (!(img->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ||
+            !(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+            rt_fatal("vk: sampled view Vulkan format %d lacks sampled-image usage or support", (int)format);
+    }
     if (storage) {
         VkFormatProperties props;
         vkGetPhysicalDeviceFormatProperties(vk_ctx()->phys, format, &props);
@@ -642,7 +678,7 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     ci.pNext = &use;   // sRGB sampled views must not inherit a compatible UNORM storage view's usage
     VkImageView view;
     if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS) {
-        if (storage) rt_fatal("vk: storage view format %d could not be created", (int)format);
+        if (storage || format != img->format) rt_fatal("vk: explicit view format %d could not be created", (int)format);
         return VK_NULL_HANDLE;
     }
     ViewNode *n = malloc(sizeof *n);
@@ -860,6 +896,10 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
                sampler ? sampler->cmp_mode : 0);
     }
     view_t depth_view = hv ? *v : (view_t){0};
+    // This adapter now addresses the independently created D16 image, not the
+    // original RGBA8 storage. Keep ranges/target while replacing its format.
+    depth_view.set_format = 1;
+    depth_view.format = NVN_FORMAT_DEPTH16;
     depth_view.set_swizzle = 1;
     memcpy(depth_view.swz, depth_swizzle, 4);
     VkImageView view = get_view(ex, &entry->pub, &depth_view, 1, type, 0);
@@ -1426,6 +1466,53 @@ static p_bind_buf guarded_storage_binding(const VkExec *ex, int st, const GfxSha
     return b;
 }
 
+// Passive observations of unusually broad writable descriptors. A reflected
+// write flag means the shader may store somewhere in this range; it does not
+// prove every byte was modified. No descriptor or write-back policy is changed.
+static void gpu_write_binding_diag(const VkExec *ex, int st, const GfxShaderRes *r,
+                                   const p_bind_buf *bound, const VkDescriptorBufferInfo *resolved, int guarded) {
+    if (resolved->range < (UINT64_C(16) << 20)) return;
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *setting = cfg_get("TOTK_GPU_WRITE_DIAG");
+        enabled = setting && !strcmp(setting, "1");
+    }
+    if (!enabled) return;
+    typedef struct {
+        uint64_t origin, addr, declared, resolved;
+        int32_t stage, slot, cbuf_slot;
+        uint32_t handle, flags, guarded;
+    } Key;
+    static Key seen[128];
+    static unsigned count, limited;
+    if (count == sizeof seen / sizeof *seen) {
+        if (!limited++) rt_log("gpu-write-diag: descriptor observation limit reached; later bindings unobserved");
+        return;
+    }
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    uint64_t origin = 0;
+    if (ex->prog && find_stage(ex->prog, st, &ctl, &code, &len)) {
+        origin = nvn2_origin(code);
+        if (!origin && gfx_shader_is_nvn2(ctl)) origin = gfx_shader_nvn2_hash(ctl, code);
+    }
+    Key key;
+    memset(&key, 0, sizeof key);
+    key.origin = origin, key.addr = bound->addr, key.declared = bound->size, key.resolved = resolved->range;
+    key.stage = st, key.slot = r->slot, key.cbuf_slot = r->cbuf_slot;
+    key.handle = r->handle, key.flags = r->flags, key.guarded = guarded;
+    for (unsigned i = 0; i < count; i++) if (!memcmp(&seen[i], &key, sizeof key)) return;
+    seen[count++] = key;
+    rt_log("gpu-write-diag: descriptor access=declared-writable native_origin=%016llx program=%llu stage=%d "
+           "slot=%d cbuf=%d handle_word=%u handle_byte=%llu flags=%#x guarded=%d "
+           "addr=%#llx declared=%llu resolved=%llu offset=%llu extent_policy=%s observation=%u/128",
+           (unsigned long long)origin, (unsigned long long)(ex->prog ? ex->prog->serial : 0), st,
+           r->slot, r->cbuf_slot, r->handle, (unsigned long long)r->handle * 4, (unsigned)r->flags, guarded,
+           (unsigned long long)bound->addr, (unsigned long long)bound->size,
+           (unsigned long long)resolved->range, (unsigned long long)resolved->offset,
+           bound->size ? "declared-clipped-to-backing-and-device" : "backing-remainder-clipped-to-device", count);
+}
+
 static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *r, int written) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.sbo_max, align = LIM.sbo_align;
@@ -1444,6 +1531,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead : 0, align, max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,
                        written, guarded, &bi)) {
             if (written && bi.buffer != VK_NULL_HANDLE) {
+                gpu_write_binding_diag(ex, st, r, b, &bi, guarded);
                 note_written(ex, b->addr - lead, bi.range);
                 const uint8_t *ctl, *code;
                 uint32_t len;
@@ -1627,6 +1715,37 @@ static void feedback_written(VkExec *ex, const VkPipeState *s) {
 static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
                           VkDescriptorImageInfo *out, VkImage *image);
 
+// Read-only evidence for sampled-format reinterpretation. Replay and texture
+// lookup are serialized here; descriptor re-registration does not spend another
+// observation for the same image/address/requested-format combination.
+static void sampled_format_diag(const GfxShaderRes *r, uint64_t h, int storage,
+                                const VkTexImage *img, const view_t *v, int hv, VkImageView raw) {
+    enum { LIMIT = 128 };
+    static struct { VkImage image; uint64_t addr; uint32_t format; } seen[LIMIT];
+    static unsigned count;
+    if (storage || !img || !hv || !v->set_format) return;
+    TexVkFormat requested = {0};
+    int known = tex_vk_format(v->format, &requested);
+    if (known && requested.vk == img->format) return;
+    for (unsigned i = 0; i < count; i++)
+        if (seen[i].image == img->image && seen[i].addr == img->addr && seen[i].format == v->format) return;
+    if (count >= LIMIT) return;
+    seen[count].image = img->image, seen[count].addr = img->addr, seen[count].format = v->format;
+    count++;
+    rt_log("image-diag: sampled-format binding=%u slot=%d shader_handle=%#x type=%#x handle=%#llx "
+           "addr=%#llx image=%#llx source_vk=%d requested_nvn=%u requested_known=%d requested_vk=%d "
+           "requested_ideal=%d shape=%ux%ux%u levels=%u layers=%u samples=%u aspect=%#x usage=%#x "
+           "view_target=%u mip=%u/%u layer=%u/%u raw_view=%#llx "
+           "format_policy=explicit-compatible observation=%u/%u",
+           r->binding, r->slot, r->handle, r->type, (unsigned long long)h,
+           (unsigned long long)img->addr, (unsigned long long)(uintptr_t)img->image, (int)img->format,
+           v->format, known, (int)requested.vk, (int)requested.ideal,
+           img->width, img->height, img->depth, img->levels, img->layers, img->samples, img->aspect, img->usage,
+           v->target, v->base_level, v->nlevels, v->min_layer, v->nlayers,
+           (unsigned long long)(uintptr_t)raw, count, LIMIT);
+    if (count == LIMIT) rt_log("image-diag: sampled-format observation limit reached; later requests unobserved");
+}
+
 // Opt-in observation only: preserve the original resolution before a dummy is selected. Compare sampling of a
 // colour view may be a genuine guest texture or an unbound/type-mismatched fallback; the Vulkan message alone
 // cannot distinguish them. Keep the original handle and shader metadata next to both view handles.
@@ -1639,7 +1758,9 @@ static void image_binding_diag(const VkExec *ex, const GfxShaderRes *r, uint64_t
         const char *e = getenv("HWAOI_IMAGE_DIAG");
         on = e && !strcmp(e, "1");
     }
-    if (!on || storage || !(r->type & 0x400) || count >= 64) return;
+    if (!on) return;
+    sampled_format_diag(r, h, storage, img, v, hv, raw);
+    if (storage || !(r->type & 0x400) || count >= 64) return;
     if (raw && img && (img->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) return;
     count++;
     rt_log("image-diag: compare binding=%u slot=%d shader_handle=%#x type=%#x separate=%d handle=%#llx "
@@ -2981,6 +3102,57 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     VK_MEM_BOUND(ib);
 }
 
+// Non-indexed indirect arguments may be GPU-written. Native Vulkan topologies
+// consume the actual backing buffer. QUADS require an ordered 16-byte readback,
+// then the established direct-draw index expansion; never reinterpret QUADS as
+// a triangle-list draw or read the stale guest VA. This synchronous fallback is
+// deliberately bounded and logged; it is correctness work, not a speedup.
+static void op_draw_ind(VkExec *ex, const p_draw_ind *d) {
+    if (ex->render_disabled) return;
+    if (!d->ind || (d->ind & 3) || d->ind > UINT64_MAX - sizeof(VkDrawIndirectCommand))
+        rt_fatal("vk: array indirect arguments at %#llx are invalid/alignment overflow", (unsigned long long)d->ind);
+    if (d->prim == NVN_DRAW_PRIMITIVE_QUADS) {
+        VkDrawIndirectCommand a;
+        if (!vk_exec_read_buffer(ex, d->ind, sizeof a, &a))
+            rt_fatal("vk: cannot read GPU-visible array indirect arguments at %#llx", (unsigned long long)d->ind);
+        uint32_t count = a.vertexCount & ~3u; // incomplete quads emit no primitive
+        if (!count || !a.instanceCount) return;
+        // The direct adapter is signed and allocates six u32 indices per quad.
+        // Limit the scratch expansion to 6 MiB; larger forms remain explicit.
+        if (count > (1u << 20) || a.firstVertex > INT32_MAX || a.instanceCount > INT32_MAX ||
+            a.firstInstance > INT32_MAX || (uint64_t)a.firstVertex + count > UINT32_MAX)
+            rt_fatal("vk: array indirect QUADS exceeds bounded expansion: count=%u first=%u instances=%u base=%u",
+                     a.vertexCount, a.firstVertex, a.instanceCount, a.firstInstance);
+        static unsigned logs;
+        if (logs++ < 8) rt_log("vk: array indirect QUADS uses ordered GPU argument readback: addr=%#llx count=%u first=%u instances=%u base=%u",
+                              (unsigned long long)d->ind, a.vertexCount, a.firstVertex, a.instanceCount, a.firstInstance);
+        p_draw direct = {d->prim, (int32_t)a.firstVertex, (int32_t)count, (int32_t)a.firstInstance, (int32_t)a.instanceCount};
+        op_draw(ex, &direct);
+        return;
+    }
+    switch (d->prim) {
+    case NVN_DRAW_PRIMITIVE_POINTS: case NVN_DRAW_PRIMITIVE_LINES: case NVN_DRAW_PRIMITIVE_LINE_STRIP:
+    case NVN_DRAW_PRIMITIVE_TRIANGLES: case NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP: case NVN_DRAW_PRIMITIVE_TRIANGLE_FAN:
+    case NVN_DRAW_PRIMITIVE_LINES_ADJACENCY: case NVN_DRAW_PRIMITIVE_LINE_STRIP_ADJACENCY:
+    case NVN_DRAW_PRIMITIVE_TRIANGLES_ADJACENCY: case NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP_ADJACENCY: break;
+    default: rt_fatal("vk: array indirect primitive %d requires unsupported topology conversion", d->prim);
+    }
+    VkMemSpan ip;
+    if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &ip) || !ip.buffer ||
+        ip.avail < sizeof(VkDrawIndirectCommand) || (ip.offset & 3) || ip.offset > UINT64_MAX - sizeof(VkDrawIndirectCommand))
+        rt_fatal("vk: array indirect arguments at %#llx are not backed or not aligned", (unsigned long long)d->ind);
+    VK_MEM_USE(ip);
+    vk_exec_barrier(ex); // producers and mirror uploads precede indirect-command reads
+    c0_binst = 0; // NVN2 uses the draw's actual BaseInstance, not a fabricated c0 value
+    if (!prepare_draw(ex, d->prim, INT32_MAX, 0)) return;
+    vkCmdDrawIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndirectCommand));
+    vk_exec_frame.draws++;
+    ex->recorded++;
+    note_work(ex, 1, 0);
+    vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
+    VK_MEM_BOUND(ip);
+}
+
 // ---- dispatch and uniform buffer updates
 
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
@@ -3085,7 +3257,7 @@ static void geometry_context_buffer_log(unsigned record, const char *name, const
 
 // Opt-in draw-ingress metadata only. Replay is serialized; the cap is process-wide and later draws are unobserved.
 static void geometry_context_log(const VkExec *ex, uint32_t op, const void *payload) {
-    if (op != OP_DRAW && op != OP_DRAW_IDX && op != OP_DRAW_IDX_IND) return;
+    if (op != OP_DRAW && op != OP_DRAW_IDX && op != OP_DRAW_IDX_IND && op != OP_DRAW_IND) return;
     static int on = -1, filtered;
     static uint64_t filter;
     static unsigned records;
@@ -3142,6 +3314,11 @@ static void geometry_context_log(const VkExec *ex, uint32_t op, const void *payl
         kind = "indexed", prim = d->prim;
         snprintf(draw, sizeof draw, "count=%d instances_raw=%d base_vertex=%d base_instance=%d index_type=%d index_addr=%#llx",
                  d->count, d->instances, d->base_vertex, d->base_instance, d->itype, (unsigned long long)d->ibuf);
+    } else if (op == OP_DRAW_IND) {
+        const p_draw_ind *d = payload;
+        kind = "arrays_indirect", prim = d->prim;
+        snprintf(draw, sizeof draw, "indirect_addr=%#llx count=unknown instances=unknown",
+                 (unsigned long long)d->ind);
     } else {
         const p_draw_idx_ind *d = payload;
         kind = "indexed_indirect", prim = d->prim;
@@ -3303,6 +3480,7 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     case OP_DRAW_IDX: op_draw_idx(ex, payload); break;
     case OP_DISPATCH: op_dispatch(ex, payload); break;
     case OP_DRAW_IDX_IND: op_draw_idx_ind(ex, payload); break;
+    case OP_DRAW_IND: op_draw_ind(ex, payload); break;
     case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
     default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
     }

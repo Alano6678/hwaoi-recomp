@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "input_feed.h"
 #include <string.h>
 #include <SDL3/SDL.h>
 
@@ -431,6 +432,60 @@ static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     return 1;
 }
 
+// The optional diagnostic feed works with input=none as well as live controls,
+// so scripted progression does not need desktop focus. Default: no file I/O.
+static void feed_apply(uint64_t *buttons, int32_t left[2], int32_t right[2]) {
+    static int initialized;
+    static const char *path;
+    static uint64_t next_poll;
+    static int baseline_read;
+    static InputFeed feed;
+    if (!initialized) {
+        path = cfg_get("TOTK_INPUT_FEED"); initialized = 1;
+        if (path && *path) rt_log("input: diagnostic feed %s (commands expire within 10 seconds)", path);
+    }
+    if (!path || !*path) return;
+    uint64_t now = plat_now_ns();
+    if (now >= next_poll) {
+        next_poll = now + 33333333;
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char line[256];
+            if (fgets(line, sizeof line, f) && fgetc(f) == EOF && input_feed_accept(&feed, line, now)) {
+                if (!baseline_read) {
+                    baseline_read = 1;
+                    feed.until = now; // a previous process's final command must not replay on launch
+                    rt_log("input: diagnostic feed baseline %llu; waiting for a new command", (unsigned long long)feed.sequence);
+                } else {
+                if (feed.fps) {
+                    const char *rate_experiment = cfg_get("TOTK_EXPERIMENTAL_RATE");
+                    if (!rate_experiment || strcmp(rate_experiment, "1") || cfg_from_env("TOTK_FPS_LIMIT"))
+                        rt_log("input: FPS experiment rejected; enable EXPERIMENTAL_RATE and leave FPS_LIMIT free of an environment override");
+                    else {
+                        char value[16]; snprintf(value, sizeof value, "%u", feed.fps);
+                        cfg_set("TOTK_FPS_LIMIT", value);
+                    }
+                }
+                if (feed.width) {
+                    if (cfg_from_env("TOTK_WINDOW_SIZE")) rt_log("input: output resize rejected; WINDOW_SIZE is fixed by the environment");
+                    else {
+                        char value[32]; snprintf(value, sizeof value, "%ux%u", feed.width, feed.height);
+                        cfg_set("TOTK_WINDOW_SIZE", value);
+                        rt_log("input: output resolution %s requested; internal game resolution unchanged", value);
+                    }
+                }
+                rt_log("input: diagnostic command %llu buttons=%#llx left=%d,%d right=%d,%d hold_ms=%llu",
+                    (unsigned long long)feed.sequence, (unsigned long long)feed.buttons,
+                    feed.axis[0], feed.axis[1], feed.axis[2], feed.axis[3],
+                    (unsigned long long)((feed.until - now) / 1000000));
+                }
+            }
+            fclose(f);
+        }
+    }
+    input_feed_merge(&feed, now, buttons, left, right);
+}
+
 static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
@@ -465,6 +520,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
         }
     }
     script_apply(&b, sl, sr);
+    feed_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
     // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
     static int combo_held;

@@ -103,6 +103,16 @@ static VkCommandPool g_pool;
 static VkCommandBuffer g_cb[FRAMES];
 static VkFence g_fence[FRAMES];
 static VkSemaphore g_acquire[FRAMES];
+// Each image is reused only after its present fence signals. The game supplies display-encoded
+// bytes even when the backing image has an sRGB format; presentation must preserve those bytes.
+typedef struct {
+    VkImage image;
+    VmaAllocation allocation;
+    VkFormat format;
+    int width, height;
+    VkImageLayout layout;
+} EncodedPresent;
+static EncodedPresent g_encoded[FRAMES];
 // The perf line's present figure (perf_present_gpu): the blit, colour adjustment, FSR and overlay go to the queue
 // outside vk_sync.c's timed submissions. Each slot's pair is read when its fence is waited for again.
 static VkQueryPool g_ts_pool;
@@ -298,13 +308,20 @@ static int create_swapchain(void) {
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, fmts);
     if (!nf) return 0;
-    // UNORM: the blit writes the bytes the game wrote (no sRGB encode).
+    // The menu and optional colour/FSR passes operate on display-encoded values. Keep the
+    // swapchain UNORM, and reinterpret sRGB game sources through an exact copy before them.
+    // A direct sRGB -> UNORM blit would decode the source without re-encoding the destination.
     VkSurfaceFormatKHR sf = fmts[0];
     int found = 0;
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
+    if (nf == 1 && fmts[0].format == VK_FORMAT_UNDEFINED && fmts[0].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+        sf.format = VK_FORMAT_B8G8R8A8_UNORM;
+        found = 1;
+    }
+    if (!found) rt_fatal("gfx: presentation requires an RGBA8/BGRA8 UNORM surface with sRGB nonlinear color space");
     uint32_t count = caps.minImageCount + 1;
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
@@ -359,6 +376,58 @@ static void sync_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, Vk
                                .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b};
     vkCmdPipelineBarrier2(cb, &d);
+}
+
+static VkFormat encoded_format(VkFormat format) {
+    if (format == VK_FORMAT_R8G8B8A8_SRGB) return VK_FORMAT_R8G8B8A8_UNORM;
+    if (format == VK_FORMAT_B8G8R8A8_SRGB) return VK_FORMAT_B8G8R8A8_UNORM;
+    return VK_FORMAT_UNDEFINED;
+}
+
+// Copy, rather than blit, preserves the encoded channel bits between these size-compatible
+// format pairs. Blitting an sRGB source decodes before filtering (including a 1:1 blit):
+// https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBlitImage.html
+// https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyImage.html
+// This follows the present contract: single-sample 2D colour, mip/layer 0, TRANSFER_SRC usage,
+// and GENERAL or TRANSFER_SRC_OPTIMAL layout. Only the visible crop is copied. Other formats
+// keep their existing path; this is not a general colour-space conversion or an HDR transform.
+static VkImage encoded_source(VkCommandBuffer cb, unsigned slot, VkImage src, VkImageLayout layout,
+                              VkFormat format, int x, int y, int w, int h) {
+    VkCtx *c = vk_ctx();
+    EncodedPresent *e = &g_encoded[slot];
+    if (e->image && (e->format != format || e->width != w || e->height != h)) {
+        // present_image waited this slot's fence before recording or replacing its image.
+        vmaDestroyImage(c->vma, e->image, e->allocation);
+        memset(e, 0, sizeof *e);
+    }
+    if (!e->image) {
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+            .format = format, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkResult r = vmaCreateImage(c->vma, &ii, &ai, &e->image, &e->allocation, NULL);
+        if (r != VK_SUCCESS) rt_fatal("gfx: encoded present image %dx%d format %d failed (%d)", w, h, (int)format, (int)r);
+        e->format = format;
+        e->width = w;
+        e->height = h;
+    }
+    sync_barrier(cb, src, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    sync_barrier(cb, e->image, e->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 e->layout ? VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT : 0,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy region = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffset = {x, y, 0},
+        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, e->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    sync_barrier(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    sync_barrier(cb, e->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+    e->layout = layout;
+    return e->image;
 }
 
 static int ensure_capture_buffer(void) {
@@ -576,6 +645,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     if (cy < 0) cy = 0;
     if (cx + cw > w) cw = w - cx;
     if (cy + ch > h) ch = h - cy;
+    if (cw <= 0 || ch <= 0) rt_fatal("gfx: invalid present crop %d,%d %dx%d in %dx%d", cx, cy, cw, ch, w, h);
     window_settings_live();
     // The menu overlay: laid out before recording (its first frame starts the ImGui back end and uploads the font)
     const char *menu_shot = NULL;
@@ -599,6 +669,12 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     }
     uint64_t crumb = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     vk_crumb(cb, VK_CRUMB_PRESENT, crumb);
+    VkFormat encoded = encoded_format(fmt);
+    if (encoded) {
+        src = encoded_source(cb, slot, src, layout, encoded, cx, cy, cw, ch);
+        fmt = encoded;
+        w = cw; h = ch; cx = cy = 0;
+    }
     VkImage dst = g_sc_img[idx];
     sync_barrier(cb, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -750,6 +826,8 @@ void gfx_window_release_vk(void) {
         free_capture();
         free_thumbs();
         for (int i = 0; i < FRAMES; i++) {
+            if (g_encoded[i].image) vmaDestroyImage(c->vma, g_encoded[i].image, g_encoded[i].allocation);
+            memset(&g_encoded[i], 0, sizeof g_encoded[i]);
             vkDestroySemaphore(c->device, g_acquire[i], NULL);
             vkDestroyFence(c->device, g_fence[i], NULL);
         }

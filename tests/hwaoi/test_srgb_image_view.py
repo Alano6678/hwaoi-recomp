@@ -29,7 +29,7 @@ def source():
 #include "nvn_hmap.h"
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"check line %d: %s\n",__LINE__,#x);exit(1); } } while(0)
 static VkCtx context;
-static int storage_feature=1, shape_supported=1, view_success=1;
+static int storage_feature=1, sampled_feature=1, shape_supported=1, view_success=1;
 static unsigned queries, creates;
 static VkPhysicalDeviceImageFormatInfo2 queried;
 static VkImageViewCreateInfo created;
@@ -44,7 +44,7 @@ void vk_texture_lock(void) {}
 void vk_texture_unlock(void) {}
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice device,VkFormat f,VkFormatProperties *p) {
     (void)device;memset(p,0,sizeof *p);
-    p->optimalTilingFeatures=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|
+    p->optimalTilingFeatures=(sampled_feature?VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT:0)|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|
         VK_FORMAT_FEATURE_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     if(f==VK_FORMAT_R8G8B8A8_UNORM && storage_feature)p->optimalTilingFeatures|=VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
 }
@@ -104,10 +104,41 @@ int main(int argc,char **argv) {
     }
     VkTexImage img={.image=(VkImage)(uintptr_t)100,.format=srgb.vk,.type=VK_IMAGE_TYPE_2D,
         .view_type=VK_IMAGE_VIEW_TYPE_2D_ARRAY,.samples=1,.levels=4,.layers=6,
-        .aspect=VK_IMAGE_ASPECT_COLOR_BIT,.usage=base.usage|VK_IMAGE_USAGE_STORAGE_BIT,
+        .aspect=VK_IMAGE_ASPECT_COLOR_BIT,.usage=base.usage|VK_IMAGE_USAGE_STORAGE_BIT,.create_flags=base.flags,
         .swz={NVN_TEXTURE_SWIZZLE_R,NVN_TEXTURE_SWIZZLE_G,NVN_TEXTURE_SWIZZLE_B,NVN_TEXTURE_SWIZZLE_A}};
     view_t v={.set_format=1,.format=NVN_FORMAT_RGBA8,.set_levels=1,.base_level=2,.nlevels=1,
         .set_layers=1,.min_layer=3,.nlayers=2};
+    if(!strncmp(mode,"sampled-",8)) {
+        VkFormat want=linear.vk;
+        if(!strcmp(mode,"sampled-rgba-srgb")) img.format=linear.vk,v.format=NVN_FORMAT_RGBA8_SRGB,want=srgb.vk;
+        else if(!strcmp(mode,"sampled-bc1")) img.format=VK_FORMAT_BC1_RGBA_UNORM_BLOCK,v.format=NVN_FORMAT_RGBA_DXT1_SRGB,want=VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        else if(!strcmp(mode,"sampled-bc3")) img.format=VK_FORMAT_BC3_UNORM_BLOCK,v.format=NVN_FORMAT_RGBA_DXT5_SRGB,want=VK_FORMAT_BC3_SRGB_BLOCK;
+        else if(!strcmp(mode,"sampled-bc7")) img.format=VK_FORMAT_BC7_UNORM_BLOCK,v.format=NVN_FORMAT_BPTC_UNORM_SRGB,want=VK_FORMAT_BC7_SRGB_BLOCK;
+        else if(!strcmp(mode,"sampled-immutable")) img.create_flags=0;
+        else if(!strcmp(mode,"sampled-no-feature")) sampled_feature=0;
+        else if(!strcmp(mode,"sampled-no-usage")) img.usage &= ~VK_IMAGE_USAGE_SAMPLED_BIT;
+        else if(!strcmp(mode,"sampled-depth")) img.aspect=VK_IMAGE_ASPECT_DEPTH_BIT;
+        else if(!strcmp(mode,"sampled-ms")) img.samples=4;
+        else if(!strcmp(mode,"sampled-unobserved-bc2")) img.format=VK_FORMAT_BC2_UNORM_BLOCK,v.format=NVN_FORMAT_RGBA_DXT3_SRGB;
+        else if(!strcmp(mode,"sampled-cross-class")) img.format=VK_FORMAT_BC1_RGBA_UNORM_BLOCK,v.format=NVN_FORMAT_RGBA_DXT5_SRGB;
+        else if(!strcmp(mode,"sampled-unknown")) v.format=0xffff;
+        else if(!strcmp(mode,"sampled-fallback")) v.format=NVN_FORMAT_RGBA_ASTC_4x4;
+        else if(!strcmp(mode,"sampled-alpha-remap")) img.alpha_one=1;
+        else if(!strcmp(mode,"sampled-creation-failure")) view_success=0;
+        else CHECK(!strcmp(mode,"sampled-rgba-linear"));
+        const VkTexImage original=img;const view_t original_view=v;
+        VkImageView view=get_view(NULL,&img,&v,1,0x102,0);
+        CHECK(view && creates==1 && created.format==want && created.image==img.image);
+        CHECK(created_usage==(VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT));
+        CHECK(created.subresourceRange.baseMipLevel==2 && created.subresourceRange.levelCount==1);
+        CHECK(created.subresourceRange.baseArrayLayer==3 && created.subresourceRange.layerCount==2);
+        CHECK(created.components.r==VK_COMPONENT_SWIZZLE_R && created.components.a==VK_COMPONENT_SWIZZLE_A);
+        CHECK(!memcmp(&img,&original,sizeof img) && !memcmp(&v,&original_view,sizeof v));
+        CHECK(get_view(NULL,&img,&v,1,0x102,0)==view && creates==1);
+        // A base-format view must not alias this differently interpreted view.
+        CHECK(get_view(NULL,&img,NULL,0,0x102,0)!=view && creates==2 && created.format==img.format);
+        puts("sampled format check passed");return 0;
+    }
     if(!strcmp(mode,"no-storage-usage")) img.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
     else if(!strcmp(mode,"no-storage-feature")) storage_feature=0;
     else if(!strcmp(mode,"unsupported-format")) v.format=NVN_FORMAT_R8;
@@ -122,7 +153,7 @@ int main(int argc,char **argv) {
     CHECK(created.components.r==VK_COMPONENT_SWIZZLE_R && created.components.a==VK_COMPONENT_SWIZZLE_A);
     CHECK(get_view(NULL,&img,&v,1,0x102,1)==storage && creates==1);
     VkImageView sampled=get_view(NULL,&img,&v,1,0x102,0);
-    CHECK(sampled!=storage && created.format==srgb.vk);
+    CHECK(sampled!=storage && created.format==linear.vk);
     CHECK(created_usage==(VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT));
     // Same image, format, range and swizzle but different usage must never reuse the other view.
     img.image=(VkImage)(uintptr_t)101;img.format=linear.vk;
@@ -146,7 +177,8 @@ int main(int argc,char **argv) {
     return (preamble + key + nodes + function(tex, "static VkFormatFeatureFlags features_of(") +
             function(tex, "static int block_views_ok(") + function(tex, "static int enable_srgb_storage(") +
             function(draw, "static VkImageViewType res_view_type(") + function(draw, "static VkComponentSwizzle swz_of(") +
-            function(draw, "VkImageAspectFlags vk_exec_view_aspect(") + function(draw, "static VkImageView get_view(") +
+            function(draw, "VkImageAspectFlags vk_exec_view_aspect(") + function(draw, "static int sampled_format_compatible(") +
+            function(draw, "static VkImageView get_view(") +
             function(draw, "VkImageView vk_exec_target_view(") + main)
 
 
@@ -165,11 +197,16 @@ class SrgbImageViewTests(unittest.TestCase):
                     encoding="utf-8", errors="replace", timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 for case in ("capabilities", "views", "no-storage-usage", "no-storage-feature", "unsupported-format",
-                             "fallback-format", "srgb-storage", "creation-failure"):
+                             "fallback-format", "srgb-storage", "creation-failure",
+                             "sampled-rgba-linear", "sampled-rgba-srgb", "sampled-bc1", "sampled-bc3", "sampled-bc7",
+                             "sampled-immutable", "sampled-no-feature", "sampled-no-usage", "sampled-depth", "sampled-ms",
+                             "sampled-unobserved-bc2", "sampled-cross-class", "sampled-unknown", "sampled-fallback",
+                             "sampled-alpha-remap", "sampled-creation-failure"):
                     with self.subTest(opt=opt, case=case):
                         result = subprocess.run([str(exe), case], capture_output=True, text=True,
                                                 encoding="utf-8", errors="replace", timeout=10)
-                        good = case in ("capabilities", "views")
+                        good = case in ("capabilities", "views", "sampled-rgba-linear", "sampled-rgba-srgb",
+                                        "sampled-bc1", "sampled-bc3", "sampled-bc7")
                         self.assertEqual(result.returncode, 0 if good else 73, result.stdout + result.stderr)
                         self.assertIn("check passed" if good else "vk:", result.stdout if good else result.stderr)
 

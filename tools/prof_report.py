@@ -123,13 +123,11 @@ def main():
         mod = next((Path(m[2]).name for m in prof['modules'] if m[0] <= rip < m[0] + m[1]), None)
         cats['outside: ' + (mod or 'unknown')] += n
         funcs[(mod or 'unknown') + '!+' + hex(rip - next((m[0] for m in prof['modules'] if m[0] <= rip < m[0] + m[1]), 0))] += n
-    blocked = ('outside: ntdll', 'outside: win32u', 'outside: KERNELBASE')   # waits and message loops: threads not running
-    idle = sum(n for k, n in cats.items() if k.startswith(blocked))
-    act = (total - idle) or 1
-    print(f'samples {prof["samples"]} (Rips kept {total}), 1 ms nominal period; ntdll/win32u/KERNELBASE (blocked threads) {100 * idle / total:.1f}%')
-    print('\ncategory (% of all samples, % of running samples = all minus ntdll/win32u/KERNELBASE)')
+    print(f'samples {prof["samples"]} (Rips kept {total}), 1 ms nominal period')
+    print('IP samples show observed locations, not CPU-time or blocked/running state. Sampling suspends threads briefly.')
+    print('\ncategory (% of all retained samples)')
     for k, n in cats.most_common():
-        print(f'  {100 * n / total:6.2f}%  {"" if k.startswith(blocked) else format(100 * n / act, "6.2f") + "%":>7}  {n:8d}  {k}')
+        print(f'  {100 * n / total:6.2f}%  {n:8d}  {k}')
     print(f'\ntop {a.top} functions')
     for k, n in funcs.most_common(a.top):
         print(f'  {100 * n / total:6.2f}%  {n:8d}  {k}')

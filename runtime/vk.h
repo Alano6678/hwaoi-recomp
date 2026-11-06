@@ -318,6 +318,7 @@ typedef struct {
     VkImageViewType view_type;     // view of the whole image
     VkImageAspectFlags aspect;
     VkImageUsageFlags usage;
+    VkImageCreateFlags create_flags;   // exact creation flags, including mutable-format view permission
     uint32_t width, height, depth, levels, layers, samples;
     uint64_t addr;                 // storage GPU address
     uint8_t alpha_one;             // X format: sample alpha as 1 through the view swizzle

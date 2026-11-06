@@ -166,7 +166,7 @@ static void recording_mode_check(const cmd_t *o, uint32_t op) {
     if (o->recording_mode != 2) return;
     switch (op) {
     case OP_BEGIN: case OP_END:
-    case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_COPY_STRIDE:
+    case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_COPY_STRIDE: case OP_COPY_IMAGE_STRIDE:
     case OP_BARRIER: case OP_WAIT_SYNC: case OP_FENCE_SYNC:
         return;
     default:
@@ -892,6 +892,12 @@ NVN_API(nvnCommandBufferDrawElementsInstanced) {
                                                     (int)arg_x(c, 5), (int)arg_x(c, 6), (int)arg_x(c, 7), arg_x(c, 4)};
     hw_fix(o, 44);
 }
+// void nvnCommandBufferDrawArraysIndirect(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNbufferAddress indirect)
+// Same three-argument entry as nxnative; x3 is not a draw count.
+NVN_API(nvnCommandBufferDrawArraysIndirect) {
+    cmd_rt_trace(c, "DrawArraysIndirect");
+    *REC(cmd_of(c), OP_DRAW_IND, p_draw_ind) = (p_draw_ind){(int)arg_x(c, 1), 0, arg_x(c, 2)};
+}
 // void nvnCommandBufferDrawElementsIndirect(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNindexType type,
 // NVNbufferAddress indices, NVNbufferAddress indirect): the arguments at indirect are often GPU-written, so the replay
 // draws with vkCmdDrawIndexedIndirect from the pool buffer (nxnative hle_nvn.c, SavageWindRecomp cmdbuf.c)
@@ -996,6 +1002,12 @@ NVN_API(nvnCommandBufferDownsample) {
 }
 // void nvnCommandBufferSetCopyRowStride(NVNcommandBuffer *cmd, ptrdiff_t stride)
 NVN_API(nvnCommandBufferSetCopyRowStride) { REC(cmd_of(c), OP_COPY_STRIDE, p_copy_stride)->stride = (int64_t)arg_x(c, 1); }
+// void nvnCommandBufferSetCopyImageStride(NVNcommandBuffer *cmd, ptrdiff_t stride)
+NVN_API(nvnCommandBufferSetCopyImageStride) {
+    int64_t stride = (int64_t)arg_x(c, 1);
+    if (stride < 0) rt_fatal("nvn: negative copy image stride %lld is unsupported", (long long)stride);
+    REC(cmd_of(c), OP_COPY_IMAGE_STRIDE, p_copy_stride)->stride = stride;
+}
 // void nvnCommandBufferSetBlendColor(NVNcommandBuffer *cmd, const float *rgba)
 NVN_API(nvnCommandBufferSetBlendColor) { memcpy(REC(cmd_of(c), OP_BLEND_COLOR, p_blend_color)->rgba, arg_p(c, 1), 16); }
 
@@ -1291,7 +1303,7 @@ const char *nvn_op_name(uint32_t op) {
         "BIND_VSTREAM", "BIND_VBUF", "BIND_UBO", "BIND_SSBO", "BIND_TEX", "BIND_SAMP", "STENCIL", "POLY_OFFSET", "DRAW",
         "DRAW_IDX", "DISPATCH", "BARRIER", "SET_TEX_POOL", "SET_SAMP_POOL", "COPY_B2T", "COPY_STRIDE", "BLEND_COLOR",
         "COPY_T2B", "BIND_IMG", "COPY_T2T", "RESET_COUNTER", "CLEAR_TEX", "DEPTH_CLAMP", "RENDER_ENABLE",
-        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "PUSH_CONST", "WAIT_SYNC", "FENCE_SYNC",
+        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "PUSH_CONST", "WAIT_SYNC", "FENCE_SYNC", "DRAW_IND", "COPY_IMAGE_STRIDE",
     };
     _Static_assert(sizeof names / sizeof *names == OP_COUNT_, "one name per op");
     return op < OP_COUNT_ ? names[op] : "?";

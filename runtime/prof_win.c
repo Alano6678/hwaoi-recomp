@@ -16,6 +16,10 @@
 // chain where the thread stopped) and, after a present at least <ms> after the previous one, writes
 // that interval's samples (plus the 20 ms before) to <TOTK_PROFILE>.f<frame>: the profile format, one `stack 1` line per
 // sample, and `tstack <tid> <ms into the window> <rip>...` lines that keep the thread and the time. At most 64 dumps.
+// TOTK_PROFILE_IP_ONLY=1 (HWAOI_PROFILE_IP_ONLY in this fork) explicitly disables
+// stack copies/unwinding and slow-frame chains, including for MAIN/RENDER filters.
+// Thread selection and PROFILE_FRAMES still apply. Samples still suspend/resume
+// threads briefly, so this is a diagnostic run, not an uninstrumented benchmark.
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -347,6 +351,12 @@ int prof_sampler_start(void) {
     const char *sl = cfg_get("TOTK_PROFILE_SLOW");
     slow_ns = sl && atoi(sl) > 0 ? (uint64_t)atoi(sl) * 1000000ull : 0;
     chains = only_render || only_main || slow_ns || (ch && *ch && strcmp(ch, "0"));
+    const char *ip_only = cfg_get("TOTK_PROFILE_IP_ONLY");
+    if (ip_only && !strcmp(ip_only, "1")) {
+        chains = 0;
+        slow_ns = 0;
+        rt_log("prof: instruction-pointer-only sampling; stack copies, unwinding and slow-frame chains disabled");
+    }
     const char *fr = cfg_get("TOTK_PROFILE_FRAMES");
     double wl, wh;
     if (fr && fr[0] == 'w' && sscanf(fr + 1, "%lf-%lf", &wl, &wh) == 2 && wl >= 0 && wl < wh)

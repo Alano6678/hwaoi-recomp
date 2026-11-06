@@ -32,7 +32,8 @@ static int readable=1, depth_feature=1, linear_feature=1, allocation_ok=1;
 static unsigned allocations, destroyed_images, destroyed_views, uploads, upload_step;
 static uint16_t staged[16], copied[16];
 static VkImageCreateInfo allocated;
-static view_t source_view={.set_levels=1,.nlevels=1,.set_layers=1,.nlayers=6};
+static view_t source_view={.set_format=1,.format=NVN_FORMAT_RGBA8,
+    .set_levels=1,.nlevels=1,.set_layers=1,.nlayers=6};
 static samp_par source_sampler={.cmp_mode=NVN_COMPARE_MODE_COMPARE_R_TO_TEXTURE,
     .ws=NVN_WRAP_MODE_CLAMP_TO_EDGE,.wt=NVN_WRAP_MODE_CLAMP_TO_EDGE,.wr=NVN_WRAP_MODE_CLAMP_TO_EDGE};
 static int sampler_present=1;
@@ -219,6 +220,7 @@ int main(int argc,char **argv) {
     VkDescriptorImageInfo out;tex_info(&ex,&r,5,0,0,&out);
     CHECK(allocations==1 && uploads==1 && !upload_step && out.imageLayout==VK_IMAGE_LAYOUT_GENERAL);
     CHECK(out.sampler==(VkSampler)(uintptr_t)123 && created.format==VK_FORMAT_D16_UNORM && created_usage==VK_IMAGE_USAGE_SAMPLED_BIT);
+    CHECK(source_view.set_format==1 && source_view.format==NVN_FORMAT_RGBA8);
     CHECK(created.components.r==VK_COMPONENT_SWIZZLE_R && created.components.g==VK_COMPONENT_SWIZZLE_G &&
           created.components.b==VK_COMPONENT_SWIZZLE_B && created.components.a==VK_COMPONENT_SWIZZLE_A);
     CHECK(allocated.arrayLayers==source_tex.pub.layers && allocated.flags==(source_tex.pub.layers==6 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0));

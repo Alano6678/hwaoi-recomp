@@ -654,13 +654,39 @@ uint32_t romfs_mount(const char *name) {
     return 0;
 }
 
+// Optional bounded observations of the actual open result. The older path-only
+// trace runs before validation, so repeated lines alone do not prove an open
+// succeeded (or distinguish demux reads from a rejected-mode retry loop).
+static uint32_t romfs_open_result(const char *path, int mode, const uint64_t *out, uint32_t result) {
+    static int enabled = -1;
+    static uint64_t calls, successes, failures;
+    int on = __atomic_load_n(&enabled, __ATOMIC_RELAXED);
+    if (on < 0) {
+        const char *e = cfg_get("TOTK_FS_DIAG");
+        on = e && !strcmp(e, "1");
+        __atomic_store_n(&enabled, on, __ATOMIC_RELAXED);
+    }
+    if (!on) return result;
+    uint64_t seq = __atomic_add_fetch(&calls, 1, __ATOMIC_RELAXED);
+    uint64_t failed = result ? __atomic_add_fetch(&failures, 1, __ATOMIC_RELAXED) :
+                              __atomic_load_n(&failures, __ATOMIC_RELAXED);
+    uint64_t ok = result ? __atomic_load_n(&successes, __ATOMIC_RELAXED) :
+                          __atomic_add_fetch(&successes, 1, __ATOMIC_RELAXED);
+    if (seq <= 32 || (result && failed <= 32) || !(seq % 16384))
+        rt_log("fs-diag: RomFS open seq=%llu mode=%#x result=%#x handle=%#llx successes=%llu failures=%llu path=%s",
+               (unsigned long long)seq, (unsigned)mode, result,
+               (unsigned long long)(!result && out ? *out : 0),
+               (unsigned long long)ok, (unsigned long long)failed, path ? path : "(null)");
+    return result;
+}
+
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     fs_trace("rom", path);
-    if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
+    if (!out || mode != FS_OPEN_READ) return romfs_open_result(path, mode, out, FS_R_UNSUPPORTED_OPEN);
     const char *p = romfs_path_relative(mount_name, path);
-    if (!p) return FS_R_PATH_NOT_FOUND;
+    if (!p) return romfs_open_result(path, mode, out, FS_R_PATH_NOT_FOUND);
     uint64_t i = file_index(p);
-    if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
+    if (i == UINT64_MAX) return romfs_open_result(path, mode, out, FS_R_PATH_NOT_FOUND);
     uint32_t ov = overlay_slot(i);
 #ifdef ROMFS_NUP_MODE
     if (!ov) verify_entry(i);
@@ -682,7 +708,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
             handle_file[j] = f;
             *out = ROMFS_HANDLE_BASE + j;
             plat_mutex_unlock(&lock);
-            return 0;
+            return romfs_open_result(path, mode, out, 0);
         }
     plat_mutex_unlock(&lock);
     rt_fatal("RomFS file handle table full (%d)", NH);

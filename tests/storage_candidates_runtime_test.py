@@ -41,6 +41,8 @@ static unsigned checks, failures, wrote, dropped, noted, copies;
 static uint64_t last_note_addr, last_note_size;
 #define CHECK(c, message) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 void rt_fatal(const char *fmt, ...) { (void)fmt; abort(); }
+void rt_log(const char *fmt, ...) { (void)fmt; }
+const char *cfg_get(const char *name) { (void)name; return NULL; }
 static void warn_once(int id, const char *fmt, ...) { (void)id; (void)fmt; }
 void vk_mem_count(int cls, int use, uint64_t bytes) { (void)cls; (void)use; (void)bytes; }
 static void count_use(int cls, int use, uint64_t bytes) { vk_mem_count(cls, use, bytes); }
@@ -48,6 +50,7 @@ static void count_use(int cls, int use, uint64_t bytes) { vk_mem_count(cls, use,
 int vk_sync_noting(void) { return 0; }
 uint64_t nvn2_origin(const uint8_t *code) { (void)code; abort(); }
 uint64_t gfx_shader_nvn2_hash(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;abort();}
+void gfx_shader_nvn2_dump_failure(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;abort();}
 int nvn2_lower(const uint8_t *ctl,const uint8_t *code,const uint8_t **out_ctl,const uint8_t **out_code) {
     (void)ctl;(void)code;(void)out_ctl;(void)out_code;abort();
 }
@@ -104,6 +107,7 @@ int vk_mem_resolve(uint64_t addr, uint64_t n, VkMemSpan *span) {
                function(draw, 'static uint64_t ubo_ptr('),
                '#define find_stage find_stage_scan\n',
                function(draw, 'static p_bind_buf guarded_storage_binding('),
+               function(draw, 'static void gpu_write_binding_diag('),
                function(draw, 'static VkDescriptorBufferInfo ssbo_info(')]
     after = r'''
 int main(void) {

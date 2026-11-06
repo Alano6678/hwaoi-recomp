@@ -46,6 +46,7 @@ static GfxShaderAnswers last_answers;
 static const uint8_t *native_code;
 static unsigned lower_calls;
 uint64_t gfx_shader_nvn2_hash(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;return 17;}
+void gfx_shader_nvn2_dump_failure(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;abort();}
 int nvn2_lower(const uint8_t *ctl,const uint8_t *code,const uint8_t **out_ctl,const uint8_t **out_code) {
     static uint8_t resolved[0x880];
     (void)ctl;uint32_t stage=2,size=0xa0;
@@ -53,6 +54,8 @@ int nvn2_lower(const uint8_t *ctl,const uint8_t *code,const uint8_t **out_ctl,co
     *out_ctl=resolved;*out_code=code;native_code=code;lower_calls++;return 1;
 }
 int cfg_bool(const char *name) { return !strcmp(name,"TOTK_FIX_C0")?fix_c0:enabled; }
+const char *cfg_get(const char *name) { (void)name; return NULL; }
+void rt_log(const char *format,...) { (void)format; }
 static int c0_on(void) { return fix_c0; }
 static void warn_once(int key,const char *format,...) { (void)key;(void)format;warnings++; }
 uint64_t nvn2_origin(const uint8_t *code) { return code==native_code?17:0; }
@@ -164,7 +167,7 @@ void rc_vkCmdPipelineBarrier2(VkCommandBuffer cb,const VkDependencyInfo *di) {
     lim = function(draw, 'static struct { uint64_t ubo_max,') + ' LIM;'
     memory_helpers = '\n'.join(function(draw, prefix) for prefix in ('static VkDescriptorBufferInfo zero_info(',
         'static int bind_range(', 'static void note_written(', 'static p_bind_buf guarded_storage_binding(',
-        'static VkDescriptorBufferInfo ssbo_info(', 'static VkDescriptorBufferInfo ubo_info('))
+        'static void gpu_write_binding_diag(', 'static VkDescriptorBufferInfo ssbo_info(', 'static VkDescriptorBufferInfo ubo_info('))
     barrier_helpers = '\n'.join(function(replay, prefix) for prefix in ('static int has_image(',
         'static VkImageMemoryBarrier2 layout_barrier(', 'static void barrier_to(', 'void vk_exec_barrier('))
     cases = r'''
