@@ -33,3 +33,20 @@ This is not a real-GPU semantic test or proof that all native shaders are correc
 
 The older `xlate-managed` deployment is preserved. Protocol-capable deployment:
 `work/build/hwaoi196608/xlate-managed-irbanks` (see its build-report.json and .id).
+
+## 0003: proven typed storage-buffer address bases
+
+For the explicit guarded NVN 2 compute contract, a complete low/high address
+certificate can select a declared storage-buffer table entry. Each low-word
+addition must have its matching unsigned carry in the high word; shifted or
+signed upper words must also match. Unresolved phis, unrelated carries and
+unknown arithmetic retain the original guarded candidates. This prevents scalar
+dimensions and floating-point parameters from becoming broad writable aliases
+when their pointer provenance can be ruled out. NVN descriptor bounds remain
+enforced by the generated guards.
+
+The managed builder includes the original CPU-only address probe in its source
+identity and requires `--probe-hwaoi-typed-storage-address` before deployment.
+It checks carry/refusal cases, predicate phis with copies, and independent
+64-bit arithmetic oracles. This source addition still requires compilation and
+real combat validation; it is not evidence of a measured FPS improvement.

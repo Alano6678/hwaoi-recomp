@@ -1,0 +1,244 @@
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -160,6 +160,10 @@
+         // Explicit ABI opt-in. Other clients and backends retain the legacy pass.
+         bool QueryStorageBufferRuntimeCandidates() => false;
+         bool QueryHostSupportsStorageBufferArrayLength() => false;
++
++        // A declared NVN storage-buffer descriptor, whose bounds govern accesses.
++        // Unknown clients must retain every guarded runtime candidate.
++        bool QueryTypedStorageBuffer(int slot, int wordOffset) => false;
+ 
+         /// <summary>
+         /// Queries whenever the current draw uses unaligned storage buffer addresses.
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -480,6 +480,28 @@
+                         pending.Enqueue((source.GetSource(index), current.Block));
+                     }
+                 }
++            }
++
++            // Scalar dimensions, floating-point parameters and carry predicates
++            // are dependencies of an address, not additional pointer bases. Only
++            // prune when the entire 64-bit address has a typed-base certificate.
++            // Unknown Phi/arithmetic shapes keep the original guarded candidates.
++            int certified = -1;
++            for (int index = 0; index < candidates.Count; index++)
++            {
++                (int slot, int offset) = UnpackCbSlotAndOffset(candidates[index]);
++                if (gpuAccessor.QueryTypedStorageBuffer(slot, offset) &&
++                    TypedStorageAddress.IsBase(block, operation.GetSource(0), operation.GetSource(1), slot, offset))
++                {
++                    if (certified != -1) { certified = -2; break; }
++                    certified = index;
++                }
++            }
++            if (certified >= 0)
++            {
++                uint target = candidates[certified];
++                candidates.Clear();
++                candidates.Add(target);
+             }
+ 
+             if (candidates.Count == 0)
+--- a/xlate/Program.cs
++++ b/xlate/Program.cs
+@@ -243,6 +243,13 @@
+         // "sbuf_align": n: the host binds each storage buffer at its guest address rounded down to n (minStorageBufferOffsetAlignment
+         // above 4), so storage offsets count from there (Ryujinx's unaligned path; the multi-target path uses n too).
+         public bool QueryHasUnalignedStorageBuffer() => _job["sbuf_align"] is JsonNode;
++        public bool QueryTypedStorageBuffer(int slot, int wordOffset)
++        {
++            if (StorageCandidatesVersion != 1 || slot != 0 || _job["c0"] is not JsonArray counts) return false;
++            int begin = 0x10 + _rootBytes + 16 * (int)counts[1];
++            int bytes = wordOffset * 4;
++            return bytes >= begin && bytes < begin + 16 * (int)counts[2] && (bytes - begin) % 16 == 0;
++        }
+         public bool QueryStorageBufferRuntimeCandidates() => StorageCandidatesVersion == 1;
+         public bool QueryHostSupportsStorageBufferArrayLength() => true;
+         public int QueryHostStorageBufferOffsetAlignment() => _job["sbuf_align"] is JsonNode n ? (int)n : 16;
+@@ -342,6 +349,8 @@
+ 
+     static int Main(string[] args)
+     {
++        if (args.Length == 1 && args[0] == "--probe-hwaoi-typed-storage-address")
++            return TypedStorageAddressProbe.Run();
+         if (args.Length == 1 && args[0] == "--probe-hwaoi-ir-banks")
+         {
+             Console.WriteLine(HwaoiPrivateRegisters.Probe());
+--- /dev/null
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Optimizations/TypedStorageAddress.cs
+@@ -0,0 +1,172 @@
++// Original conservative typed-buffer provenance certificate for HWAoI.
++// Unknown expressions retain the guarded candidate search; a scalar dependency
++// is never discarded merely because its current value looks unlike a pointer.
++using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Shader.Translation.Optimizations
++{
++    static class TypedStorageAddress
++    {
++        readonly record struct Edge(Operand Sum, Operand Base, Operand Offset);
++
++        // This verifies the whole low/high pair, not just a dependency set.
++        // The caller must separately establish the NVN typed-buffer contract.
++        public static bool IsBase(BasicBlock block, Operand low, Operand high, int slot, int offset)
++        {
++            int budget = 1024;
++            List<Edge> edges = [];
++            if (!LowPath(block, low, slot, offset, edges, ref budget)) return false;
++            List<Operand> terms = [];
++            if (!HighTerms(block, high, terms, ref budget)) return false;
++            bool foundBase = false;
++            HashSet<int> carries = [], uppers = [];
++            foreach (Operand raw in terms)
++            {
++                Operand term = Resolve(block, raw);
++                if (CbufIs(term, slot, offset + 1))
++                {
++                    if (foundBase) return false;
++                    foundBase = true;
++                    continue;
++                }
++                if (ConstantIs(term, 0)) continue;
++                if (TryCarry(block, term, edges, out int edge, ref budget))
++                {
++                    // -1 is the always-false unsigned comparison x < 0.
++                    if (edge >= 0 && !carries.Add(edge)) return false;
++                    continue;
++                }
++                bool upper = false;
++                for (int i = 0; i < edges.Count; i++)
++                {
++                    if (!uppers.Contains(i) && IsUpper(block, term, edges[i].Offset, ref budget))
++                    {
++                        uppers.Add(i);
++                        upper = true;
++                        break;
++                    }
++                }
++                if (!upper) return false;
++            }
++            if (!foundBase) return false;
++            for (int i = 0; i < edges.Count; i++)
++            {
++                Operand value = Resolve(block, edges[i].Offset);
++                if (!ConstantIs(value, 0) && !carries.Contains(i)) return false;
++                if (value.Type == OperandType.Constant && value.Value < 0 && !uppers.Contains(i)) return false;
++            }
++            return budget > 0;
++        }
++
++        static Operand Resolve(BasicBlock block, Operand value)
++        {
++            for (int i = 0; i < 64; i++)
++            {
++                Operand next = Utils.FindLastOperation(value, block);
++                if (next != value) { value = next; continue; }
++                if (value.AsgOp is Operation copy && copy.Inst == Instruction.Copy)
++                {
++                    value = copy.GetSource(0);
++                    continue;
++                }
++                return value;
++            }
++            return value;
++        }
++
++        static bool ConstantIs(Operand value, int constant) =>
++            value.Type == OperandType.Constant && value.Value == constant;
++
++        static bool CbufIs(Operand value, int slot, int offset) =>
++            value.Type == OperandType.ConstantBuffer && value.GetCbufSlot() == slot && value.GetCbufOffset() == offset;
++
++        static bool Same(BasicBlock block, Operand a, Operand b, ref int budget)
++        {
++            if (--budget <= 0) return false;
++            a = Resolve(block, a); b = Resolve(block, b);
++            if (a == b) return true;
++            if (a.Type != b.Type) return false;
++            if (a.Type is OperandType.Constant or OperandType.ConstantBuffer) return a.Value == b.Value;
++            if (a.AsgOp is not Operation x || b.AsgOp is not Operation y || x.Inst != y.Inst ||
++                x.StorageKind != y.StorageKind || x.SourcesCount != y.SourcesCount) return false;
++            // Distinct loads/calls/atomics may observe different memory even
++            // with equal operands. Only compare pure integer expressions.
++            if (x.Inst is not (Instruction.Add or Instruction.Subtract or Instruction.Multiply or
++                Instruction.ShiftLeft or Instruction.ShiftRightU32 or Instruction.BitwiseAnd or
++                Instruction.BitwiseOr or Instruction.BitwiseExclusiveOr or Instruction.BitwiseNot or
++                Instruction.CompareLessU32 or Instruction.CompareEqual or Instruction.ConditionalSelect)) return false;
++            for (int i = 0; i < x.SourcesCount; i++)
++                if (!Same(block, x.GetSource(i), y.GetSource(i), ref budget)) return false;
++            return true;
++        }
++
++        static bool LowPath(BasicBlock block, Operand low, int slot, int offset, List<Edge> path, ref int budget)
++        {
++            if (--budget <= 0) return false;
++            low = Resolve(block, low);
++            if (CbufIs(low, slot, offset)) return true;
++            if (low.AsgOp is not Operation add || add.Inst != Instruction.Add) return false;
++            Operand a = add.GetSource(0), b = add.GetSource(1);
++            List<Edge> left = [], right = [];
++            bool l = LowPath(block, a, slot, offset, left, ref budget);
++            bool r = LowPath(block, b, slot, offset, right, ref budget);
++            if (l == r) return false;
++            path.AddRange(l ? left : right);
++            path.Add(new Edge(low, l ? a : b, l ? b : a));
++            return true;
++        }
++
++        static bool HighTerms(BasicBlock block, Operand high, List<Operand> terms, ref int budget)
++        {
++            if (--budget <= 0) return false;
++            high = Resolve(block, high);
++            if (high.AsgOp is PhiNode) return false;
++            if (high.AsgOp is Operation add && add.Inst == Instruction.Add)
++                return HighTerms(block, add.GetSource(0), terms, ref budget) &&
++                       HighTerms(block, add.GetSource(1), terms, ref budget);
++            terms.Add(high);
++            return true;
++        }
++
++        static bool TryCarry(BasicBlock block, Operand value, List<Edge> edges, out int edge, ref int budget)
++        {
++            edge = -1;
++            value = Resolve(block, value);
++            Operand condition;
++            if (value.AsgOp is Operation select && select.Inst == Instruction.ConditionalSelect &&
++                ConstantIs(Resolve(block, select.GetSource(1)), 1) && ConstantIs(Resolve(block, select.GetSource(2)), 0))
++                condition = select.GetSource(0);
++            else if (value.AsgOp is Operation mask && mask.Inst == Instruction.BitwiseAnd &&
++                     ConstantIs(Resolve(block, mask.GetSource(1)), 1))
++                condition = mask.GetSource(0);
++            else return false;
++            condition = Resolve(block, condition);
++            if (condition.AsgOp is not Operation cmp || cmp.Inst != Instruction.CompareLessU32) return false;
++            Operand low = cmp.GetSource(0), other = Resolve(block, cmp.GetSource(1));
++            if (ConstantIs(other, 0)) return true;
++            for (int i = 0; i < edges.Count; i++)
++            {
++                if (Same(block, low, edges[i].Sum, ref budget) &&
++                    (Same(block, other, edges[i].Base, ref budget) || Same(block, other, edges[i].Offset, ref budget)))
++                {
++                    edge = i;
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        static bool IsUpper(BasicBlock block, Operand high, Operand low, ref int budget)
++        {
++            low = Resolve(block, low); high = Resolve(block, high);
++            if (low.Type == OperandType.Constant) return low.Value < 0 && ConstantIs(high, -1);
++            if (low.AsgOp is not Operation l || l.Inst != Instruction.ShiftLeft ||
++                high.AsgOp is not Operation h || h.Inst != Instruction.ShiftRightU32) return false;
++            Operand ls = Resolve(block, l.GetSource(1)), hs = Resolve(block, h.GetSource(1));
++            return ls.Type == OperandType.Constant && hs.Type == OperandType.Constant &&
++                   ls.Value > 0 && ls.Value < 32 && ls.Value + hs.Value == 32 &&
++                   Same(block, l.GetSource(0), h.GetSource(0), ref budget);
++        }
++    }
++}

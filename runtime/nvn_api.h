@@ -122,6 +122,20 @@ int nvn_handle_live(uint64_t handle);                      // 1 while the handle
 uint64_t nvn_handle_bytes(uint64_t handle);                // bytes of the copy, OP_BEGIN to OP_END; 0 if not live
 uint64_t nvn_submit_count(void);                           // QueueSubmitCommands calls so far
 const char *nvn_op_name(uint32_t op);                      // "DRAW_IDX", ...; "?" past OP_COUNT_
+// Optional retained-host-memory evidence. These are allocator-owned byte counts, not process/RSS estimates.
+// Each owner is sampled under its own lock; the combined snapshot is not a transaction across owners.
+#define NVN_RUNTIME_MEMORY_DIAG_VERSION 1
+typedef struct {
+    uint64_t copies, copy_bytes, copies_made, copy_index_bytes;
+    uint64_t zombies, zombie_bytes;
+    uint64_t texture_pins, texture_pin_bytes, texture_pin_index_bytes;
+    uint64_t program_controls, program_control_bytes, program_controls_made, program_control_bytes_made;
+    uint64_t program_control_index_bytes;
+    uint64_t program_ledger_disabled, program_unmatched_frees, program_duplicate_allocations;
+} NvnMemoryStats;
+int nvn_memory_diagnostics(void);                         // RUNTIME_MEMORY_DIAG=1; read once, off by default
+void nvn_runtime_memory_stats(NvnMemoryStats *out);       // no allocation, no collection/reclamation side effects
+void nvn_program_memory_stats(NvnMemoryStats *out);       // nvn_api_obj.c fills only the program fields
 // MemoryPoolInvalidateMappedRange: the CPU is about to read pool storage the GPU wrote. Weak no-op in nvn_ext.c; a back
 // end that renders into host-side copies defines it and writes them back.
 void nvn_pool_invalidate(const pool_t *p, uint64_t off, uint64_t size);

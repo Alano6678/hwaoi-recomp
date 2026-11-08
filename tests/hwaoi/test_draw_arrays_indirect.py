@@ -17,7 +17,8 @@ from nvn2_compute_c0_test import function
 def source(mutation=None):
     draw=(ROOT/"runtime/vk_exec_draw.c").read_text()
     cmd=(ROOT/"runtime/nvn_api_cmd.c").read_text()
-    code=function(draw,"static void op_draw(")+function(draw,"static void op_draw_ind(")
+    code=(function(draw,"static int indirect_batch_on(")+function(draw,"static int indirect_can_stay_in_pass(")+
+          function(draw,"static void op_draw(")+function(draw,"static void op_draw_ind("))
     if mutation=="no-quads":
         code=code.replace("if (d->prim == NVN_DRAW_PRIMITIVE_QUADS)","if (0)",1)
     if mutation=="zero-instance":
@@ -37,6 +38,9 @@ def source(mutation=None):
 #define VK_MEM_BOUND(s) do { bound++; } while(0)
 VkExecFrame vk_exec_frame;
 static unsigned used,bound,barriers,reads,prepares,draws,indexed,notes,counts;
+static unsigned expected_barriers=1;
+static const char *batch_setting;
+const char *cfg_get(const char *name){(void)name;return batch_setting;}
 static int backed=1,read_ok=1,prepare_ok=1,unaligned,short_range,overflow;
 static uint32_t c0_binst,indices[64],index_count,seen_instances,seen_base,seen_first,seen_count;
 static VkDrawIndirectCommand gpu={7,2,11,3}, untouched={0,0,0,0};
@@ -59,7 +63,7 @@ void rc_vkCmdDraw(VkCommandBuffer cb,uint32_t n,uint32_t inst,uint32_t first,uin
 }
 void rc_vkCmdDrawIndirect(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,uint32_t n,uint32_t stride) {
     (void)cb;CHECK(buffer==(VkBuffer)(uintptr_t)0x2222 && offset==32 && n==1 && stride==16);
-    CHECK(used==1 && barriers==1 && prepares==1);draws++;
+    CHECK(used==1 && barriers==expected_barriers && prepares==1);draws++;
 }
 void vk_exec_barrier(VkExec *ex) { (void)ex;CHECK(used==1);barriers++; }
 int vk_exec_read_buffer(VkExec *ex,uint64_t addr,uint64_t size,void *out) {
@@ -95,6 +99,8 @@ int main(int argc,char **argv) {
     CHECK(record_op==OP_DRAW_IND && recorded.prim==7 && recorded.pad==0 && recorded.ind==0x10000);
     VkExec ex={0};p_draw_ind d={NVN_DRAW_PRIMITIVE_QUADS,0,0x10000};
     if(!strcmp(mode,"native")) d.prim=NVN_DRAW_PRIMITIVE_TRIANGLES;
+    else if(!strcmp(mode,"native-batched")) {d.prim=NVN_DRAW_PRIMITIVE_TRIANGLES;batch_setting="1";ex.in_pass=1;expected_barriers=0;}
+    else if(!strcmp(mode,"native-writer")) {d.prim=NVN_DRAW_PRIMITIVE_TRIANGLES;batch_setting="1";ex.in_pass=1;ex.pass_storage_writes=1;}
     else if(!strcmp(mode,"zero")) gpu.vertexCount=0;
     else if(!strcmp(mode,"partial")) gpu.vertexCount=3;
     else if(!strcmp(mode,"zero-instance")) gpu.instanceCount=0;
@@ -137,7 +143,7 @@ int main(int argc,char **argv) {
 class DrawArraysIndirectTests(unittest.TestCase):
     def test_production_recording_replay_and_failure_paths(self):
         out=ROOT/"work/build";out.mkdir(parents=True,exist_ok=True)
-        good=("quads","native","zero","partial","zero-instance","disabled","prepare-fail")
+        good=("quads","native","native-batched","native-writer","zero","partial","zero-instance","disabled","prepare-fail")
         bad=("bad-primitive","bad-address","overflow-address","unbacked","unaligned","short","overflow-offset",
              "read-fail","too-many","first-overflow","instance-overflow","base-overflow")
         with tempfile.TemporaryDirectory(prefix="arrays-indirect-",dir=out) as folder:

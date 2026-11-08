@@ -19,6 +19,12 @@ PROC(nvnCommandBufferDrawArrays); PROC(nvnCommandBufferDispatchCompute);
 PROC(nvnCommandBufferWaitEvent); PROC(nvnCommandBufferSetCopyEnableConditional);
 unsigned rt_trace;
 GfxStats gfx_counters;
+// Optional diagnostics are outside this trace fixture; they receive an explicitly disabled provider.
+const char *cfg_get(const char *name) { (void)name; return NULL; }
+int plat_mem_readable(uint64_t addr, uint64_t size) { (void)addr; (void)size; return 0; }
+#ifdef NVN_RUNTIME_MEMORY_DIAG_VERSION
+void nvn_program_memory_stats(NvnMemoryStats *out) { (void)out; }
+#endif
 static unsigned checks, failures, normal_calls, config_calls, thread_calls, event_count, summary_count;
 static int on, race_mode;
 static uint64_t total_seen, total_emitted, total_dropped;

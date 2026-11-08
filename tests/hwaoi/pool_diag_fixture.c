@@ -33,6 +33,10 @@ void rt_log(const char *fmt, ...) {
 void plat_mutex_lock(PlatMutex *m) { (void)m; if (locked++) abort(); }
 void plat_mutex_unlock(PlatMutex *m) { (void)m; if (--locked) abort(); }
 uint32_t plat_thread_id(void) { return 7; }
+int plat_mem_read(uint64_t a, void *out, size_t n) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)a, out, n, &got) && got == n;
+}
 static GuestFn target;
 static void parent_job(Cpu *c), child_job(Cpu *c), tail_helper(Cpu *c), null_alloc(Cpu *c);
 GuestFn rt_dispatch_lookup(uint64_t pc) {

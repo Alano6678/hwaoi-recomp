@@ -10,6 +10,7 @@
 #include "frametime_hist.h"
 #include "gfx.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "nvn_mode_trace.h"
 #include "perfmon.h"
 #include "prof.h"
@@ -62,25 +63,37 @@ void prof_write(void) {
 
 // ---- TOTK_TRACE=perf: frame interval and the time the render thread spends waiting, logged every 60 presents. The
 // flight recorder (TOTK_FLIGHT=1, flight.c) takes the same numbers per frame.
-static uint64_t wait_ns[PERF_N], frame_ns[PERF_N], worst_ns[PERF_N];   // window totals, this frame, the slowest frame
+static uint64_t wait_ns[PERF_N], pending_frame_ns[PERF_N];   // atomic producers: submitting/presentation/replay threads
+static uint64_t frame_ns[PERF_N], worst_ns[PERF_N];          // presentation thread's snapshots
+static _Thread_local unsigned replay_scope;
 
 uint64_t perf_begin(void) { return kern_now_ns(); }
 
 void perf_replay_thread(void) { prof_replay_tid = plat_thread_id(); }
 void perf_main_thread(void) { prof_main_tid = plat_thread_id(); }
 
+unsigned perf_replay_scope_begin(void) {
+    unsigned previous = replay_scope;
+    replay_scope = 1;
+    return previous;
+}
+
+void perf_replay_scope_end(unsigned previous) { replay_scope = previous; }
+
+static void perf_times_take(uint64_t out[PERF_N], uint64_t pending[PERF_N]) {
+    for (unsigned i = 0; i < PERF_N; i++) out[i] = __atomic_exchange_n(&pending[i], 0, __ATOMIC_RELAXED);
+}
+
 void perf_end(int kind, uint64_t t0) {
     if (!t0) return;
     uint32_t tid = plat_thread_id();
-    if (tid != prof_render_tid && tid != prof_replay_tid) return;
+    if (tid != prof_render_tid && tid != prof_replay_tid && !replay_scope) return;
     uint64_t d = kern_now_ns() - t0;
-    if (tid == prof_render_tid && !prof_replay_tid) {   // one thread adds: no atomics on the synchronous path
-        wait_ns[kind] += d;
-        frame_ns[kind] += d;
-        return;
-    }
+    // QueueSubmit and Present can use different host threads even with async
+    // replay disabled. Both may produce timings while the present takes a
+    // snapshot; a non-atomic fast path or memset would lose those samples.
     __atomic_fetch_add(&wait_ns[kind], d, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&frame_ns[kind], d, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&pending_frame_ns[kind], d, __ATOMIC_RELAXED);
 }
 
 static volatile int64_t other_wait_ns;     // perf_gpu_wait on threads other than the render thread, over the window
@@ -257,10 +270,34 @@ static void cpu_placement(void) {
     plat_process_affinity(on ? one : all);
 }
 
+static void runtime_memory_line(uint64_t frame) {
+    if (frame % 600 || !nvn_memory_diagnostics()) return;
+    NvnMemoryStats s;
+    nvn_runtime_memory_stats(&s);
+    // Exact owner counters, independent of OS working-set trimming. The program
+    // ledger reports partial coverage explicitly if its bounded index fills up.
+    rt_log("runtime-memory: frame=%llu copies=%llu copy_bytes=%llu copies_made=%llu copy_index_bytes=%llu "
+           "zombies=%llu zombie_bytes=%llu texture_pins=%llu texture_pin_bytes=%llu texture_pin_index_bytes=%llu "
+           "program_controls=%llu program_control_bytes=%llu program_controls_made=%llu "
+           "program_control_bytes_made=%llu program_control_index_bytes=%llu program_ledger_partial=%llu "
+           "program_unmatched_frees=%llu program_duplicate_allocations=%llu",
+           (unsigned long long)frame, (unsigned long long)s.copies, (unsigned long long)s.copy_bytes,
+           (unsigned long long)s.copies_made, (unsigned long long)s.copy_index_bytes,
+           (unsigned long long)s.zombies, (unsigned long long)s.zombie_bytes,
+           (unsigned long long)s.texture_pins, (unsigned long long)s.texture_pin_bytes,
+           (unsigned long long)s.texture_pin_index_bytes, (unsigned long long)s.program_controls,
+           (unsigned long long)s.program_control_bytes, (unsigned long long)s.program_controls_made,
+           (unsigned long long)s.program_control_bytes_made, (unsigned long long)s.program_control_index_bytes,
+           (unsigned long long)s.program_ledger_disabled, (unsigned long long)s.program_unmatched_frees,
+           (unsigned long long)s.program_duplicate_allocations);
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
     prof_render_tid = plat_thread_id();
+    hwaoi_rate_diagnostic_frame(frame);
+    perf_times_take(frame_ns, pending_frame_ns);
     if (rt_trace & RT_TRACE_SCHED) kern_sched_report(frame);
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
@@ -270,6 +307,7 @@ void perf_present(uint64_t frame) {
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
+    runtime_memory_line(frame);
     if (flight_on) flight_frame(frame, now, d, frame_ns, counts);
     if (!(rt_trace & RT_TRACE_PERF)) {
         memset(frame_ns, 0, sizeof frame_ns);
@@ -296,6 +334,8 @@ void perf_present(uint64_t frame) {
     if (!win_start) win_start = now;
     if (frame % 60) return;
     uint64_t span = now - win_start;
+    uint64_t window_wait_ns[PERF_N];
+    perf_times_take(window_wait_ns, wait_ns);
     int64_t win[PERF_CNT_N];
     for (int i = 0; i < PERF_CNT_N; i++) {
         int64_t v = __atomic_load_n(&counts[i], __ATOMIC_RELAXED);
@@ -309,17 +349,16 @@ void perf_present(uint64_t frame) {
     gfx_shader_counts(&shader_keys, &shader_xlated);
     if (n && span)
         rt_log("perf: frame %llu: interval avg %.2f ms max %.2f ms (%.1f fps); render thread blocked: pacing %.0f%% fence %.0f%% drain %.0f%% pipeline build %.0f%% shader xlate %.0f%% texture %.0f%% (astc %.0f%%); pipelines built in background %lld, draws skipped pending %lld, waited %lld, waiting for a shader %lld, one-shot waited %lld; textures uploaded %lld re-uploaded %lld; slowest frame: xlate %.1f ms texture %.1f ms (astc %.1f) pipeline %.1f ms fence %.1f ms; shaders: %llu keys, %llu translated; render busy avg %.2f ms; replay avg %.2f ms; ab %llu/%llu; world %.1f s",
-               (unsigned long long)frame, sum / 1e6 / n, max / 1e6, n * 1e9 / sum, 100.0 * wait_ns[PERF_PACE] / span,
-               100.0 * wait_ns[PERF_FENCE] / span, 100.0 * wait_ns[PERF_DRAIN] / span,
-               100.0 * wait_ns[PERF_PIPE] / span, 100.0 * wait_ns[PERF_XLATE] / span,
-               100.0 * wait_ns[PERF_TEX] / span, 100.0 * wait_ns[PERF_ASTC] / span, (long long)async, (long long)skips, (long long)waited, (long long)sskip, (long long)oneshot,
+               (unsigned long long)frame, sum / 1e6 / n, max / 1e6, n * 1e9 / sum, 100.0 * window_wait_ns[PERF_PACE] / span,
+               100.0 * window_wait_ns[PERF_FENCE] / span, 100.0 * window_wait_ns[PERF_DRAIN] / span,
+               100.0 * window_wait_ns[PERF_PIPE] / span, 100.0 * window_wait_ns[PERF_XLATE] / span,
+               100.0 * window_wait_ns[PERF_TEX] / span, 100.0 * window_wait_ns[PERF_ASTC] / span, (long long)async, (long long)skips, (long long)waited, (long long)sskip, (long long)oneshot,
                (long long)up, (long long)reup, worst_ns[PERF_XLATE] / 1e6, worst_ns[PERF_TEX] / 1e6,
                worst_ns[PERF_ASTC] / 1e6, worst_ns[PERF_PIPE] / 1e6, worst_ns[PERF_FENCE] / 1e6,
                (unsigned long long)shader_keys, (unsigned long long)shader_xlated,
-               (span > wait_ns[PERF_PACE] ? span - wait_ns[PERF_PACE] : 0) / 1e6 / n,
+               (span > window_wait_ns[PERF_PACE] ? span - window_wait_ns[PERF_PACE] : 0) / 1e6 / n,
                plat_xchg64(&replay_ns, 0) / 1e6 / n, (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6);
-    if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)wait_ns[PERF_PACE] / span, n);
+    if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)window_wait_ns[PERF_PACE] / span, n);
     sum = max = n = ab_b = 0;
-    memset(wait_ns, 0, sizeof wait_ns);
     win_start = now;
 }

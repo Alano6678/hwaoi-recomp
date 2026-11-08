@@ -89,7 +89,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(VkCommandBuffer cb,VkBuffer bu
     memcpy(copied,staged,source_tex.pub.layers*sizeof *copied);upload_step=3;
 }
 void vk_upload_end(void) {CHECK(upload_step==4);upload_step=0;uploads++;}
-void rt_log(const char *fmt,...) {(void)fmt;}
+void rt_log(const char *fmt,...) {
+    va_list ap;va_start(ap,fmt);vfprintf(stderr,fmt,ap);va_end(ap);fputc('\n',stderr);
+}
 static void tex_info_lookup(VkExec *ex,const GfxShaderRes *r,uint64_t h,int storage,int separate,VkDescriptorImageInfo *out) {
     (void)ex;(void)r;(void)h;(void)storage;(void)separate;
     *out=(VkDescriptorImageInfo){.sampler=(VkSampler)(uintptr_t)123,.imageView=(VkImageView)(uintptr_t)88,
@@ -176,11 +178,15 @@ int main(int argc,char **argv) {
     if(!strcmp(mode,"unequal"))storage_base[1]=1;
     else if(!strcmp(mode,"gpu-owned"))source_tex.pub.gpu_owned=1;
     else if(!strcmp(mode,"gpu-write"))source_tex.wr_fence=1;
+    else if(!strcmp(mode,"released"))source_tex.released=1;
     else if(!strcmp(mode,"not-mirrored"))source_tex.pub.mirrored=0;
     else if(!strcmp(mode,"unreadable"))readable=0;
     else if(!strcmp(mode,"width"))source_tex.pub.width=2;
     else if(!strcmp(mode,"mips"))source_tex.pub.levels=2;
     else if(!strcmp(mode,"layers"))source_tex.pub.layers=2;
+    else if(!strcmp(mode,"storage-shape"))source_tex.t.d.width=2;
+    else if(!strcmp(mode,"storage-format"))source_tex.t.d.format=NVN_FORMAT_DEPTH16;
+    else if(!strcmp(mode,"missing-storage"))source_tex.t.mem=NULL;
     else if(!strcmp(mode,"swizzle"))source_tex.pub.swz[0]=NVN_TEXTURE_SWIZZLE_ONE;
     else if(!strcmp(mode,"format-identity"))memcpy(source_tex.pub.chan,(uint8_t[]){2,3,4,5},4);
     else if(!strcmp(mode,"sentinel"))memcpy(source_tex.pub.chan,(uint8_t[]){0,9,8,7},4);
@@ -217,6 +223,16 @@ int main(int argc,char **argv) {
     else if(!strcmp(mode,"create"))allocation_ok=0;
     else if(!strcmp(mode,"limit"))rgba8_compare_count=64;
     else CHECK(!strcmp(mode,"one") || !strcmp(mode,"six"));
+    // A rejected source never partially replaces the caller's pixels. The
+    // eventual tex_info fatal must retain the exact predicate in its diagnostic.
+    if(!strcmp(mode,"gpu-owned") || !strcmp(mode,"gpu-write") || !strcmp(mode,"released") ||
+       !strcmp(mode,"not-mirrored") || !strcmp(mode,"unreadable") || !strcmp(mode,"width") ||
+       !strcmp(mode,"mips") || !strcmp(mode,"layers") || !strcmp(mode,"storage-shape") ||
+       !strcmp(mode,"storage-format") || !strcmp(mode,"missing-storage")) {
+        uint8_t untouched_pixels[6][4];memset(untouched_pixels,0xa5,sizeof untouched_pixels);
+        CHECK(!vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,untouched_pixels));
+        for(unsigned i=0;i<sizeof untouched_pixels;i++)CHECK(((uint8_t *)untouched_pixels)[i]==0xa5);
+    }
     VkDescriptorImageInfo out;tex_info(&ex,&r,5,0,0,&out);
     CHECK(allocations==1 && uploads==1 && !upload_step && out.imageLayout==VK_IMAGE_LAYOUT_GENERAL);
     CHECK(out.sampler==(VkSampler)(uintptr_t)123 && created.format==VK_FORMAT_D16_UNORM && created_usage==VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -296,8 +312,9 @@ int main(void) {
                     str(ROOT/"runtime/vk_formats.c"),str(ROOT/"runtime/nvn_tex.c"),str(ROOT/"runtime/tex_deswizzle.c"),
                     "-o",str(exe)],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=60)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                for case in ("one","six","unequal","gpu-owned","gpu-write","not-mirrored","unreadable","width",
-                             "mips","layers","swizzle","format-identity","sentinel","inverse-map","view-identity",
+                for case in ("one","six","unequal","gpu-owned","gpu-write","released","not-mirrored","unreadable","width",
+                             "mips","layers","storage-shape","storage-format","missing-storage",
+                             "swizzle","format-identity","sentinel","inverse-map","view-identity",
                              "channel-map","constant-view","alpha-one","mip-range","layer-range","feature","linear-feature",
                              "shape","create","limit","bgr-values","bgr-white","bgr-unequal","bgr-missing-sampler",
                              "bgr-no-compare","bgr-border","bgr-mixed-border","bgr-invalid-wrap"):
@@ -306,6 +323,14 @@ int main(void) {
                         good=case in ("one","six","format-identity","sentinel","inverse-map","view-identity","bgr-values","bgr-white")
                         self.assertEqual(result.returncode,0 if good else 73,result.stdout+result.stderr)
                         self.assertIn("check passed" if good else "vk:",result.stdout if good else result.stderr)
+                        reasons={"gpu-owned":"GPU-owned", "gpu-write":"image-write-recorded", "released":"released",
+                                 "not-mirrored":"not-mirrored", "unreadable":"unreadable-storage", "width":"image-extent",
+                                 "mips":"image-mips", "layers":"image-layers", "storage-shape":"storage-shape",
+                                 "storage-format":"storage-format", "missing-storage":"missing-storage"}
+                        if case in reasons:
+                            for field in (f"reason={reasons[case]}", "image_format=", "extent=", "mips=", "layers=",
+                                          "write_fence=", "storage_format=", "storage_bytes="):
+                                self.assertIn(field,result.stderr)
                         if case in ("swizzle","channel-map","constant-view","alpha-one"):
                             for field in ("texture=", "view_set=", "view=", "chan=", "alpha_one=", "effective=",
                                           "layers=6", "rgba_bytes_le=00000000,01010101,7f7f7f7f,80808080,fefefefe,ffffffff"):

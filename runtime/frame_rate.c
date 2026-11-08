@@ -51,6 +51,7 @@
 static _Atomic uint64_t *step_word;   // patch page +0: ratio (low float), seconds (high float)
 static double step_now = STEP_FIRST_S;   // the step the patch page holds: what the game steps each frame
 static _Atomic uint32_t *step_interval;   // patch page +8: seconds * 60 (patches-v143.txt realtime)
+static _Atomic uint32_t *hwaoi_rate_word; // native scheduler's target Hz, profile page +0xb0
 static uint64_t last_ns;
 static double samples[STEP_SAMPLES];
 static unsigned sample_count, sample_next;
@@ -69,6 +70,22 @@ static void step_store(float seconds) {
 static void frame_limit_live(void);
 
 void frame_step_init(void) {
+    if (RT_TARGET_HWAOI) {
+        int rate = rt_patch_set("hwaoi_rate");
+        const char *requested = cfg_get("TOTK_RATE_UNLOCK");
+        if (rate < 0 && requested && !strcmp(requested, "1"))
+            rt_fatal("frame rate: native unlock requires the exact-build HWAoI rate profile; regenerate first");
+        if (rt_patch_enabled(rate)) {
+            uint8_t *page = rt_patch_page();
+            if (!page) rt_fatal("frame rate: native rate patch page unavailable");
+            hwaoi_rate_word = (_Atomic uint32_t *)(page + 0xb0);
+        }
+        frame_limit_live();
+        rt_log("frame rate: HWAoI %s", hwaoi_rate_word ?
+               "native 60-Hz scheduler nodes use the requested rate; game-speed qualification pending" :
+               "original game clock; host presentation cap is independent");
+        return;
+    }
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
     if (realtime < 0) {
         rt_log("frame rate: no patch table, shipping 30 fps whole-vsync steps");
@@ -89,6 +106,7 @@ void frame_step_init(void) {
 }
 
 int frame_step_realtime(void) { return step_word != NULL; }
+int frame_step_native_rate(void) { return hwaoi_rate_word != NULL; }
 
 // The frame limit (menu, TOTK_FPS_LIMIT, live): 30, 60, 90, 120, 144, any whole rate from 30 to 360, or display (the
 // refresh rate of the window's monitor). Unset, the older TOTK_FPS60=0 still means 30. A limit of 30 switches the set
@@ -106,6 +124,13 @@ static int limit_hz = -1;   // 0: display; -1 before the first read
 static int limit_parse(void) {
     const char *e = cfg_get("TOTK_FPS_LIMIT"), *old = cfg_get("TOTK_FPS60");
     if (!e || !*e) return old && !strcmp(old, "0") ? 30 : 60;
+    if (RT_TARGET_HWAOI) {
+        if (!strcmp(e, "30")) return 30;
+        if (!strcmp(e, "60")) return 60;
+        if (!strcmp(e, "90")) return 90;
+        if (!strcmp(e, "120")) return 120;
+        rt_fatal("frame rate: HWAoI FPS_LIMIT must be 30, 60, 90 or 120");
+    }
     if (!strcmp(e, "display")) return 0;
     char *end;
     long n = strtol(e, &end, 10);
@@ -122,6 +147,12 @@ static void frame_limit_live(void) {
     int hz = limit_parse();
     if (hz == limit_hz) return;
     limit_hz = hz;
+    if (RT_TARGET_HWAOI) {
+        if (hwaoi_rate_word) atomic_store_explicit(hwaoi_rate_word, (uint32_t)hz, memory_order_release);
+        rt_log("frame rate: HWAoI %s target %d fps%s", hwaoi_rate_word ? "native scheduler" : "presentation", hz,
+               hz > 60 ? " (experimental; original game clock retained)" : "");
+        return;
+    }
     if (fps60_set == -2) fps60_set = rt_patch_set("fps60");
     if (fps60_set >= 0) rt_patch_switch(fps60_set, hz != 30);
     if ((hz > 60 || hz == 0) && !step_word)
@@ -146,7 +177,7 @@ double frame_step_limit_hz(void) {
     if (hz < 0) return 0;
     double r = hz ? hz : gfx_window_refresh_hz();
     if (r < LIMIT_MIN_HZ) r = 60;
-    return !step_word && r > 60 ? 60 : r > LIMIT_MAX_HZ ? LIMIT_MAX_HZ : r;
+    return !RT_TARGET_HWAOI && !step_word && r > 60 ? 60 : r > LIMIT_MAX_HZ ? LIMIT_MAX_HZ : r;
 }
 
 // ---- TOTK_TRACE=perf speed lines
@@ -267,7 +298,9 @@ void frame_step_present(uint64_t display_ns, int interval) {
     last_ns = display_ns;
     // The game clock of untimed script lines: what the game stepped this frame, the patch page's step with the
     // real-time step (kept through a reset), whole vsyncs without it.
-    double game = step_word ? step_now : (interval > 0 ? interval : 1) / 60.0;
+    double game = step_word ? step_now : hwaoi_rate_word ?
+                  (dt > 0 && dt < STEP_RESET_S ? dt : 1.0 / (limit_hz > 0 ? limit_hz : 60)) :
+                  (interval > 0 ? interval : 1) / 60.0;
     atomic_store_explicit(&game_us, atomic_load_explicit(&game_us, memory_order_relaxed) + (uint64_t)(game * 1e6 + 0.5),
                           memory_order_relaxed);
     world_clock(dt, step);

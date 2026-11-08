@@ -314,7 +314,14 @@ static void series_shot(const tex_t *t, const int crop[4], uint64_t n) {
     NVNcopyRegion r = shot_region(t, crop);
     uint32_t w = r.width, h = r.height, ow = full ? w : 480, oh = full ? h : 270;
     uint8_t *px = malloc(4ull * w * h), *out = malloc(4ull * ow * oh);
-    if (!px || !out) rt_fatal("boot: out of memory for a TOTK_SHOTS frame");
+    if (!px || !out) {
+        free(px);
+        free(out);
+        hi = 0;
+        rt_log("boot: periodic diagnostic captures disabled: insufficient memory for present %llu (%ux%u -> %ux%u)",
+               (unsigned long long)n, w, h, ow, oh);
+        return;   // optional evidence must not terminate the game before any readback was requested
+    }
     view_t view;
     memset(&view, 0, sizeof view);
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay

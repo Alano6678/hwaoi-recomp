@@ -1,0 +1,24 @@
+# Original HWAoI NCM 196608 profile. tools/hwaoi.py verifies all module hashes
+# before selection, and the generator checks every original instruction word.
+# main SHA256: 4c33cfd4c818d9ed62822af792782b4ea443417ed24acea6f1cee739cde604c3
+# Both resolution-manager input dimensions and render-context allocation limits
+# become 1920x1080. The dynamic-resolution scale setter stores 1.0, retaining
+# the original camera/viewport/uniform construction around that scale.
+# No original NUP or NSO is modified. NATIVE_1080=0 restores original code.
+set hwaoi_native1080 TOTK_NATIVE_1080 1
+site hwaoi_native1080 main 01af1cf4 d280c809 d280f009
+site hwaoi_native1080 main 01af1d00 f2c07089 f2c08709
+site hwaoi_native1080 main 01af34a4 d280c809 d280f009
+site hwaoi_native1080 main 01af34b0 f2c07089 f2c08709
+site hwaoi_native1080 main 01432eb4 1e214c40 1e2e1000
+# The shared scale-state multiplier remains 0.85 independently of the dynamic
+# clamp. Each consumer merges the enabled/disabled paths before these sites.
+# Supply 1.0 at that merge and retain the displaced original operation, keeping
+# half-size effects and the original viewport/uniform construction consistent.
+site hwaoi_native1080 main 0154b864 1e204100 1e2e1008 1e204100
+site hwaoi_native1080 main 01569f84 12001c08 1e2e1000 12001c08
+site hwaoi_native1080 main 0172af14 f00090a8 1e2e1000 f00090a8
+site hwaoi_native1080 main 0185743c 2a1f03e0 1e2e1000 2a1f03e0
+site hwaoi_native1080 main 01e952d0 d503237f 1e2e1000 d503237f
+site hwaoi_native1080 main 01e9a15c f81d03bf 1e2e1000 f81d03bf
+site hwaoi_native1080 main 01e9b1dc f9000bff 1e2e1000 f9000bff

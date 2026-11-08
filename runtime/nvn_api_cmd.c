@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -79,7 +80,7 @@ static int cmd_rt_trace(const Cpu *c, const char *op) {
 // ---------- memory callbacks
 // NVN calls the game's memory callback when a recording needs command or control memory and none is left. Records
 // live in host memory here, so the callback is called only where the hardware certainly would: a recording starts
-// without any command memory, or ends without any control memory. It runs on the calling guest thread through
+// without any command memory, or ends without space for its next control record. It runs on the calling guest thread through
 // rt_call; whatever memory it adds is accounted. Set{Command,Control}MemoryCallbackEnabled(false) suppress it.
 enum { CB_NO_COMMAND = 1, CB_NO_CONTROL = 2 };
 static PlatMutex cb_lock = PLAT_MUTEX_INIT;
@@ -234,6 +235,7 @@ static PlatMutex copy_lock = PLAT_MUTEX_INIT;    // guards the two maps, the cou
 static nvn_hmap copy_pages = {.klen = 8};   // page -> copy_bucket
 static nvn_hmap copy_live = {.klen = 8};    // handle -> copy_prefix of a live copy
 static uint64_t ncopies, copy_bytes, copies_made, nsubmits;
+static uint64_t copy_bucket_bytes, zombie_bytes;
 // Asynchronous replay: copies released by the game, and per-submission clones, that a queued submission still reads.
 // Freed once gfx_replayed_submits() reaches their used_at. Empty with synchronous replay.
 static copy_prefix **zombies;
@@ -246,11 +248,13 @@ static void zombie_add(copy_prefix *pf) {   // copy_lock held
         if (!zombies) rt_fatal("nvn: out of memory (released recording copies)");
     }
     zombies[nzombies++] = pf;
+    zombie_bytes += sizeof *pf + pf->bytes;
 }
 
 static void zombie_sweep(uint64_t replayed) {   // copy_lock held
     for (uint32_t i = 0; i < nzombies;) {
         if (zombies[i]->used_at <= replayed) {
+            zombie_bytes -= sizeof *zombies[i] + zombies[i]->bytes;
             free(zombies[i]);
             zombies[i] = zombies[--nzombies];
         } else {
@@ -309,7 +313,7 @@ static uint8_t *flatten_recording(const uint8_t *p, size_t n) {
             break;
         }
     }
-    *(copy_prefix *)out = (copy_prefix){COPY_MAGIC, n, 0, 0};
+    *(copy_prefix *)out = (copy_prefix){.magic = COPY_MAGIC, .bytes = n};
     return out + sizeof(copy_prefix);
 }
 
@@ -324,11 +328,14 @@ static void copy_add(uintptr_t lo, uintptr_t hi, uint8_t *copy) {
         b = calloc(1, sizeof *b);
         if (!b) rt_fatal("nvn: command copy index");
         nvn_hm_put(&copy_pages, &page, b);
+        copy_bucket_bytes += sizeof *b;
     }
     if (b->n == b->cap) {
+        uint32_t old_cap = b->cap;
         b->cap = b->cap ? b->cap * 2 : 8;
         b->v = realloc(b->v, b->cap * sizeof *b->v);
         if (!b->v) rt_fatal("nvn: command copy index");
+        copy_bucket_bytes += (uint64_t)(b->cap - old_cap) * sizeof *b->v;
     }
     b->v[b->n++] = (cmd_copy){lo, hi, copy};
     nvn_hm_put(&copy_live, &handle, pf);
@@ -346,7 +353,10 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
     uint64_t replayed = gfx_replayed_submits();
     plat_mutex_lock(&copy_lock);
     if (nzombies) zombie_sweep(replayed);
-    for (uintptr_t pg = lo >> COPY_PAGE_SHIFT; pg <= (hi - 1) >> COPY_PAGE_SHIFT; pg++) {
+    // The index holds a record in its starting page only. A fixed-size control record can straddle the preceding
+    // page, so inspect that page too when the new storage overlaps the tail of such a record.
+    uintptr_t first = lo > CTL_PER_RECORDING - 1 ? lo - (CTL_PER_RECORDING - 1) : 0;
+    for (uintptr_t pg = first >> COPY_PAGE_SHIFT; pg <= (hi - 1) >> COPY_PAGE_SHIFT; pg++) {
         copy_bucket *b = nvn_hm_get(&copy_pages, &pg);
         if (!b) continue;
         for (uint32_t i = 0; i < b->n;) {
@@ -364,6 +374,7 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
         }
         if (!b->n) {
             nvn_hm_del(&copy_pages, &pg);
+            copy_bucket_bytes -= sizeof *b + (uint64_t)b->cap * sizeof *b->v;
             free(b->v);
             free(b);
         }
@@ -428,6 +439,8 @@ NVN_API(nvnCommandBufferAddControlMemory) {
     cmd_t *o = cmd_of(c);
     void *m = arg_p(c, 1);
     size_t n = arg_x(c, 2);
+    if (n && (!m || (uintptr_t)m > UINTPTR_MAX - n))
+        rt_fatal("nvn: AddControlMemory requires a nonnull, non-wrapping storage range (%p, %zu bytes)", m, n);
     release_copies((uintptr_t)m, (uintptr_t)m + n);
     o->ctl = m;
     o->ctl_size = n;
@@ -461,14 +474,23 @@ NVN_API(nvnCommandBufferBeginRecording) {
 NVN_API(nvnCommandBufferEndRecording) {
     cmd_t *o = cmd_of(c);
     if (!o->recording || !o->seg) rt_fatal("nvn: EndRecording on command buffer %p, which does not record", (void *)o);
-    if (!o->ctl_size) memory_event(c, o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, MIN_CONTROL_SIZE);
+    // Checking only ctl_size misses exhaustion after its first use. The former fallback then assigned every new
+    // handle to the same first byte without a callback or retirement; those host copies accumulated indefinitely.
+    if (!o->ctl || o->ctl_used > o->ctl_size || CTL_PER_RECORDING > o->ctl_size - o->ctl_used)
+        memory_event(c, o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, MIN_CONTROL_SIZE);
+    if (!o->ctl || o->ctl_used > o->ctl_size || CTL_PER_RECORDING > o->ctl_size - o->ctl_used ||
+        (uintptr_t)o->ctl > UINTPTR_MAX - o->ctl_used ||
+        (uintptr_t)o->ctl + o->ctl_used > UINTPTR_MAX - CTL_PER_RECORDING)
+        rt_fatal("nvn: EndRecording has no space for its %u-byte control record after the memory callback "
+                 "(command buffer %p, control %p, size %zu, used %zu)",
+                 CTL_PER_RECORDING, (void *)o, o->ctl, o->ctl_size, o->ctl_used);
     put_hdr(cmd_alloc(o, 8), OP_END, 8);
     o->hw_used -= 8;
     o->recording = 0;
     uint8_t *copy = flatten_recording(o->seg, (size_t)(o->cur - o->seg));
     // Finalizing the recorder does not retire its handle; only reusing the control memory it was recorded in does.
-    uintptr_t lo = (uintptr_t)o->ctl + (o->ctl_used < o->ctl_size ? o->ctl_used : 0);
-    uintptr_t hi = o->ctl ? lo + 1 : 0;
+    uintptr_t lo = (uintptr_t)o->ctl + o->ctl_used;
+    uintptr_t hi = lo + CTL_PER_RECORDING;
     o->ctl_used += CTL_PER_RECORDING;
     copy_add(lo, hi, copy);
     nvn_mode_trace(NVN_MODE_END, (uintptr_t)o, (uintptr_t)copy, 0, 0);
@@ -1295,6 +1317,45 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
 }
 
 uint64_t nvn_submit_count(void) { return __atomic_load_n(&nsubmits, __ATOMIC_RELAXED); }
+
+int nvn_memory_diagnostics(void) {
+    static int enabled = -1;
+    static PlatMutex config_lock = PLAT_MUTEX_INIT;
+    int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
+    if (value < 0) {
+        plat_mutex_lock(&config_lock);
+        value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
+        if (value < 0) {
+            // This diagnostic has no menu default; cfg_bool would require a schema entry.
+            const char *setting = cfg_get("TOTK_RUNTIME_MEMORY_DIAG");
+            value = setting && !strcmp(setting, "1");
+            __atomic_store_n(&enabled, value, __ATOMIC_RELEASE);
+        }
+        plat_mutex_unlock(&config_lock);
+    }
+    return value;
+}
+
+void nvn_runtime_memory_stats(NvnMemoryStats *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    plat_mutex_lock_shared(&copy_lock);
+    out->copies = ncopies;
+    out->copy_bytes = copy_bytes + ncopies * sizeof(copy_prefix);
+    out->copies_made = copies_made;
+    out->copy_index_bytes = copy_bucket_bytes + (uint64_t)copy_pages.cap * (copy_pages.klen + sizeof(void *)) +
+                            (uint64_t)copy_live.cap * (copy_live.klen + sizeof(void *)) +
+                            (uint64_t)cap_zombies * sizeof *zombies;
+    out->zombies = nzombies;
+    out->zombie_bytes = zombie_bytes;
+    plat_mutex_unlock_shared(&copy_lock);
+    plat_mutex_lock_shared(&pin_lock);
+    out->texture_pins = pins.n;
+    out->texture_pin_bytes = (uint64_t)pins.n * sizeof(tex_t);
+    out->texture_pin_index_bytes = (uint64_t)pins.cap * (pins.klen + sizeof(void *));
+    plat_mutex_unlock_shared(&pin_lock);
+    nvn_program_memory_stats(out);
+}
 
 const char *nvn_op_name(uint32_t op) {
     static const char *const names[] = {

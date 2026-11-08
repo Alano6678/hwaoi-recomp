@@ -32,6 +32,7 @@ static int g_font_bad;
 #pragma clang diagnostic pop
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
+#include "game_target.h"
 
 extern "C" {
 #include "cfg.h"
@@ -477,6 +478,13 @@ static void row_window_size(void) {
 // another shape, resolution.c res_init; the installer lays the HUD out for each, installer/steps.py ASPECT_SIZES), and
 // the current value when it is another size.
 static void row_output_res(void) {
+    if (RT_TARGET_HWAOI) {
+        static const char *const vals[] = {"1280x720", "1920x1080", "2560x1440", "3840x2160"};
+        static const char *const names[] = {"1280 × 720 (experimental)", "1920 × 1080 (native)",
+                                            "2560 × 1440 (experimental)", "3840 × 2160 (experimental)"};
+        opt_choice_list("TOTK_OUTPUT_RES", UI_MENU_OUTPUT_RES, vals, names, 4, UI_MENU_OUTPUT_RES_DESC);
+        return;
+    }
     static const char *const vals[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3200x1800", "3840x2160",
                                        "2560x1080", "3440x1440", "3840x1600", "5120x2160", "3840x1080", "5120x1440",
                                        "1280x800", "1680x1050", "1920x1200", "2560x1600"};
@@ -493,6 +501,7 @@ static void row_output_res(void) {
 }
 
 static void row_render_scale(void) {
+    if (RT_TARGET_HWAOI) return; // Native presets use 100%; inherited supersampling has no profile here.
     static const char *const vals[] = {"game", "50", "67", "75", "100", "125", "150", "200"};
     enum { N = sizeof vals / sizeof *vals };
     char shown[N][32];
@@ -543,6 +552,12 @@ static void row_game_lang(void) {
 
 // The frame limit (frame_rate.c): unset, the older fps60 = 0 still means 30. The monitor choice shows the rate it gives.
 static void row_fps_limit() {
+    if (RT_TARGET_HWAOI) {
+        static const char *const vals[] = {"30", "60", "90", "120"};
+        static const char *const names[] = {"30 FPS", "60 FPS", "90 FPS (experimental)", "120 FPS (experimental)"};
+        opt_choice_list("TOTK_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, 4, UI_MENU_FPS_LIMIT_DESC);
+        return;
+    }
     // 40 and 45: the Steam Deck's screen runs at 40 to 60 Hz (the OLED to 90); 40 divides 40 and 120 Hz evenly
     static const char *const vals[] = {"30", "40", "45", "60", "90", "120", "144", "display"};
     static const UiTextId ids[] = {UI_MENU_FPS_30, UI_MENU_FPS_40,  UI_MENU_FPS_45,  UI_MENU_FPS_60,
@@ -636,9 +651,11 @@ static void tab_screen(float scale) {
 static void tab_game(float scale) {
     opt_begin("##game", scale);
     row_fps_limit();
+    if (!RT_TARGET_HWAOI) {
     opt_toggle("TOTK_REALTIME", UI_MENU_REALTIME, UI_MENU_REALTIME_DESC);
     opt_toggle("TOTK_CLOTH_REALTIME", UI_MENU_CLOTH_REALTIME, UI_MENU_CLOTH_REALTIME_DESC);
     opt_toggle("TOTK_HIGHFPS_FIX", UI_MENU_HIGHFPS_FIX, UI_MENU_HIGHFPS_FIX_DESC);
+    }
     row_game_lang();
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("TOTK_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
@@ -1051,12 +1068,14 @@ static float perf_gb(float mb) { return mb < 0 ? -1 : mb / 1024; }
 // present scales the image to the window (gfx_present.c, the last present), the frame limit and the presentation mode
 // in use.
 static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
-    unsigned out[2], scene[2];
-    res_sizes(out, scene);
     char v[6][64];
     snprintf(v[0], sizeof v[0], menu_text(UI_MENU_OV_FMT_SIZE), t->width, t->height);
     snprintf(v[1], sizeof v[1], menu_text(UI_MENU_OV_FMT_SIZE), (unsigned)t->image_w, (unsigned)t->image_h);
-    snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_SCENE), scene[0], scene[1], scene[0] * 100.0 / out[0]);
+    unsigned out[2], scene[2];
+    res_sizes(out, scene);
+    if (scene[0] && scene[1] && out[0])
+        snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_SCENE), scene[0], scene[1], scene[0] * 100.0 / out[0]);
+    else snprintf(v[2], sizeof v[2], "%s", menu_text(UI_MENU_OV_UNMEASURED));
     if (t->scaler == 2) {
         int s = cfg_int("TOTK_SHARPNESS");
         snprintf(v[3], sizeof v[3], menu_text(UI_MENU_OV_FMT_FSR), s < 0 ? 0 : s > 100 ? 100 : s);

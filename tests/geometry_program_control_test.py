@@ -64,6 +64,10 @@ static void tracked_free(void *p) {
     if(!b || !b->live)return;
     b->live=0;memset(p,0xdd,b->n);frees++;
 }
+// This lifecycle fixture keeps the optional retained-memory diagnostic off.
+// Its separate fixture exercises the actual ledger and owner-lock snapshots.
+static void program_memory_allocated(const void *p,size_t n) {(void)p;(void)n;}
+static void program_memory_released(const void *p) {(void)p;}
 static unsigned live_blocks(void) {
     unsigned n=0;for(unsigned i=0;i<block_count;i++)n+=(unsigned)blocks[i].live;return n;
 }

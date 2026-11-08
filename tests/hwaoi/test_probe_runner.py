@@ -89,8 +89,8 @@ int main(int n, char **v) {
                             shot_every=0, threads_on_stall=True)
                 with self.assertRaisesRegex(ValueError, "1..180"):
                     capture(executable, "--play-experimental", Path(reports) / "too-long", 181)
-                with self.assertRaisesRegex(ValueError, "1..600"):
-                    capture(executable, "--play-experimental", Path(reports) / "extended-too-long", 601, extended_play=True)
+                with self.assertRaisesRegex(ValueError, "1..1800"):
+                    capture(executable, "--play-experimental", Path(reports) / "extended-too-long", 1801, extended_play=True)
                 with self.assertRaisesRegex(ValueError, "extended deadline requires"):
                     capture(executable, "--probe-render", Path(reports) / "wrong-extended-mode", 1, extended_play=True)
                 with self.assertRaisesRegex(ValueError, "requires play-experimental"):

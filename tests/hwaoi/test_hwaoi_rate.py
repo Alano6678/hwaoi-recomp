@@ -26,12 +26,14 @@ class HwaoiRateTests(unittest.TestCase):
 #define RT_TARGET_HWAOI 1
 #define VSYNC_HZ 60ull
 typedef struct {int interval;} win_t;
-static int experiment,realtime;static const char *value;
+static int experiment,realtime,native_rate;static const char *value;
 static const char *cfg_get(const char *key){
  if(!strcmp(key,"TOTK_EXPERIMENTAL_RATE"))return experiment ? "1" : NULL;
  assert(!strcmp(key,"TOTK_FPS_LIMIT"));return value;
 }
+static const char *cfg_value(const char *key){const char *v=cfg_get(key);return v&&*v?v:"60";}
 static int frame_step_realtime(void){return realtime;}
+static int frame_step_native_rate(void){return native_rate;}
 static uint64_t frame_step_cap_ns(void){return 1234567;}
 static int64_t plat_xchg64(volatile int64_t *p,int64_t v){int64_t old=*p;*p=v;return old;}
 static void rt_fatal(const char *fmt,...){(void)fmt;exit(73);}
@@ -40,11 +42,15 @@ static void rt_log(const char *fmt,...){(void)fmt;}
 int main(int argc,char **argv){
  assert(argc==2);win_t window={2};
  if(!strcmp(argv[1],"bad")){experiment=1;value="144";(void)present_period(&window);return 1;}
- for(int i=-1;i<=4;i++){window.interval=i;assert(present_period(&window)==(uint64_t)(i>0?i:1)*1000000000/60);}
- realtime=1;assert(present_period(&window)==1234567); // inherited target behavior is untouched by default
+ for(int i=-1;i<=4;i++){window.interval=i;uint64_t game=(uint64_t)(i>0?i:1)*1000000000/60;
+  assert(present_period(&window)==(game>16666667?game:16666667));}
+ realtime=1;window.interval=1;assert(present_period(&window)==16666667); // no borrowed TotK step
+ value="30";assert(present_period(&window)==33333333);
+ value="120";assert(present_period(&window)==16666666); // unqualified high rates stay bounded
  experiment=1;
  const char *rates[]={"30","60","90","120"};uint64_t periods[]={33333333,16666667,11111111,8333333};
  for(int i=0;i<4;i++){value=rates[i];assert(present_period(&window)==periods[i]);}
+ experiment=0;native_rate=1;value="120";assert(present_period(&window)==8333333);
  value=NULL;assert(present_period(&window)==16666667);return 0;
 }
 '''

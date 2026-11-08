@@ -45,6 +45,10 @@ GuestFn rt_dispatch_lookup(uint64_t pc) {
 void plat_mutex_lock(PlatMutex *m) { (void)m; }
 void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 uint32_t plat_thread_id(void) { return GetCurrentThreadId(); }
+int plat_mem_read(uint64_t a, void *out, size_t n) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)a, out, n, &got) && got == n;
+}
 #include "hwaoi_pool_diag.h"
 static void check(int p) { if (!p) abort(); }
 int main(int argc, char **argv) {

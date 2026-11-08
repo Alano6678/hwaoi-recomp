@@ -55,6 +55,7 @@ static uint64_t now=1;
 static const char *feed_path;
 static int logs;
 static int config_calls;
+static int frame_step_native_rate(void){return 0;}
 static uint64_t plat_now_ns(void){return now;}
 static const char *cfg_get(const char *key){
  if(!strcmp(key,"TOTK_EXPERIMENTAL_RATE"))return "1";

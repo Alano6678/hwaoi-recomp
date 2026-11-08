@@ -89,6 +89,10 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
 }
 uint64_t rt_original(Cpu *c) { (void)c; rt_fatal("unexpected guest observer"); return 0; }
 int cfg_bool(const char *name) { (void)name; rt_fatal("unexpected setting lookup"); return 0; }
+const char *cfg_get(const char *name) { (void)name; return NULL; }
+#ifdef NVN_RUNTIME_MEMORY_DIAG_VERSION
+void nvn_program_memory_stats(NvnMemoryStats *out) { (void)out; }
+#endif
 void plat_sleep_ms(uint32_t ms) { (void)ms; rt_fatal("unexpected sleep"); }
 
 // Actual concurrent locks, not no-op stubs: the completion thread also acquires the recording-copy lock.

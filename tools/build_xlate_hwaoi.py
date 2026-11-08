@@ -124,8 +124,24 @@ def smoke(executable, folder, env, spirv_val=None):
         require(checked.returncode == 0, "spirv-val rejected the synthetic output")
         validation = "passed"
     banks = smoke_ir_banks(executable, folder, env, spirv_val) if hwaoi_patches() else None
+    typed_storage = smoke_typed_storage_address(executable, folder, env) if hwaoi_patches() else None
     return {"nvn2_c0": c0.stdout.strip(), "service_replies": replies, "artifacts": artifacts,
-            "spirv_validation": validation, "private_ir_banks": banks, "game_shaders_tested": False}
+            "spirv_validation": validation, "private_ir_banks": banks,
+            "typed_storage_address": typed_storage, "game_shaders_tested": False}
+
+
+def smoke_typed_storage_address(executable, folder, env):
+    """Required CPU-only certificate/refusal and independent arithmetic checks."""
+    probe = subprocess.run([str(executable), "--probe-hwaoi-typed-storage-address"], env=env,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    (folder / "typed-storage-address-probe.log").write_text(probe.stdout + probe.stderr, encoding="utf-8")
+    prefix = "typed storage address probe: "
+    output = probe.stdout.strip()
+    count = output.removeprefix(prefix).removesuffix(" checks")
+    require(probe.returncode == 0 and output.startswith(prefix) and output.endswith(" checks")
+            and count.isdecimal() and int(count) >= 8192,
+            "typed storage address semantic/provenance probe failed")
+    return {"checks": int(count), "output": output, "gpu_execution": False}
 
 
 def smoke_ir_banks(executable, folder, env, spirv_val):
@@ -190,6 +206,7 @@ def build(args):
     inputs = {"schema": VERSION, "mode": MODE, "sdk_version": sdk,
               "upstream_source_identity": upstream.identity(defined_float_minmax=args.defined_float_minmax),
               "builder_sha256": digest(Path(__file__)), "smoke_source_sha256": digest(ROOT / "tools/xlate_smoke.py"),
+              "typed_storage_probe_sha256": digest(ROOT / "tests/typed_storage_address_probe.cs"),
               "defined_float_minmax": args.defined_float_minmax, "vendor": provenance,
               "hwaoi_patches": [{"name": p.name, "sha256": digest(p)} for p in hwaoi_patches()]}
     identity = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
@@ -211,6 +228,9 @@ def build(args):
     project.mkdir()
     for name in ("Program.cs", "totk_xlate.csproj"):
         shutil.copy2(upstream.XLATE / name, project / name)
+    # This original CPU-only probe is compiled into the fork's translator and
+    # required by smoke before a successful deployment can be reported.
+    shutil.copy2(ROOT / "tests/typed_storage_address_probe.cs", project / "typed_storage_address_probe.cs")
     for patch in hwaoi_patches():
         for extra, label in ((["--check"], "check"), ([], "apply")):
             log = workspace / f"hwaoi-{patch.stem}-{label}.log"

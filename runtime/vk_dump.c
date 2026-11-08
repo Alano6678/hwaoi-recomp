@@ -25,6 +25,9 @@
 // before the submission (vk_exec_draw.c upd_note).
 // TOTK_DUMP_SKIP_RUNS=1: a render pass with the same targets as the render pass before it is logged but not copied
 // (the terrain decals draw one pass each into the G-buffer and would use up both caps).
+// TOTK_DUMP_TRIGGER=<file>: instead of a fixed frame, wait for a strictly increasing decimal token in that file,
+// then capture the next complete frame once. The startup token is a baseline, never a replayed capture command.
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -46,11 +49,14 @@
 #define TEX2D_CAP (1u << 20)        // texels of a sampled 2D texture that is dumped
 
 int vk_dump_armed;
+int vk_dump_polling;
 static uint64_t dump_frame, log_from;   // log_from: TOTK_DUMP_LOG, first frame logged to passes.txt without images
+static const char *trigger_file;
+static uint64_t trigger_sequence, trigger_next_ns;
 static char dir[400];
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
-static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO
+static int skip_runs, dump_ubo, metadata_only;
 static uint32_t want_tex[16][2];       // TOTK_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -298,6 +304,7 @@ static void job_done(void *arg) {
 static const char *copy_region(VkExec *ex, VkImage image, VkFormat vf, VkImageAspectFlags aspect, uint32_t level,
                                uint32_t layer, uint32_t z, VkExtent3D ext, uint32_t w, uint32_t h, uint32_t d,
                                const char *name) {
+    if (metadata_only) return "metadata only";
     const Fmt *f = fmt_of(vf);
     if (!f) return "format not decoded";
     if (__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1 != dump_frame && (uint64_t)w * h * d > 65536)
@@ -332,11 +339,33 @@ static const char *copy_region(VkExec *ex, VkImage image, VkFormat vf, VkImageAs
                              .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                              .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &pre};
+    // Feedback-loop attachments are not in GENERAL. The replay tracks the
+    // layout of the whole image; temporarily leave it for the readback and
+    // restore it before any later draw, without changing that tracked state.
+    VkImageAspectFlags feedback_aspect = 0;
+    for (int i = 0; i < ex->nfbl; i++)
+        if (ex->fbl_img[i] == image) feedback_aspect = ex->fbl_aspect[i];
+    VkImageMemoryBarrier2 layout = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image, .subresourceRange = {feedback_aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+    if (feedback_aspect) di.imageMemoryBarrierCount = 1, di.pImageMemoryBarriers = &layout;
     vkCmdPipelineBarrier2(ex->cb, &di);
     VkBufferImageCopy r = {.imageSubresource = {aspect, level, layer, 1}, .imageOffset = {0, 0, (int32_t)z},
                            .imageExtent = ext};   // packed rows: a BC row of ext.width texels is w blocks
     vkCmdCopyImageToBuffer(ex->cb, image, VK_IMAGE_LAYOUT_GENERAL, j->buf, 1, &r);
     di.pMemoryBarriers = &post;
+    if (feedback_aspect) {
+        layout.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        layout.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        layout.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        layout.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        layout.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        layout.newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
+    }
     vkCmdPipelineBarrier2(ex->cb, &di);
     ex->recorded += 3;
     plat_add64(&png_bytes, (int64_t)est);
@@ -500,7 +529,7 @@ static uint64_t shader_hash(const GfxShader *s) {
 typedef struct { VkPipeline p; uint64_t th; int draws; char *text; } Ent;
 static Ent ents[MAX_ENTS];
 static int nents, ents_over, pass_draws;
-typedef struct { VkImage image; VkFormat format; uint32_t w, h, d; int id, is2d; } Lut;
+typedef struct { VkImage image; VkFormat format; VkImageAspectFlags aspect; uint32_t w, h, d; int id, is2d; } Lut;
 static Lut luts[MAX_LUTS];          // queued for the next pass end or dispatch
 static int nluts;
 static VkImage luts_done[MAX_LUTS];
@@ -512,8 +541,8 @@ static void queue_lut(const VkTexImage *t, int id) {
         if (luts_done[i] == t->image) return;
     if (nluts_done == MAX_LUTS) return;
     luts_done[nluts_done++] = t->image;
-    luts[nluts++] = (Lut){t->image, t->format, t->width, t->height, t->type == VK_IMAGE_TYPE_3D ? t->depth : 1, id,
-                          t->type != VK_IMAGE_TYPE_3D};
+    luts[nluts++] = (Lut){.image=t->image, .format=t->format, .aspect=t->aspect, .w=t->width, .h=t->height,
+                          .d=t->type == VK_IMAGE_TYPE_3D ? t->depth : 1, .id=id, .is2d=t->type != VK_IMAGE_TYPE_3D};
 }
 
 // The uncompressed format of a BC format's block size, UNDEFINED for other formats: a BC texture is dumped as its raw
@@ -536,7 +565,7 @@ static void flush_luts(VkExec *ex, int n) {
                  (int)l->format, fmt_name(l->format, fn), bf ? "_blocks" : "");
         const char *why = bf ? copy_region(ex, l->image, bf, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0,
                                            (VkExtent3D){l->w, l->h, l->d}, (l->w + 3) / 4, (l->h + 3) / 4, l->d, name)
-                             : copy_out(ex, l->image, l->format, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, l->w, l->h, l->d, name);
+                             : copy_out(ex, l->image, l->format, l->aspect, 0, 0, l->w, l->h, l->d, name);
         fprintf(passes_f, "  %s tex %d -> %s.png%s%s\n", l->is2d ? "2D" : "3D", l->id, name, why ? " skipped: " : "",
                 why ? why : "");
     }
@@ -914,15 +943,64 @@ out:
 
 static void make_dirs(char *path) { plat_file_mkdir_p(path); }
 
+static int dump_trigger_read(const char *path, uint64_t *sequence) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char data[64];
+    size_t n = fread(data, 1, sizeof data - 1, f);
+    int extra = fgetc(f), failed = ferror(f);
+    fclose(f);
+    if (failed || extra != EOF || memchr(data, 0, n)) return 0;
+    data[n] = 0;
+    const char *p = data;
+    while (isspace((unsigned char)*p)) p++;
+    if (*p < '0' || *p > '9') return 0;
+    uint64_t value = 0;
+    do {
+        unsigned digit = (unsigned)(*p++ - '0');
+        if (value > (UINT64_MAX - digit) / 10) return 0;
+        value = value * 10 + digit;
+    } while (*p >= '0' && *p <= '9');
+    while (isspace((unsigned char)*p)) p++;
+    if (*p) return 0;
+    *sequence = value;
+    return 1;
+}
+
+static void dump_trigger_poll(uint64_t frame) {
+    if (!vk_dump_polling || frame == UINT64_MAX) return;
+    uint64_t now = kern_now_ns();
+    if (now < trigger_next_ns) return;
+    trigger_next_ns = now + 250000000;   // four small file reads per second, only while explicitly enabled
+    uint64_t sequence;
+    if (!dump_trigger_read(trigger_file, &sequence) || sequence <= trigger_sequence) return;
+    trigger_sequence = sequence;
+    dump_frame = frame + 1;
+    vk_dump_polling = 0;
+    vk_dump_armed = 1;
+    rt_log("vk_dump: token %llu armed frame %llu in %s", (unsigned long long)sequence,
+           (unsigned long long)dump_frame, dir);
+}
+
 void vk_dump_init(void) {
     const char *e = cfg_get("TOTK_DUMP");
-    if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
+    trigger_file = cfg_get("TOTK_DUMP_TRIGGER");
+    if (e && *e) dump_frame = strtoull(e, NULL, 10);
+    if (!dump_frame && (!trigger_file || !*trigger_file)) return;
+    if (dump_frame && trigger_file && *trigger_file)
+        rt_fatal("vk_dump: DUMP and DUMP_TRIGGER are mutually exclusive");
     const char *lf = cfg_get("TOTK_DUMP_LOG");
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
+    if (trigger_file && *trigger_file && log_from)
+        rt_fatal("vk_dump: DUMP_LOG requires a fixed DUMP frame");
     const char *sr = cfg_get("TOTK_DUMP_SKIP_RUNS");
     skip_runs = sr && *sr && *sr != '0';
     const char *du = cfg_get("TOTK_DUMP_UBO");
     dump_ubo = du && *du && *du != '0';
+    const char *metadata = cfg_get("TOTK_DUMP_METADATA");
+    if (metadata && strcmp(metadata, "0") && strcmp(metadata, "1"))
+        rt_fatal("vk_dump: DUMP_METADATA must be 0 or 1");
+    metadata_only = metadata && !strcmp(metadata, "1");
     const char *wt = cfg_get("TOTK_DUMP_TEX");
     for (char *q = (char *)wt; q && *q && nwant_tex < 16; q += *q == ',') {
         uint32_t *w = want_tex[nwant_tex++];
@@ -951,11 +1029,19 @@ void vk_dump_init(void) {
         snprintf(path, sizeof path, "%s/bufs.txt", dir);
         if (bd_size && !(bufs_f = fopen(path, "w"))) bd_size = 0;
     }
-    vk_dump_armed = 1;
-    rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+    if (trigger_file && *trigger_file) {
+        dump_trigger_read(trigger_file, &trigger_sequence);
+        vk_dump_polling = 1;
+        rt_log("vk_dump: waiting for a new token in %s (baseline %llu)", trigger_file,
+               (unsigned long long)trigger_sequence);
+    } else {
+        vk_dump_armed = 1;
+        rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+    }
 }
 
 void vk_dump_present(uint64_t frame) {
+    dump_trigger_poll(frame);
     if (frame != dump_frame) return;
     plat_mutex_lock(&rec_lock);
     finished = 1;
@@ -968,6 +1054,7 @@ void vk_dump_present(uint64_t frame) {
     plat_mutex_unlock(&img_lock);
     fclose(passes_f);
     passes_f = NULL;
+    vk_dump_armed = 0;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
 }

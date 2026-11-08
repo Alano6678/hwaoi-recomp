@@ -65,7 +65,81 @@ def verify(exefs, profile_path=PROFILE):
             "exefs_sha256": hashes, "modules": module_details,
             "generated_modules": list(MODULES),
             "rtld_policy": "retained and hashed; DKB host linker replaces rtld execution (unverified for HWAoI)",
-            "patches": "none; no Bananza/TotK addresses applied"}
+            "patches": "no inherited Bananza/TotK patches; fork profiles are selected during generation"}
+
+
+def native_1080_profile(exefs):
+    """Accept only the independently identified instructions in the exact main."""
+    from hwrecomp.nso import Nso
+    patch = ROOT / "recomp/patches-hwaoi196608-native1080.txt"
+    module = Nso(Path(exefs) / "main")
+    expected = json.loads(PROFILE.read_text(encoding="utf-8"))["modules"]["main"]
+    need(module.sha256 == expected, "native 1080p profile: main SHA-256 mismatch")
+    sites = 0
+    for line in patch.read_text(encoding="utf-8").splitlines():
+        fields = line.split("#", 1)[0].split()
+        if not fields or fields[0] == "set":
+            continue
+        need(6 <= len(fields) <= 7 and fields[:3] == ["site", "hwaoi_native1080", "main"],
+             "native 1080p profile: unexpected patch entry")
+        address, original = int(fields[3], 16), int(fields[4], 16)
+        need(struct.unpack("<I", module.code(address, 4))[0] == original,
+             f"native 1080p profile: instruction mismatch at main+{address:#x}")
+        sites += 1
+    need(sites == 12, "native 1080p profile must contain the twelve verified sites")
+    return patch
+
+
+def display_profile(exefs):
+    """Configurable native sizes; never select this table for another module."""
+    from hwrecomp.nso import Nso
+    patch = ROOT / "recomp/patches-hwaoi196608-display.txt"
+    module = Nso(Path(exefs) / "main")
+    expected = json.loads(PROFILE.read_text(encoding="utf-8"))["modules"]["main"]
+    need(module.sha256 == expected, "display profile: main SHA-256 mismatch")
+    sites = set()
+    for line in patch.read_text(encoding="utf-8").splitlines():
+        fields = line.split("#", 1)[0].split()
+        if not fields or fields[0] == "set":
+            continue
+        need(6 <= len(fields) <= 8 and fields[:3] == ["site", "hwaoi_display", "main"],
+             "display profile: unexpected patch entry")
+        address, original = int(fields[3], 16), int(fields[4], 16)
+        need(address not in sites, "display profile: duplicate site")
+        need(struct.unpack("<I", module.code(address, 4))[0] == original,
+             f"display profile: instruction mismatch at main+{address:#x}")
+        sites.add(address)
+    need(len(sites) == 33, "display profile must contain the 33 verified sites")
+    return patch
+
+
+def rate_profile(exefs):
+    from hwrecomp.nso import Nso
+    patch = ROOT / "recomp/patches-hwaoi196608-rate.txt"
+    module = Nso(Path(exefs) / "main")
+    expected = json.loads(PROFILE.read_text(encoding="utf-8"))["modules"]["main"]
+    need(module.sha256 == expected, "rate profile: main SHA-256 mismatch")
+    entries = [line.split("#", 1)[0].split() for line in patch.read_text(encoding="utf-8").splitlines()]
+    sites = [f for f in entries if f and f[0] == "site"]
+    need(len(sites) == 1 and len(sites[0]) == 15 and sites[0][:3] == ["site", "hwaoi_rate", "main"],
+         "rate profile: expected one verified scheduler site")
+    site = sites[0]; address, original = int(site[3], 16), int(site[4], 16)
+    need(address == 0x6c281c and struct.unpack("<I", module.code(address, 4))[0] == original,
+         "rate profile: scheduler instruction mismatch")
+    return patch
+
+
+def display_rate_bytes(exefs):
+    paths = (display_profile(exefs), rate_profile(exefs))
+    return ("\n".join(p.read_text(encoding="utf-8") for p in paths) + "\n").encode("utf-8")
+
+
+def require_successful_generation(out):
+    record = out / "hwaoi-generation.json"
+    need(record.is_file(), "generation success record missing; generate before compiling")
+    result = json.loads(record.read_text(encoding="utf-8"))
+    need(result.get("status") == "pass" and result.get("input_sha256") == sha256(out / "hwaoi-input.json"),
+         "generation is incomplete or belongs to different inputs; regenerate before compiling")
 
 
 def local_output(path, kind):
@@ -165,6 +239,15 @@ def audit(exefs, identity):
                             "No game boot performed"]}
 
 
+def scene_sharpness(value):
+    """Experimental strength of the verified 3D RCAS pass, or its original parameters."""
+    if value == "game":
+        return value
+    if value.isascii() and value.isdecimal() and 0 <= int(value) <= 100:
+        return str(int(value))
+    raise argparse.ArgumentTypeError("scene sharpness must be game or an integer from 0 to 100")
+
+
 def launch_interactive(args, identity):
     """Explicit user trial; retains logs and uses the user's local save profile."""
     need(os.name == "nt", "interactive launcher currently requires Windows")
@@ -192,6 +275,27 @@ def launch_interactive(args, identity):
         for prefix in ("HWAOI_", "DKB_", "TOTK_"):
             env.pop(prefix + setting, None)
     env.update(options)
+    if args.resolution is not None:
+        record_path = exe.parent / "hwaoi-build.json"
+        built = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
+        need(built.get("sha256") == sha256(exe) and built.get("exefs_sha256") == identity["exefs_sha256"]
+             and (built.get("code_patch_profile") or {}).get("name") in ("hwaoi196608-display", "hwaoi196608-display-rate"),
+             "--resolution requires a matching display-settings build")
+        options["HWAOI_OUTPUT_RES"] = env["HWAOI_OUTPUT_RES"] = args.resolution
+    if args.fps is not None:
+        need(int(args.fps) <= 60 or args.experimental_rate_control,
+             "90/120 FPS are still experimental; use --experimental-rate-control with a diagnostic feed")
+        options["HWAOI_FPS_LIMIT"] = env["HWAOI_FPS_LIMIT"] = args.fps
+    if args.scene_sharpness is not None:
+        options["HWAOI_SCENE_SHARPNESS"] = env["HWAOI_SCENE_SHARPNESS"] = args.scene_sharpness
+    # Retain selected inherited diagnostics in the private launch report.
+    for key in ("HWAOI_OUTPUT_RES", "HWAOI_SCENE_RES", "HWAOI_FPS_LIMIT", "HWAOI_EXPERIMENTAL_RATE", "HWAOI_APP_POOL", "HWAOI_VK_PRESENT", "HWAOI_DISPLAY_POOL_TEST",
+                "HWAOI_GPU_WRITE_DIAG", "HWAOI_GPU_READBACK_DIAG", "HWAOI_INDIRECT_BATCH", "HWAOI_UI_DRAW_DIAG", "HWAOI_RUNTIME_MEMORY_DIAG", "HWAOI_VK_VALIDATION",
+                "VK_LAYER_PATH", "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO", "HWAOI_DUMP_TRIGGER",
+                "HWAOI_DUMP_TEX", "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_METADATA", "HWAOI_SCENE_SHARPNESS", "HWAOI_NATIVE_1080",
+                "DKB_SHADER_DUMP"):
+        if key in env:
+            options[key] = env[key]
     if args.input_feed is not None:
         feed = local_output(args.input_feed, "reports").resolve(strict=True)
         need(feed.is_file(), "diagnostic input feed must be a local file under work/reports")
@@ -220,6 +324,11 @@ def launch_interactive(args, identity):
               "dependencies": {"translator": sha256(translator), "zlib": sha256(zlib)},
               "arguments": ["--play-experimental"], "report_directory": str(report_dir),
               "gameplay_verified": False}
+    build_record = exe.parent / "hwaoi-build.json"
+    if build_record.is_file():
+        built = json.loads(build_record.read_text(encoding="utf-8"))
+        if built.get("sha256") == report["sha256"] and built.get("exefs_sha256") == identity["exefs_sha256"]:
+            report["code_patch_profile"] = built.get("code_patch_profile")
     with (report_dir / "stdout.log").open("wb") as stdout, (report_dir / "stderr.log").open("wb") as stderr:
         proc = subprocess.Popen([str(exe), "--play-experimental"], cwd=exe.parent, env=env,
                                 stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -238,10 +347,13 @@ def main(argv=None):
     romfs = sub.add_parser("prepare-romfs", help="Prepare verified compressed cache; raw resources stay in the NUP")
     romfs.add_argument("--nup", type=Path, required=True)
     romfs.add_argument("--out", type=Path, default=ROOT / "work/game/romfs")
-    gen = sub.add_parser("generate", help="Run DKB's real generator with the HWAoI profile and NO game patches")
+    gen = sub.add_parser("generate", help="Run the generator with verified HWAoI inputs and optional fork profiles")
     gen.add_argument("--out", type=Path, default=DEFAULT_GENERATED)
     gen.add_argument("--limit", type=int, default=256, help="Functions per module; 0 explicitly requests all")
     gen.add_argument("--jobs", type=int, default=2)
+    gen.add_argument("--native-1080", action="store_true", help="select the exact-build HWAoI native 1080p profile")
+    gen.add_argument("--display-settings", action="store_true", help="select exact-build native resolution settings (720p..4K)")
+    gen.add_argument("--rate-unlock", action="store_true", help="generate the experimental exact-build native scheduler-rate profile with display settings")
     smoke = sub.add_parser("compile-smoke", help="Compile selected generated chunks, without claiming a game build")
     smoke.add_argument("--generated", type=Path, default=DEFAULT_GENERATED)
     smoke.add_argument("--out", type=Path, default=ROOT / "work/build/hwaoi-smoke")
@@ -260,7 +372,10 @@ def main(argv=None):
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
     launch.add_argument("--input-feed", type=Path, help="opt-in expiring diagnostic controls under work/reports")
     launch.add_argument("--input", dest="input_mode", choices=("auto", "keyboard", "none"), default="auto", help="physical input policy; diagnostic scripts/feed remain available")
+    launch.add_argument("--scene-sharpness", type=scene_sharpness, help="experimental 3D sharpening strength 0..100, or game for original parameters (default)")
     launch.add_argument("--experimental-rate-control", action="store_true", help="opt-in unqualified 30/60/90/120 presentation-rate experiments")
+    launch.add_argument("--resolution", choices=("1280x720", "1920x1080", "2560x1440", "3840x2160"), help="native game resolution; non-1080p modes remain experimental; requires display-settings generation")
+    launch.add_argument("--fps", choices=("30", "60", "90", "120"), help="presentation target; 90/120 remain experimental")
     launch.add_argument("--input-script", type=Path, help="opt-in startup diagnostic script under work/reports")
     launch.add_argument("--profile-dir", type=Path, default=ROOT / "work/saves/hwaoi196608", help="local save profile under work/saves")
     args = parser.parse_args(argv)
@@ -284,16 +399,46 @@ def main(argv=None):
         elif args.action == "generate":
             need(0 <= args.limit <= 1000000 and 1 <= args.jobs <= 8, "invalid limit/jobs")
             out = local_output(args.out, "generated")
+            need(not (args.native_1080 and (args.display_settings or args.rate_unlock)), "select one code profile")
+            patch = display_profile(args.exefs) if args.display_settings else native_1080_profile(args.exefs) if args.native_1080 else None
+            profile_name = "hwaoi196608-display" if args.display_settings else "hwaoi196608-native1080"
+            combined = display_rate_bytes(args.exefs) if args.rate_unlock else None
+            if combined is not None:
+                profile_name = "hwaoi196608-display-rate"
+                patch = out / "hwaoi-display-rate.txt"
+            identity["code_patch_profile"] = ({"name": profile_name, "sha256": hashlib.sha256(combined).hexdigest() if combined is not None else sha256(patch)}
+                                               if patch else None)
             prepare_generated(out, identity)
-            run([sys.executable, ROOT / "recomp/gen.py", "--exefs", args.exefs.resolve(), "--out", out,
-                 "--modules", ",".join(MODULES), "--jobs", args.jobs, "--limit", args.limit])
+            save_json(out / "hwaoi-generation.json", {"status": "generating", "input_sha256": sha256(out / "hwaoi-input.json")})
+            if combined is not None:
+                patch.write_bytes(combined)
+            command = [sys.executable, ROOT / "recomp/gen.py", "--exefs", args.exefs.resolve(), "--out", out,
+                       "--modules", ",".join(MODULES), "--jobs", args.jobs, "--limit", args.limit]
+            if patch:
+                command += ["--patches", patch]
+            run(command)
             report = generation_summary(out, args.limit)
+            report.update(status="pass", input_sha256=sha256(out / "hwaoi-input.json"))
             save_json(out / "hwaoi-generation.json", report)
             save_json(out / "expected.json", identity)
         elif args.action in ("compile-smoke", "build"):
             generated = local_output(args.generated, "generated")
+            require_successful_generation(generated)
             old = json.loads((generated / "hwaoi-input.json").read_text(encoding="utf-8"))
             need(old["exefs_sha256"] == identity["exefs_sha256"], "generated input does not match current modules")
+            selected_profile = old.get("code_patch_profile")
+            if selected_profile:
+                profiles = {"hwaoi196608-native1080": native_1080_profile, "hwaoi196608-display": display_profile,
+                            "hwaoi196608-display-rate": None}
+                need(selected_profile.get("name") in profiles, "unknown generated code profile")
+                if selected_profile["name"] == "hwaoi196608-display-rate":
+                    combined = display_rate_bytes(args.exefs)
+                    patch = generated / "hwaoi-display-rate.txt"
+                    need(patch.is_file() and patch.read_bytes() == combined, "native rate profile changed; regenerate first")
+                else:
+                    patch = profiles[selected_profile["name"]](args.exefs)
+                need(selected_profile.get("sha256") == sha256(patch),
+                     "native 1080p profile changed since generation; regenerate before building")
             if args.action == "compile-smoke":
                 report = compile_smoke(generated, local_output(args.out, "build"), args.clang, args.chunks)
             else:
@@ -316,7 +461,9 @@ def main(argv=None):
                      "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build"])
                 report = {"stage": "linked experimental runtime", "output": str(out),
                           "game_boot_enabled": False, "experimental_interactive_command": "python tools/hwaoi.py launch",
-                          "playable": False}
+                          "playable": False, "sha256": sha256(out / "hwaoi.exe"),
+                          "exefs_sha256": identity["exefs_sha256"], "code_patch_profile": selected_profile}
+                save_json(out / "hwaoi-build.json", report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, ImportError, subprocess.TimeoutExpired) as error:

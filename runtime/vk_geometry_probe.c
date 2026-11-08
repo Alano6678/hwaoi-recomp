@@ -289,7 +289,7 @@ static int gp_arrays_indirect(uint8_t *memory, void *control) {
     static const float vertices[8][8] = {
         {9,9,0,1, 1,0,0,1}, {-0.5f,-0.5f,0,1, 0,1,0,1}, {0.5f,-0.5f,0,1, 0,1,0,1},
         {0.5f,0.5f,0,1, 0,1,0,1}, {-0.5f,0.5f,0,1, 0,1,0,1},
-        {9,9,0,1, 1,0,0,1}, {9,9,0,1, 1,0,0,1}, {9,9,0,1, 1,0,0,1}};
+        {-0.5f,-0.5f,0,1, 0,1,0,1}, {0.5f,0.5f,0,1, 0,1,0,1}, {-0.5f,0.5f,0,1, 0,1,0,1}};
     const struct { int primitive; uint32_t count, instances, first, base; } cases[] = {
         {NVN_DRAW_PRIMITIVE_TRIANGLES,3,2,1,3}, {NVN_DRAW_PRIMITIVE_TRIANGLES,0,1,1,3},
         {NVN_DRAW_PRIMITIVE_TRIANGLES,3,0,1,3}, {NVN_DRAW_PRIMITIVE_QUADS,4,2,1,3},
@@ -339,6 +339,43 @@ static int gp_arrays_indirect(uint8_t *memory, void *control) {
         GP_REQUIRE(read_ok && !memcmp(args,after,sizeof after),
                    "array indirect preserves GPU argument words");
     }
+    // Identical read-only indirect draws keep the reference's pass count;
+    // a GPU argument update between them still closes the pass and is observed.
+    const uint32_t first_args[4]={3,1,1,0}, next_args[4]={3,1,5,0};
+    const char *batch_value=cfg_get("TOTK_INDIRECT_BATCH");
+    int batching=batch_value && !strcmp(batch_value,"1");
+    for (int producer=0;producer<2;producer++) {
+        uint64_t reference_passes=0;
+        for (int indirect=0;indirect<2;indirect++) {
+            memcpy(memory+GP_RESET,first_args,16);memcpy(memory+GP_RESET+32,next_args,16);
+            memset(memory+GP_RECORD,0,16);
+            GP_CALL(nvnMemoryPoolFlushMappedRange,GP_U(&gp_memory_pool),GP_RESET,48);
+            GP_CALL(nvnMemoryPoolFlushMappedRange,GP_U(&gp_memory_pool),GP_RECORD,16);
+            gp_prefix(memory,control,1);
+            GP_CALL(nvnCommandBufferBindVertexBuffer,GP_U(&gp_command),0,GP_U(memory+GP_VERTEX),sizeof vertices);
+            GP_CALL(nvnCommandBufferCopyBufferToBuffer,GP_U(&gp_command),GP_U(memory+GP_RESET),GP_U(memory+GP_RECORD),16,0);
+            GP_CALL(nvnCommandBufferBarrier,GP_U(&gp_command),NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
+            for (int draw=0;draw<2;draw++) {
+                if (draw && producer) {
+                    GP_CALL(nvnCommandBufferCopyBufferToBuffer,GP_U(&gp_command),GP_U(memory+GP_RESET+32),GP_U(memory+GP_RECORD),16,0);
+                    GP_CALL(nvnCommandBufferBarrier,GP_U(&gp_command),NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
+                }
+                if (indirect) GP_CALL(nvnCommandBufferDrawArraysIndirect,GP_U(&gp_command),NVN_DRAW_PRIMITIVE_TRIANGLES,GP_U(memory+GP_RECORD),0);
+                else GP_CALL(nvnCommandBufferDrawArraysInstanced,GP_U(&gp_command),NVN_DRAW_PRIMITIVE_TRIANGLES,
+                             draw && producer ? 5 : 1,3,0,1);
+            }
+            uint64_t before_passes=vk_exec_frame.passes;
+            GP_REQUIRE(gp_submit(),"indirect batch submission completed");
+            uint64_t passes=vk_exec_frame.passes-before_passes;
+            GP_CALL(nvnTextureReadTexels,GP_U(&gp_color),0,GP_U(&region),GP_U(indirect?actual:direct));
+            if (!indirect) reference_passes=passes;
+            else {
+                GP_REQUIRE(!memcmp(direct,actual,sizeof direct),"batched indirect pixels preserve GPU producer ordering");
+                GP_REQUIRE(passes==reference_passes+(!batching&&!producer),"indirect batch render-pass count matches dependency model");
+            }
+        }
+    }
+    puts("probe-vkgeometry: indirect batching passed (2048 exact pixels, read-only pass reuse and GPU producer barrier)");
     puts("probe-vkgeometry: arrays-indirect passed (8 cases, GPU-produced parameters, QUADS, zero counts/instances, 8192 exact pixels)");
     ok=1;
 done:

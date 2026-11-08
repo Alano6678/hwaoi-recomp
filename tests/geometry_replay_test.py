@@ -146,6 +146,11 @@ static void count_use(int cls,int use,uint64_t bytes) {(void)cls;CHECK(bytes==ex
 static void *scratch(VkExec *ex,uint64_t n,VkBuffer *b,VkDeviceSize *o) {(void)ex;(void)n;(void)b;(void)o;abort();}
 static void limits_init(void) {abort();}
 static VkDescriptorBufferInfo c0_info(VkExec *ex,int st) {(void)ex;(void)st;abort();}
+// The ordinary-GS fixture does not select the separately verified compute RCAS
+// preference; its scope/profile and GPU copy have dedicated fixtures.
+static int hwaoi_scene_sharpness_override(VkExec *ex,int stage,int slot,const VkDescriptorBufferInfo *source,VkDescriptorBufferInfo *out) {
+    (void)ex;(void)stage;(void)slot;(void)source;(void)out;return 0;
+}
 // This ordinary-GS fixture must never construct a synthetic compute bank. The
 // actual guarded-storage selector below rejects GS before this provider.
 void vk_c0_fill(uint8_t bank[VK_C0_BYTES],int st,const p_bind_buf ssbo[16],const p_bind_buf ubo[16],

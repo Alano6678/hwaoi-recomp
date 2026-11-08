@@ -73,6 +73,7 @@ void rec_write_mask(PFN_vkCmdSetColorWriteMaskEXT fn, VkCommandBuffer cb, uint32
     X(EndQuery, (VkCommandBuffer cb, VkQueryPool p, uint32_t q), (cb, p, q))                                             \
     X(EndRendering, (VkCommandBuffer cb), (cb))                                                                          \
     X(FillBuffer, (VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize n, uint32_t v), (cb, b, o, n, v))        \
+    X(UpdateBuffer, (VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize n, const void *v), (cb, b, o, n, v))  \
     X(PipelineBarrier2, (VkCommandBuffer cb, const VkDependencyInfo *di), (cb, di))                                      \
     X(PushConstants, (VkCommandBuffer cb, VkPipelineLayout l, VkShaderStageFlags st, uint32_t o, uint32_t n,             \
                       const void *v), (cb, l, st, o, n, v))                                                              \
@@ -129,6 +130,7 @@ REC_CMDS(REC_DECL)
 #define vkCmdEndQuery rc_vkCmdEndQuery
 #define vkCmdEndRendering rc_vkCmdEndRendering
 #define vkCmdFillBuffer rc_vkCmdFillBuffer
+#define vkCmdUpdateBuffer rc_vkCmdUpdateBuffer
 #define vkCmdPipelineBarrier2 rc_vkCmdPipelineBarrier2
 #define vkCmdPushConstants rc_vkCmdPushConstants
 #define vkCmdResetQueryPool rc_vkCmdResetQueryPool

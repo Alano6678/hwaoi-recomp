@@ -39,6 +39,7 @@ static uint64_t call(void (*fn)(Cpu *), const uint64_t args[8]) {
 
 // Only the recorder and submit resolver are linked. These replace unrelated host services; the test is single-threaded.
 unsigned rt_trace;
+GfxStats gfx_counters;
 static uint64_t replayed;
 void nvn_called(uint8_t *seen, const char *name) { (void)seen; (void)name; }
 // This fixture tests recording, not diagnostics; the real trace has its own concurrent packet.
@@ -49,6 +50,11 @@ void plat_mutex_lock(PlatMutex *m) { (void)m; }
 void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 void plat_mutex_lock_shared(PlatMutex *m) { (void)m; }
 void plat_mutex_unlock_shared(PlatMutex *m) { (void)m; }
+int plat_mem_readable(uint64_t addr, uint64_t size) { (void)addr; (void)size; return 0; }
+const char *cfg_get(const char *name) { (void)name; return NULL; }
+#ifdef NVN_RUNTIME_MEMORY_DIAG_VERSION
+void nvn_program_memory_stats(NvnMemoryStats *out) { (void)out; }
+#endif
 uint64_t gfx_replayed_submits(void) { return replayed; }
 const GfxBackend *gfx_backend(void) { rt_fatal("unexpected sync wait in push-constant fixture"); return NULL; }
 void rt_log(const char *fmt, ...) {

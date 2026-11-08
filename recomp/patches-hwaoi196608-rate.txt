@@ -1,0 +1,10 @@
+# HWAoI NCM 196608, exact main SHA-256 checked by tools/hwaoi.py.
+# Clock trace: main+6c28c8 repeatedly samples the 31.25 MHz clock while a
+# scheduler node waits until frequency / requested_Hz ticks have elapsed.
+# main+6c281c supplies requested_Hz from node+0x30; 6c2874 divides by it.
+# Override only nodes configured at 60 Hz. Preserve all other timer rates.
+# x9/x10 are dead before GetSystemTickFrequency at 6c2830. The equality mask
+# CLZ(old^60)>>5 selects the target without changing NZCV. Page+0xb0 is a u32.
+# Experimental until native game-speed qualification is complete.
+set hwaoi_rate TOTK_RATE_UNLOCK 0
+site hwaoi_rate main 006c281c b9403368 b9403368 @page:x9 b940b129 521e0d0a 5ac0114a 53057d4a 4b0a03ea 4a080129 0a0a0129 4a090108

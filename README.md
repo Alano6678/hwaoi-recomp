@@ -6,27 +6,69 @@
 
 **HWAoI Recomp** is an experimental static recompilation of *Hyrule Warriors: Age of Imprisonment* for Nintendo Switch 2 into a native Windows x86-64 application with a Vulkan renderer.
 
-The game's ARM64 code is translated to C ahead of time and compiled with a C/C++ host runtime. Graphics calls are handled by an NVN 2 implementation, with Ampere shaders translated to SPIR-V. The project is based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp).
+The game's ARM64 code is translated to C ahead of time and compiled with a C/C++ runtime. An NVN 2 implementation handles graphics, translating Ampere shaders to SPIR-V for Vulkan. This project builds on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp).
 
-> No game files, keys or game-derived builds are included. You need your own matching game dump.
+> [!NOTE]
+> Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads or game-derived executables are distributed here. Recompilation happens locally.
 
-## Status
+## Current status
 
-**Work in progress.** The game boots, plays both opening cutscenes and enters the outdoor 3D scene. Movement and camera controls work, and the first outdoor area has run at approximately **60 FPS** in measured tests on an RTX 4060. Adaptation is now progressing into combat scenes.
+**Early development build — updated November 8, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
 
-| Phase | | Progress |
+Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
+
+> [!WARNING]
+> **Frame-rate modes other than 60 FPS currently accelerate gameplay.** Game-speed correction is still in progress.
+>
+> **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
+
+| | Part | Progress |
 | --- | --- | --- |
-| F0 CPU | ✅ | All three guest modules are generated, compiled and linked into a native Windows executable. |
-| F1 OS | ✅ | Boot, resource loading, system services, audio and controller integration are running. |
-| F2 NVN 2 | ✅ | Texture views, depth/stencil copies and indirect drawing have been adapted. |
-| F3 Shaders | ✅ | Ampere-to-Maxwell lowering and SPIR-V translation support the opening scenes. |
-| F4 Vulkan | ✅ | Settings, cutscenes and the first outdoor area render, with colour-space and memory-transfer improvements. |
-| F5 Progression | 🚧 | Movement, camera controls and opening movie playback are verified; combat rendering and performance are being adapted. |
+| ✅ | Static recompiler | All three guest modules generate, compile and link into a native Windows executable. |
+| ✅ | Boot and resources | The matching build passes title/module checks and loads its game resources. |
+| ✅ | Opening movies and audio | Both opening movies play through; audio and voices work in the tested opening. |
+| ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
+| 🔧 | Rendering | Outdoor scenes and initial combat render. Texture views, depth/stencil handling, colour space and storage-write tracking have received fixes. |
+| 🔧 | Combat performance | Major stalls and unbounded command-recording growth have been addressed. Further combat optimization continues. |
+| 🧪 | 30 / 60 / 90 / 120 FPS | The native scheduler-unlock candidate exceeds 60 FPS in game. Approximately 120 FPS has been measured in menu/presentation tests; non-60 modes still accelerate gameplay. |
+| 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
+| 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
 
-Native semantic tests and Vulkan pixel-readback probes cover the implemented paths. Further frame-rate and resolution profiles are being investigated.
+✅ working in the tested scope · 🔧 adaptation in progress · 🧪 experimental
 
-## Credits
+## Trying the development build
 
-Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with the upstream revision recorded in [config/upstream.json](config/upstream.json).
+This is currently a source/development workflow. The inherited upstream installers and release scripts are not HWAoI-ready.
 
-GPL-3.0-or-later overall; inherited MIT and other third-party terms remain intact. See [LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Only the exact build recorded in [the HWAoI game profile](config/games/hwaoi-update-196608.json) is accepted. The tools check the title and module hashes before selecting game-specific patches, and leave the original game package unchanged.
+
+Start with the fork's entry point:
+
+```text
+python tools/hwaoi.py --help
+python tools/hwaoi.py verify
+```
+
+Resource preparation, C generation, compilation/linking and launching are separate steps. The `prepare-romfs`, `generate`, `build` and `launch` subcommands describe their required inputs.
+
+The experimental native frame-rate profile is generated with:
+
+```text
+python tools/hwaoi.py generate --rate-unlock --out work/generated/hwaoi196608-full --limit 0 --jobs 2
+```
+
+After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It remains off by default while game-speed correction is being tested. The frame-rate target can then be selected in the host settings.
+
+Press **Esc** for host settings, **F10** to cycle the performance overlay, and **F11** for fullscreen. Resolution changes require a restart. Actual FPS depends on the scene, hardware and selected resolution.
+
+## Testing and reports
+
+Validation includes module/hash refusal checks, independent instruction/semantic tests and Vulkan pixel-readback probes. Generation and a successful build alone do not establish playthrough coverage.
+
+For a useful [issue report](https://github.com/Alano6678/hwaoi-recomp/issues), include the commit, GPU/CPU, resolution, frame-rate mode, where the problem occurs and the runtime log. Please keep game files and keys out of reports.
+
+## Credits and license
+
+Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with its revision pinned in [config/upstream.json](config/upstream.json). Menu adaptations also credit [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp); the full inherited attributions remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE) and [LICENSE-MIT](LICENSE-MIT).

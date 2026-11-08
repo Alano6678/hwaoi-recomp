@@ -33,9 +33,11 @@ enum { PERF_PACE, PERF_FENCE, PERF_DRAIN, PERF_PIPE, PERF_XLATE, PERF_TEX, PERF_
 void prof_start(void);
 void prof_write(void);                          // idempotent; boot.c calls it before _exit
 uint64_t perf_begin(void);                      // start time of a wait; pair with perf_end
-void perf_end(int kind, uint64_t t0);           // counts render-thread time only
+void perf_end(int kind, uint64_t t0);           // counts presentation/replay-thread and scoped submission time
 void perf_replay(uint64_t t0);                  // replay (NVN -> Vulkan recording) time on any thread, waits inside it included
 void perf_replay_thread(void);                  // the calling thread replays for the render thread: perf_end counts its waits
+unsigned perf_replay_scope_begin(void);         // synchronous submissions may come from a different guest host thread
+void perf_replay_scope_end(unsigned previous);  // restore the caller's role; safe for nested scopes, no global TID changes
 void perf_main_thread(void);                    // the calling thread is the guest main thread (TOTK_PROFILE_MAIN)
 // Events per 60-frame window: graphics pipelines finished by the background workers, draws skipped while pending,
 // first texture uploads and re-uploads after CPU writes, draws skipped while a shader translates in the background,
@@ -274,7 +276,9 @@ void rt_patch_switch(int set, int on);                     // at run time (live 
                                                            // the next time it runs
 void *rt_patch_page(void);                                 // the page the patched code reads (NULL without the table)
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value
+void hwaoi_rate_diagnostic_frame(uint64_t frame);            // optional guest clock-consumer attribution
 int frame_step_realtime(void);                             // the real-time step is on: presents ignore the interval
+int frame_step_native_rate(void);                          // HWAoI native scheduler-rate profile is enabled
 uint64_t frame_step_cap_ns(void);                          // with the real-time step: the shortest frame in ns
 double frame_step_limit_hz(void);                         // the frame rate the limit gives (overlay); 0 unknown
 int64_t frame_step_world_us(void);                         // game time since the loaded save's first frame, -1 before

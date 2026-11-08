@@ -1255,18 +1255,50 @@ static int storage_texels(const tex_t *t, const Region *g, const NVNcopyRegion *
 }
 
 int vk_texture_compare_rgba8_pixels_locked(const VkTexImage *img, uint8_t rgba[6][4]) {
-    if (!img || img->format != VK_FORMAT_R8G8B8A8_UNORM || img->width != 1 || img->height != 1 ||
-        img->depth != 1 || img->levels != 1 || img->samples != 1 || (img->layers != 1 && img->layers != 6) ||
-        !img->mirrored || img->gpu_owned) return 0;
+    if (!img) {
+        rt_log("vk: RGBA8 comparison rejected: reason=missing-image");
+        return 0;
+    }
     const Tex *e = (const Tex *)img;   // pub is the first member; callers use a live texture-cache result
-    if (e->released || e->wr_fence || e->t.d.format != NVN_FORMAT_RGBA8 || e->f.vk != e->f.ideal ||
-        e->t.d.width != 1 || e->t.d.height != 1 || e->t.d.levels != 1 || e->t.L.layers != img->layers ||
-        !e->t.mem || !e->t.L.size || !plat_mem_readable((uintptr_t)e->t.mem, e->t.L.size)) return 0;
+    const char *reason = NULL;
+    if (img->format != VK_FORMAT_R8G8B8A8_UNORM) reason = "image-format";
+    else if (img->width != 1 || img->height != 1 || img->depth != 1) reason = "image-extent";
+    else if (img->levels != 1) reason = "image-mips";
+    else if (img->samples != 1) reason = "image-samples";
+    else if (img->layers != 1 && img->layers != 6) reason = "image-layers";
+    else if (!img->mirrored) reason = "not-mirrored";
+    else if (img->gpu_owned) reason = "GPU-owned";
+    else if (e->released) reason = "released";
+    else if (e->wr_fence) reason = "image-write-recorded";
+    else if (e->t.d.format != NVN_FORMAT_RGBA8) reason = "storage-format";
+    else if (e->f.vk != e->f.ideal) reason = "substituted-format";
+    else if (e->t.d.width != 1 || e->t.d.height != 1 || e->t.d.levels != 1 || e->t.L.layers != img->layers)
+        reason = "storage-shape";
+    else if (!e->t.mem || !e->t.L.size) reason = "missing-storage";
+    else if (!plat_mem_readable((uintptr_t)e->t.mem, e->t.L.size)) reason = "unreadable-storage";
+    if (reason) goto rejected;
     uint8_t next[6][4] = {{0}};
-    for (uint32_t layer = 0; layer < img->layers; layer++)
-        if (nvn_deswizzle(&e->t.d, 0, layer, e->t.mem, next[layer], 4)) return 0;
+    for (uint32_t layer = 0; layer < img->layers; layer++) {
+        if (nvn_deswizzle(&e->t.d, 0, layer, e->t.mem, next[layer], 4)) {
+            reason = "storage-layout";
+            goto rejected;
+        }
+    }
     memcpy(rgba, next, sizeof next);
     return 1;
+rejected:
+    // The old fatal omitted the failing predicate. Keep the strict authority/shape
+    // boundary, but distinguish a new shadow-texture shape from stale image writes.
+    rt_log("vk: RGBA8 comparison rejected: reason=%s addr=%#llx image_format=%u extent=%ux%ux%u "
+           "mips=%u layers=%u samples=%u mirrored=%u GPU-owned=%u released=%d write_fence=%llu "
+           "storage_format=%#x storage_extent=%ux%ux%u storage_mips=%u storage_layers=%u "
+           "storage_addr=%#llx storage_bytes=%llu native_format=%u ideal_format=%u",
+           reason, (unsigned long long)img->addr, (unsigned)img->format, img->width, img->height, img->depth,
+           img->levels, img->layers, img->samples, img->mirrored, img->gpu_owned, e->released,
+           (unsigned long long)e->wr_fence, (unsigned)e->t.d.format, e->t.d.width, e->t.d.height, e->t.d.depth,
+           e->t.d.levels, e->t.L.layers, (unsigned long long)(uintptr_t)e->t.mem,
+           (unsigned long long)e->t.L.size, (unsigned)e->f.vk, (unsigned)e->f.ideal);
+    return 0;
 }
 
 static int read_aspect(const Tex *e, VkImageAspectFlags *a) {

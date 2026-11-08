@@ -19,6 +19,7 @@
 // rt_ticks, the function profiler hook), logging, SHA-256, and the crash reporter (a vectored exception handler that
 // names the lifted function, the guest registers and the guest frame-pointer chain).
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,13 +157,46 @@ const RtConfig *rt_config(void) { return &cfg; }
 volatile int g_fnprof = 0;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr, (void)lr, (void)x0; }
 
+// Guest assertions also reach UDF/BRK deliberately; retain their caller chain
+// before exiting, just as the native exception reporter does for a host fault.
+static void guest_abort_diagnostic(Cpu *c, uint64_t pc) {
+    if (!c) return;
+    for (int i = 0; i < 28; i += 4)
+        rt_logf("guest abort tid %u: x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx\n", plat_thread_id(),
+                i, (unsigned long long)c->x[i], i + 1, (unsigned long long)c->x[i + 1],
+                i + 2, (unsigned long long)c->x[i + 2], i + 3, (unsigned long long)c->x[i + 3]);
+    char at[160];
+    uint64_t fp = c->x[29];
+    for (unsigned n = 0; n < 24 && fp && !(fp & 15); n++) {
+        uint64_t frame[2];
+        if (fp > UINT64_MAX - sizeof frame || !plat_mem_read(fp, frame, sizeof frame)) break;
+        rt_log("guest abort frame %u: %s", n, ldr_describe(frame[1], at, sizeof at));
+        if (frame[0] <= fp || frame[0] - fp > (64u << 20)) break;
+        fp = frame[0];
+    }
+    if (RT_TARGET_HWAOI && rt_patch_set("hwaoi_display") >= 0) {
+        const RtLoaded *main = ldr_module(0);
+        // Exact-build main+112bc formats into this buffer before UDF #8002.
+        // Diagnostics only: no guest memory or instruction is changed.
+        if (main && !strcmp(main->name, "main") && pc == main->base + 0x11334) {
+            char message[1024];
+            if (plat_mem_read(main->base + 0x2897fb8, message, sizeof message)) {
+                message[sizeof message - 1] = 0;
+                rt_log("HWAoI game assertion: %s", message);
+            }
+        }
+    }
+}
+
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
     char at[128], lr[128];
+    guest_abort_diagnostic(c, pc);
     rt_fatal("brk #%#x at %s (lr %s)", imm, ldr_describe(pc, at, sizeof at), ldr_describe(c->x[30], lr, sizeof lr));
 }
 
 void rt_udf(Cpu *c, uint64_t pc) {
     char at[128], lr[128];
+    guest_abort_diagnostic(c, pc);
     rt_fatal("undefined instruction at %s (lr %s)", ldr_describe(pc, at, sizeof at),
              ldr_describe(c->x[30], lr, sizeof lr));
 }
@@ -172,11 +206,99 @@ void rt_udf(Cpu *c, uint64_t pc) {
 // long and paced itself at 20 FPS. The scale is set before main, so no thread reads it half written.
 static PlatScale tick_scale;
 
+// Optional clock-consumer attribution. The returned guest clock is unchanged.
+// A low key bit publishes a slot only after its first stack sample is complete.
+typedef struct {
+    _Atomic uint64_t key, calls;
+    uint64_t parents[4];
+    uint32_t first_tid;
+} RateClockSite;
+static RateClockSite rate_clock_sites[1024];
+static _Atomic uint64_t rate_clock_overflow;
+static _Atomic int rate_clock_enabled = -1;
+
+static int rate_clock_on(void) {
+    int on = atomic_load_explicit(&rate_clock_enabled, memory_order_relaxed);
+    if (on < 0) {
+        const char *value = cfg_get("TOTK_RATE_DIAG");
+        on = value && !strcmp(value, "1");
+        atomic_store_explicit(&rate_clock_enabled, on, memory_order_relaxed);
+    }
+    return on;
+}
+
+static void rate_clock_observe(void) {
+    Cpu *c = kern_cpu();
+    if (!c || !c->x[30] || (c->x[30] & 3)) return;
+    uint64_t lr = c->x[30];
+    unsigned hash = (unsigned)((lr >> 2) ^ (lr >> 14)) & 1023;
+    for (unsigned n = 0; n < 8; n++) {
+        RateClockSite *s = &rate_clock_sites[(hash + n) & 1023];
+        uint64_t key = atomic_load_explicit(&s->key, memory_order_acquire);
+        if (!key) {
+            uint64_t empty = 0;
+            if (atomic_compare_exchange_strong_explicit(&s->key, &empty, lr | 1,
+                                                       memory_order_acq_rel, memory_order_acquire)) {
+                s->first_tid = plat_thread_id();
+                uint64_t fp = c->x[29];
+                for (unsigned at = 0; at < 4 && fp && !(fp & 15); at++) {
+                    uint64_t frame[2];
+                    if (fp > UINT64_MAX - sizeof frame || !plat_mem_read(fp, frame, sizeof frame)) break;
+                    s->parents[at] = frame[1];
+                    if (frame[0] <= fp || frame[0] - fp > (64u << 20)) break;
+                    fp = frame[0];
+                }
+                atomic_store_explicit(&s->key, lr, memory_order_release);
+                key = lr;
+            } else key = empty;
+        }
+        if (key == lr) {
+            atomic_fetch_add_explicit(&s->calls, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    atomic_fetch_add_explicit(&rate_clock_overflow, 1, memory_order_relaxed);
+}
+
+void hwaoi_rate_diagnostic_frame(uint64_t frame) {
+    if (!rate_clock_on() || frame % 120) return;
+    uint64_t counts[20] = {0}, total = 0;
+    RateClockSite *sites[20] = {0};
+    for (unsigned n = 0; n < 1024; n++) {
+        RateClockSite *s = &rate_clock_sites[n];
+        uint64_t key = atomic_load_explicit(&s->key, memory_order_acquire);
+        if (!key || (key & 1)) continue;
+        uint64_t count = atomic_exchange_explicit(&s->calls, 0, memory_order_relaxed);
+        total += count;
+        for (unsigned i = 0; count && i < 20; i++) {
+            if (count <= counts[i]) continue;
+            memmove(counts + i + 1, counts + i, (19 - i) * sizeof counts[0]);
+            memmove(sites + i + 1, sites + i, (19 - i) * sizeof sites[0]);
+            counts[i] = count; sites[i] = s; break;
+        }
+    }
+    uint64_t overflow = atomic_exchange_explicit(&rate_clock_overflow, 0, memory_order_relaxed);
+    rt_log("rate-clock: frame=%llu calls=%llu overflow=%llu", (unsigned long long)frame,
+           (unsigned long long)total, (unsigned long long)overflow);
+    for (unsigned i = 0; i < 20 && sites[i]; i++) {
+        RateClockSite *s = sites[i]; char at[128], parent[4][128];
+        for (unsigned p = 0; p < 4; p++) ldr_describe(s->parents[p], parent[p], sizeof parent[p]);
+        rt_log("rate-clock: calls=%llu first_tid=%u lr=%s parents=%s / %s / %s / %s",
+               (unsigned long long)counts[i], s->first_tid,
+               ldr_describe(atomic_load_explicit(&s->key, memory_order_relaxed), at, sizeof at),
+               parent[0], parent[1], parent[2], parent[3]);
+    }
+}
+
 uint32_t rt_tick_hz(void) { return rt_game_version ? 19200000u : 31250000u; }
 
 __attribute__((constructor)) static void tick_scale_init(void) { tick_scale = plat_scale(rt_tick_hz(), plat_counter_hz()); }
 
-uint64_t rt_ticks(void) { return plat_scaled(tick_scale, plat_counter()); }
+uint64_t rt_ticks(void) {
+    uint64_t ticks = plat_scaled(tick_scale, plat_counter());
+    if (rate_clock_on()) rate_clock_observe();
+    return ticks;
+}
 uint64_t rt_ticks_to_ns(uint64_t t) { return (uint64_t)((unsigned __int128)t * 1000000000u / rt_tick_hz()); }
 uint64_t rt_ns_to_ticks(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * rt_tick_hz() / 1000000000u); }
 

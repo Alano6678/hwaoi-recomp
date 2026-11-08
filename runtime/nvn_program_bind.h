@@ -14,6 +14,15 @@ typedef struct {
 
 typedef int (*NvnProgramStageLookup)(const prog_t *, unsigned, NVNshaderData *);
 
+// A stage's immutable shader identity comes from its source program, not the
+// merged view's new binding-combination serial. Never return a stale source
+// before refresh, after SetShaders/reinitialization, or following an unbind.
+static inline const prog_t *nvn_program_stage_source(const NvnProgramBindings *s, unsigned stage) {
+    if (!s || stage >= 6 || s->dirty) return NULL;
+    const prog_t *p = s->source[stage];
+    return p && p == s->seen[stage] && p->serial == s->seen_serial[stage] ? p : NULL;
+}
+
 static inline int nvn_program_bind(NvnProgramBindings *s, const prog_t *program, uint32_t mask) {
     if (mask & ~63u) return 0;
     for (unsigned st = 0; st < 6; st++) if (mask & (1u << st)) {

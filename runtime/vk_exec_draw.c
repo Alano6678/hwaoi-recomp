@@ -23,6 +23,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "hwaoi_scene_sharpness.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_geometry_control.h"
@@ -1030,6 +1031,21 @@ static int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const
     return 1;
 }
 
+// BindProgram composes independently selected stages into a new view. Its
+// combination serial still invalidates whole-draw/resource state, but must not
+// make an unchanged source stage rehash/lower its complete code at every bind.
+// Standalone replay probes can supply a complete direct program without a view.
+static const prog_t *program_stage_source(const VkExec *ex, int stage) {
+    if (!ex || (unsigned)stage >= 6) return NULL;
+    if (ex->prog != &ex->programs.merged) return ex->prog;
+    return nvn_program_stage_source(&ex->programs, (unsigned)stage);
+}
+
+static int bound_stage(const VkExec *ex, int stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
+    const prog_t *p = program_stage_source(ex, stage);
+    return p && find_stage(p, stage, ctl, code, len);
+}
+
 // Texture and image types of a stage's first 32 slots, each kept with the handle and the generation and slot token it
 // was looked up under: a slot is looked up again, a hash probe, only when the handle changed or its slot may resolve
 // otherwise (slot_still).
@@ -1131,10 +1147,11 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     uint32_t len;
     *present = 0;
     if (pending) *pending = 0;
-    if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
+    const prog_t *source = program_stage_source(ex, st);
+    if (!source || !find_stage(source, st, &ctl, &code, &len)) return NULL;
     *present = 1;
     GfxShaderAnswers a;
-    uint64_t serial = ex->prog->serial;
+    uint64_t serial = source->serial;
     answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
     ShaderEnt *set = NULL;
     if (serial) {
@@ -1306,6 +1323,69 @@ static void limits_init(void) {
     __atomic_store_n(&LIM.ubo_max, l->maxUniformBufferRange, __ATOMIC_RELEASE);
 }
 
+// Preserve the resolved uniform bytes on the GPU, including RCAS's separate
+// byte64 bypass flag. No live guest bytes or submission snapshots are read or
+// rewritten by the CPU. Only this private copy's two strength words change.
+static VkDescriptorBufferInfo hwaoi_scene_sharpness_copy(VkExec *ex, const VkDescriptorBufferInfo *source,
+                                                       const uint32_t params[2]) {
+    if (!ex || !ex->cb || ex->in_pass || !source || !params || !source->buffer ||
+        source->range < 80 || source->range > UINT64_MAX - 255 ||
+        source->offset > UINT64_MAX - source->range || (source->offset & 3) || (source->range & 3))
+        rt_fatal("scene sharpness: invalid RCAS uniform copy scope or range");
+    VkDescriptorBufferInfo destination = {.range = source->range};
+    (void)scratch(ex, source->range, &destination.buffer, &destination.offset);
+    if (!destination.buffer || (destination.offset & 3) || destination.offset > UINT64_MAX - destination.range ||
+        (destination.buffer == source->buffer && destination.offset < source->offset + source->range &&
+         source->offset < destination.offset + destination.range))
+        rt_fatal("scene sharpness: private RCAS uniform copy aliases its source");
+    VkMemoryBarrier2 barrier = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
+    VkDependencyInfo dependency = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1,
+                                  .pMemoryBarriers = &barrier};
+    vkCmdPipelineBarrier2(ex->cb, &dependency);
+    VkBufferCopy copy = {.srcOffset = source->offset, .dstOffset = destination.offset, .size = source->range};
+    vkCmdCopyBuffer(ex->cb, source->buffer, destination.buffer, 1, &copy);
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier2(ex->cb, &dependency);
+    vkCmdUpdateBuffer(ex->cb, destination.buffer, destination.offset, sizeof(uint32_t) * 2, params);
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_UNIFORM_READ_BIT;
+    vkCmdPipelineBarrier2(ex->cb, &dependency);
+    ex->recorded += 5;
+    return destination;
+}
+
+static int hwaoi_scene_sharpness_override(VkExec *ex, int stage, int slot,
+                                         const VkDescriptorBufferInfo *source, VkDescriptorBufferInfo *out) {
+    if (!RT_TARGET_HWAOI || stage != NVN_STAGE_CS || slot != 3 || !ex || !ex->prog) return 0;
+    static int percent = -2;
+    if (percent == -2 && !hwaoi_scene_sharpness_parse(cfg_get("TOTK_SCENE_SHARPNESS"), &percent))
+        rt_fatal("scene sharpness: SCENE_SHARPNESS must be game or an integer from 0 to 100");
+    if (percent < 0) return 0;   // game: preserve the original descriptor and every byte
+    const uint8_t *control, *code;
+    uint32_t length;
+    if (!bound_stage(ex, stage, &control, &code, &length) || nvn2_origin(code) != HWAOI_SCENE_RCAS_ORIGIN) return 0;
+    // nvn2_lower owns these immutable buffers for the whole process. Cache only
+    // after both complete SHA256 checks, never using an address as proof.
+    static const uint8_t *verified_control, *verified_code;
+    if (control != verified_control || code != verified_code || length != HWAOI_SCENE_RCAS_CODE_BYTES) {
+        if (!hwaoi_scene_sharpness_match(control, HWAOI_SCENE_RCAS_CONTROL_BYTES, code, length))
+            rt_fatal("scene sharpness: RCAS lowering identity differs from the verified profile");
+        verified_control = control; verified_code = code;
+    }
+    if (!source) rt_fatal("scene sharpness: verified RCAS has no valid original uniform binding");
+    uint32_t params[2];
+    if (!hwaoi_scene_sharpness_words(percent, params)) rt_fatal("scene sharpness: invalid strength");
+    *out = hwaoi_scene_sharpness_copy(ex, source, params);
+    RS.volatile_ = 1;   // this submission owns the private uniform and its GPU copy commands
+    static int logged;
+    if (!logged++) rt_log("scene sharpness: explicit 3D RCAS strength %d%%; verified kernel, original algorithm and remaining uniforms preserved", percent);
+    return 1;
+}
+
 static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.ubo_max, align = LIM.ubo_align;
@@ -1314,7 +1394,7 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (slot == 1 && ex->prog) {   // compiler constants stored after the shader code
         const uint8_t *ctl, *code;
         uint32_t len, c1;
-        if (find_stage(ex->prog, st, &ctl, &code, &len)) {
+        if (bound_stage(ex, st, &ctl, &code, &len)) {
             memcpy(&c1, ctl + 0x700, 4);
             if (c1 < len && bind_range(ex, (uint64_t)(uintptr_t)code + c1, len - c1, align, max, VK_MUSE_UBO, 0, 0, &bi))
                 return bi;
@@ -1348,11 +1428,14 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
         return (VkDescriptorBufferInfo){b, o, sizeof blk};
     } else if (slot >= 3 && slot - 3 < 18) {
         const p_bind_buf *b = &ex->ubo[st][slot - 3];
+        int backed = 0;
         if (b->size && vk_usnap_find(b->addr, b->size < max ? b->size : max, align, &bi)) {   // as of the submit call
             count_use(VK_MCLS_SCRATCH, VK_MUSE_UBO, bi.range);
-            return bi;
+            backed = 1;
         }
-        if (bind_range(ex, b->addr, b->size, align, max, VK_MUSE_UBO, 0, 0, &bi)) return bi;
+        if (!backed) backed = bind_range(ex, b->addr, b->size, align, max, VK_MUSE_UBO, 0, 0, &bi);
+        if (hwaoi_scene_sharpness_override(ex, st, slot, backed ? &bi : NULL, &bi)) return bi;
+        if (backed) return bi;
     }
     return zero_info(max);
 }
@@ -1447,7 +1530,7 @@ static p_bind_buf guarded_storage_binding(const VkExec *ex, int st, const GfxSha
     } else if (r->cbuf_slot == 1 && ex->prog) {
         const uint8_t *ctl, *code;
         uint32_t len, c1;
-        if (!find_stage(ex->prog, st, &ctl, &code, &len)) return b;
+        if (!bound_stage(ex, st, &ctl, &code, &len)) return b;
         memcpy(&c1, ctl + 0x700, 4);
         if (c1 > len || off > len - c1 || len - c1 - off < 8) return b;
         memcpy(&b.addr, code + c1 + off, 8);
@@ -1492,7 +1575,7 @@ static void gpu_write_binding_diag(const VkExec *ex, int st, const GfxShaderRes 
     const uint8_t *ctl, *code;
     uint32_t len;
     uint64_t origin = 0;
-    if (ex->prog && find_stage(ex->prog, st, &ctl, &code, &len)) {
+    if (ex->prog && bound_stage(ex, st, &ctl, &code, &len)) {
         origin = nvn2_origin(code);
         if (!origin && gfx_shader_is_nvn2(ctl)) origin = gfx_shader_nvn2_hash(ctl, code);
     }
@@ -1535,7 +1618,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
                 note_written(ex, b->addr - lead, bi.range);
                 const uint8_t *ctl, *code;
                 uint32_t len;
-                if (vk_sync_noting() && ex->prog && find_stage(ex->prog, st, &ctl, &code, &len))
+                if (vk_sync_noting() && ex->prog && bound_stage(ex, st, &ctl, &code, &len))
                     vk_sync_note_write(b->addr - lead, bi.range, nvn2_origin(code));
             }
             return bi;
@@ -2655,7 +2738,7 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
     if (!on || !vs || !fs) return 0;
     const uint8_t *ctl, *code = NULL;
     uint32_t len;
-    if (find_stage(ex->prog, NVN_STAGE_VS, &ctl, &code, &len) && nvn2_origin(code) == 0xcae0ef8e9fe9147full) {
+    if (bound_stage(ex, NVN_STAGE_VS, &ctl, &code, &len) && nvn2_origin(code) == 0xcae0ef8e9fe9147full) {
         warn_once(W_FAULT_SKIP2, "the light quad of NVN 2 vertex stage cae0ef8e9fe9147f is skipped on NVIDIA (#9)");
         return 1;
     }
@@ -2753,7 +2836,7 @@ static int geometry_draw(VkExec *ex, uint32_t prim) {
         if (stage == NVN_STAGE_CS) continue;
         if (stage != NVN_STAGE_GS || found++) goto unsupported;   // no tessellation, duplicate or unknown stage
         stages |= 1u << stage;
-        if (!find_stage(ex->prog, NVN_STAGE_GS, &ctl, &code, &len)) goto unsupported;
+        if (!bound_stage(ex, NVN_STAGE_GS, &ctl, &code, &len)) goto unsupported;
         if (len < 0x30 + 0x60 || nvn2_origin(code) || c0_on()) goto unsupported;
         uint32_t sph;
         memcpy(&sph, code + 0x30, 4);
@@ -2780,6 +2863,42 @@ unsupported:
     geometry_input = 0;
     warn_once(W_GEOMETRY, "experimental geometry draw rejected: ordinary GS, complete stage mask, supported primitive and FIX_C0=0 are required");
     return -1;
+}
+
+// Storage writes survive descriptor-cache hits: inspect the pipeline contract,
+// not whether this particular draw happened to rebuild its descriptors.
+static int indirect_batch_on(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = cfg_get("TOTK_INDIRECT_BATCH");
+        enabled = value && !strcmp(value, "1");
+    }
+    return enabled;
+}
+
+static int pipeline_storage_writes(const VkPipeInfo *info) {
+    if (!info || (info->n_bindings && !info->bindings)) return 1;
+    for (uint32_t i = 0; i < info->n_bindings; i++) {
+        const VkPipeBinding *b = &info->bindings[i];
+        // Every storage image stays conservative, including coherent reads.
+        if (b->kind == GFX_RES_IMG || (b->kind == GFX_RES_SSBO && (!b->res || (b->res->flags & 1)))) return 1;
+    }
+    return 0;
+}
+
+// A pass begin orders earlier transfers/dispatches/submissions. Within that
+// pass, read-only draws cannot change the indirect buffer. Retain the original
+// barrier for storage-writing shaders, unknown attachments and physical aliases.
+static int indirect_can_stay_in_pass(const VkExec *ex, uint64_t addr, uint64_t size) {
+    if (!ex || !ex->in_pass || ex->pass_storage_writes || !addr || !size || addr > UINT64_MAX - size) return 0;
+    for (int i = 0; i < 9; i++) {
+        const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
+        if (!t->image) continue;
+        if (!t->img || !t->tex || t->img->bound || !t->tex->L.size ||
+            t->img->addr > UINT64_MAX - t->tex->L.size) return 0;
+        if (t->img->addr < addr + size && addr < t->img->addr + t->tex->L.size) return 0;
+    }
+    return 1;
 }
 
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
@@ -2843,7 +2962,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
                 }
                 const uint8_t *ctl, *vcode = NULL, *fcode = NULL;
                 uint32_t len;
-                find_stage(ex->prog, NVN_STAGE_VS, &ctl, &vcode, &len), find_stage(ex->prog, NVN_STAGE_FS, &ctl, &fcode, &len);
+                bound_stage(ex, NVN_STAGE_VS, &ctl, &vcode, &len), bound_stage(ex, NVN_STAGE_FS, &ctl, &fcode, &len);
                 rt_log("bisect: draw byte %#x vs %s (NVN 2 dump %016llx) fs %s (%016llx)", b, k[0],
                        (unsigned long long)nvn2_origin(vcode), k[1], (unsigned long long)nvn2_origin(fcode));
             }
@@ -2941,6 +3060,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     bind_vertex_buffers(ex);
     if (vk_dump_armed) vk_dump_draw(ex, &s, p, info);
     vk_exec_oq_draw(ex);
+    if (indirect_batch_on()) ex->pass_storage_writes |= pipeline_storage_writes(info);
     return 1;
 }
 
@@ -2951,8 +3071,8 @@ static void note_work(const VkExec *ex, int kind, uint64_t work) {
     const uint8_t *ctl, *code;
     uint32_t len;
     int cs = kind >= 2;
-    uint64_t a = find_stage(ex->prog, cs ? NVN_STAGE_CS : NVN_STAGE_VS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
-    uint64_t b = !cs && find_stage(ex->prog, NVN_STAGE_FS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+    uint64_t a = bound_stage(ex, cs ? NVN_STAGE_CS : NVN_STAGE_VS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+    uint64_t b = !cs && bound_stage(ex, NVN_STAGE_FS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
     vk_sync_note(kind, a, b, work);
 }
 
@@ -2976,8 +3096,8 @@ static int indirect_reset_draw(VkExec *ex, const p_draw *d) {
         d->count <= 0 || d->first < 0 || d->base_instance || d->instances != 1) return 0;
     const uint8_t *ctl, *code;
     uint32_t length;
-    if (!find_stage(ex->prog, NVN_STAGE_VS, &ctl, &code, &length) || nvn2_origin(code) != 0xe78abde51f2d6bfaull ||
-        !find_stage(ex->prog, NVN_STAGE_FS, &ctl, &code, &length) || nvn2_origin(code) != 0x57b0d7b4959f03c0ull) return 0;
+    if (!bound_stage(ex, NVN_STAGE_VS, &ctl, &code, &length) || nvn2_origin(code) != 0xe78abde51f2d6bfaull ||
+        !bound_stage(ex, NVN_STAGE_FS, &ctl, &code, &length) || nvn2_origin(code) != 0x57b0d7b4959f03c0ull) return 0;
     const p_bind_buf *list = &ex->ssbo[NVN_STAGE_VS][0];
     // c0_table encodes the binding's size as u32 at +0x118; use the same extent, including its zero rejection.
     if (!vk_exec_reset_indirect(ex, list->addr, (uint32_t)list->size, d->first, d->count)) {
@@ -3142,7 +3262,9 @@ static void op_draw_ind(VkExec *ex, const p_draw_ind *d) {
         ip.avail < sizeof(VkDrawIndirectCommand) || (ip.offset & 3) || ip.offset > UINT64_MAX - sizeof(VkDrawIndirectCommand))
         rt_fatal("vk: array indirect arguments at %#llx are not backed or not aligned", (unsigned long long)d->ind);
     VK_MEM_USE(ip);
-    vk_exec_barrier(ex); // producers and mirror uploads precede indirect-command reads
+    if (!indirect_batch_on() || !indirect_can_stay_in_pass(ex, d->ind, sizeof(VkDrawIndirectCommand)))
+        vk_exec_barrier(ex); // producers and mirror uploads precede indirect-command reads
+    else __atomic_fetch_add(&vk_exec_frame.indirect_batches, 1, __ATOMIC_RELAXED);
     c0_binst = 0; // NVN2 uses the draw's actual BaseInstance, not a fabricated c0 value
     if (!prepare_draw(ex, d->prim, INT32_MAX, 0)) return;
     vkCmdDrawIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndirectCommand));

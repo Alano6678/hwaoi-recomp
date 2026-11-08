@@ -35,7 +35,9 @@
 #include <zstd.h>
 
 #include "cfg.h"
+#include "game_target.h"
 #include "host.h"
+#include "hwaoi_display.h"
 
 #define BASE_W 1920
 #define BASE_H 1080
@@ -91,6 +93,7 @@ static int bigger(void) {
 }
 
 uint64_t res_heap_extra_kib(void) {
+    if (RT_TARGET_HWAOI) return 0; // This fork does not use TotK's HeapDef or heap sizes.
     if (!bigger()) return 0;
     double grow = fmax(0.0, (double)R.ow * R.oh / (BASE_W * BASE_H) - 1.0) +
                   fmax(0.0, (double)R.sw * R.sh / (SCENE_W * SCENE_H) - 1.0);
@@ -98,7 +101,21 @@ uint64_t res_heap_extra_kib(void) {
     return (uint64_t)ceil(DTA_KIB * (1.0 + grow) / 1024.0) * 1024 - DTA_KIB;
 }
 
-uint64_t res_heap_extra_bytes(void) { return ((res_heap_extra_kib() << 10) + 0x1fffff) & ~0x1fffffull; }
+uint64_t res_heap_extra_bytes(void) {
+    if (RT_TARGET_HWAOI) {
+        // Only application capacity changes here. HWAoI never uses TotK's BYML
+        // HeapDef paths or heap-size formula (res_heap_extra_kib remains zero).
+        const char *on = cfg_get("TOTK_NATIVE_1080");
+        if (rt_patch_set("hwaoi_display") < 0 || (on && !strcmp(on, "0"))) return 0;
+        unsigned out[2], scene[2]; uint64_t child, parent, extra;
+        if (!hwaoi_display_dimensions(cfg_value("TOTK_OUTPUT_RES"), cfg_get("TOTK_SCENE_RES"), out, scene))
+            rt_fatal("resolution: invalid HWAoI native output/diagnostic scene preset");
+        if (!hwaoi_display_pool_plan(scene, cfg_get("TOTK_DISPLAY_POOL_TEST"), &child, &parent, &extra))
+            rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..6144");
+        return extra;
+    }
+    return ((res_heap_extra_kib() << 10) + 0x1fffff) & ~0x1fffffull;
+}
 
 // ---- the HeapDef table. BYML version 2..7, little endian ("YB"): a hash node is {u8 0xC1, u24 count} and count
 // entries {u24 key index, u8 type, u32 value}; an int (type 0xD1) is stored in the entry, so a size changes in place.
@@ -194,6 +211,54 @@ void res_heapdef_served(void) { R.heapdef_ok = 1; }
 static uint64_t pack(unsigned w, unsigned h) { return (uint64_t)h << 32 | w; }
 
 void res_init(void) {
+    if (RT_TARGET_HWAOI) {
+        int display = rt_patch_set("hwaoi_display");
+        if (rt_patch_enabled(display)) {
+            unsigned size[2], scene[2];
+            const char *value = cfg_value("TOTK_OUTPUT_RES");
+            if (!hwaoi_display_dimensions(value, cfg_get("TOTK_SCENE_RES"), size, scene))
+                rt_fatal("resolution: HWAoI OUTPUT_RES=%s unsupported; choose 1280x720, 1920x1080, 2560x1440 or 3840x2160", value);
+            const char *scale = cfg_value("TOTK_RENDER_SCALE");
+            if (strcmp(scale, "game") && strcmp(scale, "100"))
+                rt_fatal("resolution: HWAoI native presets require RENDER_SCALE=100 or game");
+            R.decided = R.on = 1;
+            R.ow = size[0]; R.oh = size[1]; R.sw = scene[0]; R.sh = scene[1];
+            const char *diagnostic_scene = cfg_get("TOTK_SCENE_RES");
+            if (diagnostic_scene) {
+                rt_log("resolution: diagnostic scene override %ux%u", R.sw, R.sh);
+            }
+            uint64_t dimensions = pack(size[0], size[1]);
+            uint64_t scene_dimensions = pack(R.sw, R.sh);
+            uint8_t *page = rt_patch_page();
+            if (!page) rt_fatal("resolution: HWAoI display patch page unavailable");
+            memcpy(page + 0x80, &scene_dimensions, sizeof scene_dimensions);
+            memcpy(page + 0x88, &dimensions, sizeof dimensions);
+            uint64_t texture_pool, texture_parent, application_extra;
+            const char *pool_test = cfg_get("TOTK_DISPLAY_POOL_TEST");
+            if (!hwaoi_display_pool_plan(scene, pool_test, &texture_pool, &texture_parent, &application_extra))
+                rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..6144");
+            if (application_extra && mem_layout()->pool < (UINT64_C(9) << 30) + application_extra)
+                rt_fatal("resolution: enlarged native scene requires a larger application pool; remove the APP_POOL override");
+            memcpy(page + 0x98, &texture_pool, sizeof texture_pool);
+            memcpy(page + 0xa0, &texture_parent, sizeof texture_parent);
+            if (application_extra)
+                rt_log("resolution: experimental texture pool %llu MiB, matching parent %llu MiB plus bookkeeping",
+                       (unsigned long long)(texture_pool >> 20), (unsigned long long)(texture_parent >> 20));
+            rt_log("resolution: HWAoI native output %ux%u, scene %ux%u; restart required to change allocations",
+                   R.ow, R.oh, R.sw, R.sh);
+            return;
+        }
+        int native = rt_patch_set("hwaoi_native1080");
+        const char *requested = cfg_get("TOTK_NATIVE_1080");
+        if (native < 0 && requested && !strcmp(requested, "1"))
+            rt_fatal("resolution: native 1080p requires the exact-build HWAoI code profile; regenerate first");
+        if (strcmp(cfg_value("TOTK_OUTPUT_RES"), "1920x1080"))
+            rt_fatal("resolution: configurable native output requires the HWAoI display-settings profile; regenerate first");
+        rt_log("resolution: HWAoI %s", rt_patch_enabled(native)
+               ? "native 1920x1080 scene profile enabled; allocation limits and dynamic scale patched"
+               : "original scene allocation and dynamic-resolution policy");
+        return;
+    }
     if (!bigger()) {
         rt_log("resolution: the game's own (output 1920x1080, scene 1600x900)");
         return;
@@ -283,6 +348,16 @@ void res_wanted(unsigned out[2]) {
 }
 
 void res_sizes(unsigned out[2], unsigned scene[2]) {
+    if (RT_TARGET_HWAOI) {
+        if (R.on) {
+            out[0] = R.ow; out[1] = R.oh; scene[0] = R.sw; scene[1] = R.sh;
+            return;
+        }
+        out[0] = BASE_W; out[1] = BASE_H;
+        int native = rt_patch_enabled(rt_patch_set("hwaoi_native1080"));
+        scene[0] = native ? BASE_W : 0; scene[1] = native ? BASE_H : 0;
+        return;
+    }
     decide();
     out[0] = R.on ? R.ow : BASE_W, out[1] = R.on ? R.oh : BASE_H;
     scene[0] = R.on ? R.sw : SCENE_W, scene[1] = R.on ? R.sh : SCENE_H;

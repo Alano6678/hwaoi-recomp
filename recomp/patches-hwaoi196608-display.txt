@@ -1,0 +1,56 @@
+# HWAoI NCM 196608, exact main SHA256 checked by tools/hwaoi.py.
+# Configurable native 16:9 output and scene. Patch page +0x80: scene {u32 w,h},
+# +0x88: output {u32 w,h}. Initialized before guest execution by resolution.c.
+# Original NUP/NSO remain unchanged. Both scale policies must stay at 1.0.
+set hwaoi_display TOTK_NATIVE_1080 1
+
+# Resolution manager and render-context allocation limits.
+site hwaoi_display main 01af1cf4 d280c809 @page:x9 f9404129
+site hwaoi_display main 01af1d00 f2c07089 d503201f
+site hwaoi_display main 01af34a4 d280c809 @page:x9 f9404129
+site hwaoi_display main 01af34b0 f2c07089 d503201f
+site hwaoi_display main 01432eb4 1e214c40 1e2e1000
+site hwaoi_display main 0154b864 1e204100 1e2e1008 1e204100
+site hwaoi_display main 01569f84 12001c08 1e2e1000 12001c08
+site hwaoi_display main 0172af14 f00090a8 1e2e1000 f00090a8
+site hwaoi_display main 0185743c 2a1f03e0 1e2e1000 2a1f03e0
+site hwaoi_display main 01e952d0 d503237f 1e2e1000 d503237f
+site hwaoi_display main 01e9a15c f81d03bf 1e2e1000 f81d03bf
+site hwaoi_display main 01e9b1dc f9000bff 1e2e1000 f9000bff
+
+# Surface descriptor and resolution-manager output pair.
+site hwaoi_display main 01af1b20 d280f00a @page:x10 f940454a
+site hwaoi_display main 01af1b28 f2c0870a d503201f
+site hwaoi_display main 01af1cf0 d280f008 @page:x8 f9404508
+site hwaoi_display main 01af1cfc f2c08708 d503201f
+
+# Backbuffer descriptor: output dimensions, region {0,0,w,h,1}.
+# LSL discards the packed height; MOVK below the height site retains depth=1.
+site hwaoi_display main 01af3318 d280f008 @page:x8 f9404508
+site hwaoi_display main 01af3324 f2c08708 d503201f
+site hwaoi_display main 01af332c d2c0f008 @page:x8 f9404508 d3607d08
+site hwaoi_display main 01af3338 d2808708 @page:x8 b9408d08
+
+# Window context and its two output-sized transfer textures.
+site hwaoi_display main 01af4170 5280f003 @page:x3 b9408863
+site hwaoi_display main 01af4174 52808704 @page:x4 b9408c84
+site hwaoi_display main 01e62d68 5280f001 @page:x1 b9408821
+site hwaoi_display main 01e62d6c 52808702 @page:x2 b9408c42
+site hwaoi_display main 01e62d8c 5280f001 @page:x1 b9408821
+site hwaoi_display main 01e62d90 52808702 @page:x2 b9408c42
+# The window-context readback/copy region must follow its output texture too.
+site hwaoi_display main 01e63780 d280f008 @page:x8 f9404508
+site hwaoi_display main 01e6378c f2c08708 d503201f
+# Texture-storage pool: main+19eb098/09c -> descriptor+0x98 -> 6fd060's
+# stack+0x118 -> 7127c0, flags 0xa2, observed NVN size 0x122f00000.
+# Page +0x98 keeps that capacity for 720p..1440p; native 4K uses its measured
+# enlarged budget. The private pool-size override supports diagnostic comparisons.
+site hwaoi_display main 019eb098 d2a45e0c @page:x12 f9404d8c
+site hwaoi_display main 019eb09c f2c0002c d503201f
+# Its synchronized backing heap is allocated earlier by 1e50e40. Original
+# 0x13ba05008 = texture bytes + 45 MiB + 350 MiB + 0x5008 bookkeeping.
+# Expanding only the child pool fails in allocator 1a18560 before first present.
+# Page +0xa0 supplies the matching parent extent, including original bookkeeping.
+site hwaoi_display main 01af1af8 d28a0109 @page:x9 f9405129
+site hwaoi_display main 01af1afc f2a77409 d503201f
+site hwaoi_display main 01af1b00 f2c00029 d503201f

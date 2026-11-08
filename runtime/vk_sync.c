@@ -63,6 +63,8 @@ static volatile uint8_t ts_busy[TS_PAIRS]; // written until the completion threa
 static int ts_cur = -1;                    // the pair of the part being recorded, -1 untimed
 static uint64_t ts_last_end;               // completion thread: end of the latest part read (ticks)
 static volatile int64_t ts_busy_ns, ts_parts, ts_missed;
+static int sync_diagnostics;
+static uint64_t callback_ns, timestamp_callback_ns, callback_count, timestamp_callback_count, collection_ns;
 
 // On the first submission that wants timing (perf_gpu_timing: TOTK_TRACE=perf or the full performance overlay).
 static void ts_setup(VkCtx *c) {
@@ -267,6 +269,15 @@ static void ts_drop(void) {
 }
 
 static void gpu_stats(PerfGpu *g) {
+    if (sync_diagnostics) {
+        uint64_t calls = __atomic_exchange_n(&callback_count, 0, __ATOMIC_RELAXED);
+        uint64_t timed = __atomic_exchange_n(&timestamp_callback_count, 0, __ATOMIC_RELAXED);
+        uint64_t cpu = __atomic_exchange_n(&callback_ns, 0, __ATOMIC_RELAXED);
+        uint64_t timing = __atomic_exchange_n(&timestamp_callback_ns, 0, __ATOMIC_RELAXED);
+        uint64_t collect = __atomic_exchange_n(&collection_ns, 0, __ATOMIC_RELAXED);
+        rt_log("gpu-completion: callbacks=%llu timestamp_callbacks=%llu cpu_ms=%.3f timestamp_cpu_ms=%.3f collect_ms=%.3f",
+               (unsigned long long)calls, (unsigned long long)timed, cpu / 1e6, timing / 1e6, collect / 1e6);
+    }
     g->have_gpu = ts_state == 1;
     g->gpu_ns = (uint64_t)plat_xchg64(&ts_busy_ns, 0);
     g->gpu_parts = (uint64_t)plat_xchg64(&ts_parts, 0);
@@ -312,12 +323,28 @@ static void completion_main(void *arg) {
             Pending p = queue[qhead++];
             qn--;
             plat_mutex_unlock(&st_lock);
+            uint64_t diagnostic_start = sync_diagnostics ? kern_now_ns() : 0;
             p.fn(p.arg);
+            if (diagnostic_start) {
+                uint64_t elapsed = kern_now_ns() - diagnostic_start;
+                __atomic_fetch_add(&callback_ns, elapsed, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&callback_count, 1, __ATOMIC_RELAXED);
+                if (p.fn == ts_read_cb) {
+                    __atomic_fetch_add(&timestamp_callback_ns, elapsed, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&timestamp_callback_count, 1, __ATOMIC_RELAXED);
+                }
+                static unsigned logs;
+                if (elapsed >= 250000 && logs++ < 64)
+                    rt_log("gpu-completion: slow callback rva=%#llx cpu_ms=%.3f",
+                           (unsigned long long)((uintptr_t)p.fn - plat_exe_base()), elapsed / 1e6);
+            }
             plat_mutex_lock(&st_lock);
         }
         if (reached > done) {
             plat_mutex_unlock(&st_lock);
+            uint64_t diagnostic_start = sync_diagnostics ? kern_now_ns() : 0;
             vk_mem_collect();
+            if (diagnostic_start) __atomic_fetch_add(&collection_ns, kern_now_ns() - diagnostic_start, __ATOMIC_RELAXED);
             plat_mutex_lock(&st_lock);
             __atomic_store_n(&done, reached, __ATOMIC_RELEASE);
             plat_cond_broadcast(&cv_done);
@@ -331,6 +358,8 @@ void vk_sync_start(void) {
     if (__atomic_load_n(&started, __ATOMIC_ACQUIRE)) return;
     plat_mutex_lock(&start_lock);
     if (!started) {
+        const char *diagnostic_setting = cfg_get("TOTK_GPU_READBACK_DIAG");
+        sync_diagnostics = diagnostic_setting && !strcmp(diagnostic_setting, "1");
         if (!vk_init()) rt_fatal("vk: no usable Vulkan device (see the vk: lines above; TOTK_GPU=null runs without a GPU)");
         VkCtx *c = vk_ctx();
         VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -469,6 +498,7 @@ uint64_t vk_sync_reserve(void) {
 
 uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t submitted_ticks) {
     if (!record) rt_fatal("vk: submission without a recorder");
+    unsigned perf_role = perf_replay_scope_begin();
     vk_sync_start();
     VkCtx *c = vk_ctx();
     plat_mutex_lock(&sub_lock);
@@ -520,6 +550,7 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     static unsigned subs;
     if (++subs % 4096 == 0) rec_stats_log();
     plat_mutex_unlock(&sub_lock);
+    perf_replay_scope_end(perf_role);
     return fence;
 }
 

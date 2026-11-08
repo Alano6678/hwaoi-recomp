@@ -21,6 +21,39 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def summarize_runtime_diagnostics(log):
+    """Retain bounded owner evidence; these counts do not measure all process memory."""
+    first = last = None
+    samples = 0
+    monotonic = True
+    for match in re.finditer(r"^\[host\] runtime-memory: (frame=\d+[^\r\n]*)$", log, re.MULTILINE):
+        row = {key: int(value) for key, value in re.findall(r"([a-z_]+)=(\d+)", match[1])}
+        if "frame" not in row:
+            continue
+        if last is not None and row["frame"] <= last["frame"]:
+            monotonic = False
+        if first is None:
+            first = row
+        last = row
+        samples += 1
+    growth = {}
+    if samples > 1 and monotonic:
+        frames = last["frame"] - first["frame"]
+        for key in ("copy_bytes", "zombie_bytes", "texture_pin_bytes", "program_control_bytes"):
+            if key not in first or key not in last:
+                continue
+            if key == "program_control_bytes" and re.search(r"program_ledger_partial=[1-9]", log):
+                continue
+            growth[key] = (last[key] - first[key]) / frames
+    rejected = re.findall(r"^\[host\] (vk: RGBA8 comparison rejected:[^\r\n]*)$", log, re.MULTILINE)
+    fatals = re.findall(r"^FATAL: ([^\r\n]*)$", log, re.MULTILINE)
+    return {"retained_owner_sample_count": samples,
+            "retained_owner_first": first, "retained_owner_last": last,
+            "retained_owner_growth_bytes_per_frame": growth,
+            "last_rgba8_comparison_rejection": rejected[-1] if rejected else None,
+            "last_fatal": fatals[-1] if fatals else None}
+
+
 class BasicLimits(c.Structure):
     _fields_ = [("process_time", c.c_int64), ("job_time", c.c_int64), ("flags", w.DWORD),
                 ("min_ws", c.c_size_t), ("max_ws", c.c_size_t), ("process_limit", w.DWORD),
@@ -62,7 +95,8 @@ def close_owned_window(pid):
 
 def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
             input_script=None, profile_sampling=False, threads_on_stall=False,
-            shot_every=30, profile_main_ip=False, profile_frames=None, extended_play=False, input_feed=None):
+            shot_every=30, profile_main_ip=False, profile_frames=None, extended_play=False, input_feed=None,
+            profile_dir=None):
     if os.name != "nt":
         raise ValueError("this supervised runner currently requires Windows")
     executable = executable.resolve(strict=True)
@@ -73,7 +107,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
         raise ValueError("report directory must be a child of work/reports")
     if extended_play and mode != "--play-experimental":
         raise ValueError("extended deadline requires play-experimental")
-    max_timeout = (600 if extended_play else 180) if mode == "--play-experimental" else 60
+    max_timeout = (1800 if extended_play else 180) if mode == "--play-experimental" else 60
     if report_dir.exists() or not 1 <= timeout <= max_timeout:
         raise ValueError(f"fresh report directory and timeout in 1..{max_timeout} seconds required")
     if not 1 <= frames <= 600:
@@ -100,6 +134,11 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
         input_feed = input_feed.resolve(strict=True)
         if mode != "--play-experimental" or not input_feed.is_relative_to(ROOT / "work/reports") or not input_feed.is_file():
             raise ValueError("diagnostic input feed requires play-experimental and a file under work/reports")
+    if profile_dir is not None:
+        profile_dir = profile_dir.resolve(strict=True)
+        if (mode != "--play-experimental" or not profile_dir.is_dir() or
+                not profile_dir.is_relative_to(ROOT / "work/saves") or profile_dir == ROOT / "work/saves"):
+            raise ValueError("diagnostic save profile must be an existing child of work/saves")
     with executable.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     kernel = c.WinDLL("kernel32", use_last_error=True)
@@ -142,7 +181,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
         env = dict(os.environ)
         for prefix in ("HWAOI_", "DKB_", "TOTK_"):
             env.pop(prefix + "INPUT_FEED", None)
-        env["HWAOI_PROFILE_DIR"] = str(ROOT / "work/saves/probe")
+        env["HWAOI_PROFILE_DIR"] = str(profile_dir or ROOT / "work/saves/probe")
         if input_feed is not None:
             env["HWAOI_INPUT_FEED"] = str(input_feed)
         if mode == "--probe-input":
@@ -169,7 +208,10 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
             for name in ("HWAOI_SHOTS_FULL", "DKB_SHOTS_FULL", "TOTK_SHOTS_FULL"):
                 env.pop(name, None)
             if mode == "--play-experimental":
-                env["HWAOI_SHOTS"] = f"{shot_every}-100000:{shot_every}" if shot_every else "0"
+                # Endurance runs can exceed 100,000 presents. Keep observations
+                # available for their full bounded lifetime, including 120 Hz.
+                last_shot = timeout * 360 + shot_every
+                env["HWAOI_SHOTS"] = f"{shot_every}-{last_shot}:{shot_every}" if shot_every else "0"
                 env["HWAOI_PROGRESS"] = "1"
                 if input_script is not None:
                     env["HWAOI_INPUT_SCRIPT"] = str(input_script)
@@ -260,18 +302,22 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
                         raise c.WinError(c.get_last_error())
                     code = proc.wait(timeout=5)
         options = {name: env[name] for name in (
+            "HWAOI_OUTPUT_RES", "HWAOI_SCENE_RES", "HWAOI_FPS_LIMIT", "HWAOI_EXPERIMENTAL_RATE", "HWAOI_APP_POOL", "HWAOI_VK_PRESENT", "HWAOI_DISPLAY_POOL_TEST",
             "HWAOI_GSV_LOCAL_FRAME_POLICY", "HWAOI_NATIVE_INFLATE", "HWAOI_ZLIB_DLL",
             "HWAOI_GPU", "HWAOI_FIX_C0", "HWAOI_EXPERIMENTAL_GEOMETRY", "HWAOI_MEMORY", "HWAOI_SHADOW",
             "HWAOI_MOVIE_PACE",
             "HWAOI_POOL_DIAG", "HWAOI_POOL_BACKPRESSURE", "HWAOI_IR_BANKS", "HWAOI_XLATE",
             "HWAOI_TRACE", "HWAOI_NATIVE_INFLATE_TRACE", "HWAOI_RT_TRACE",
             "HWAOI_FS_DIAG", "HWAOI_PRIORITY_DIAG", "HWAOI_PROBE_ARRAYS_INDIRECT",
+            "HWAOI_GPU_WRITE_DIAG", "HWAOI_GPU_READBACK_DIAG", "HWAOI_INDIRECT_BATCH", "HWAOI_UI_DRAW_DIAG", "HWAOI_RUNTIME_MEMORY_DIAG",
             "HWAOI_PERF_SLOW_GPU_MS",
             "HWAOI_INPUT_SCRIPT", "HWAOI_PROFILE", "HWAOI_PROFILE_CHAINS",
-            "HWAOI_INPUT_FEED",
+            "HWAOI_INPUT_FEED", "HWAOI_REPLAY_ASYNC", "HWAOI_VRAM_HEADROOM", "HWAOI_RATE_DIAG", "HWAOI_RATE_UNLOCK",
             "HWAOI_PROFILE_IP_ONLY", "HWAOI_PROFILE_MAIN", "HWAOI_PROFILE_FRAMES",
-            "HWAOI_SHOTS", "HWAOI_SHOTS_FULL", "HWAOI_SHOTS_LATEST", "HWAOI_WINDOW_SIZE", "HWAOI_PIPE_SYNC",
-            "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO",
+            "HWAOI_SHOTS", "HWAOI_SHOTS_FULL", "HWAOI_SHOTS_LATEST", "HWAOI_WINDOW_SIZE", "HWAOI_PIPE_SYNC", "HWAOI_PROFILE_DIR",
+            "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO", "HWAOI_DUMP_TRIGGER",
+            "HWAOI_DUMP_TEX", "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_METADATA",
+            "HWAOI_SCENE_SHARPNESS", "HWAOI_NATIVE_1080",
             "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_TEX", "HWAOI_DUMP_BUF",
             "HWAOI_PROGRESS",
             "HWAOI_CORE_STALL_DIAG",
@@ -313,6 +359,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
             result["input_script_sha256"] = hashlib.sha256(script_bytes).hexdigest()
         if mode == "--play-experimental":
             log = (report_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")
+            result.update(summarize_runtime_diagnostics(log))
             progress = re.findall(r"HWAoI progress t=([0-9.]+) present=(\d+).*?shader=(\d+) lowering=(\d+) validation=(\d+) unimplemented=(\d+) skipped=(\d+)", log)
             result["last_progress"] = ({"guest_elapsed_seconds": float(progress[-1][0]),
                                         **dict(zip(("present", "shader", "lowering", "validation", "unimplemented", "skipped"),
@@ -356,13 +403,15 @@ def main():
     parser.add_argument("--shot-every", type=int, default=30, help="experimental-play screenshot interval; 0 disables readbacks for timing")
     parser.add_argument("--profile-main-ip", action="store_true", help="sample only guest main-thread instruction pointers; requires an IP_ONLY-capable runtime")
     parser.add_argument("--profile-frames", help="sample only while presents LO..HI-1 are pending, e.g. 1400-2000")
-    parser.add_argument("--extended-play", action="store_true", help="explicitly allow up to 600 seconds for bounded movie/gameplay checks")
+    parser.add_argument("--extended-play", action="store_true", help="explicitly allow up to 1800 seconds for bounded movie/gameplay checks")
     parser.add_argument("--input-feed", type=Path, help="expiring live diagnostic commands from a file under work/reports")
+    parser.add_argument("--profile-dir", type=Path, help="isolated existing diagnostic save profile under work/saves")
     args = parser.parse_args()
     try:
         result = capture(args.exe, "--" + args.mode, args.out, args.timeout, args.dump_shaders, args.frames,
                          args.input_script, args.profile_sampling, args.threads_on_stall,
-                         args.shot_every, args.profile_main_ip, args.profile_frames, args.extended_play, args.input_feed)
+                         args.shot_every, args.profile_main_ip, args.profile_frames, args.extended_play, args.input_feed,
+                         args.profile_dir)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["exit_code"] == 0 and not result["timed_out"] else 1
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:

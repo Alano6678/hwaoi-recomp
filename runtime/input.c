@@ -459,7 +459,7 @@ static void feed_apply(uint64_t *buttons, int32_t left[2], int32_t right[2]) {
                 } else {
                 if (feed.fps) {
                     const char *rate_experiment = cfg_get("TOTK_EXPERIMENTAL_RATE");
-                    if (!rate_experiment || strcmp(rate_experiment, "1") || cfg_from_env("TOTK_FPS_LIMIT"))
+                    if ((!frame_step_native_rate() && (!rate_experiment || strcmp(rate_experiment, "1"))) || cfg_from_env("TOTK_FPS_LIMIT"))
                         rt_log("input: FPS experiment rejected; enable EXPERIMENTAL_RATE and leave FPS_LIMIT free of an environment override");
                     else {
                         char value[16]; snprintf(value, sizeof value, "%u", feed.fps);

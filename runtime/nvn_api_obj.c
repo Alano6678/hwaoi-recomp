@@ -457,6 +457,81 @@ NVN_API(nvnSamplerInitialize) {
 NVN_API(nvnSamplerFinalize) { ((samp_t *)arg_p(c, 0))->magic = 0; }
 
 // ---------- Programs
+// The diagnostic ledger owns no shader bytes and never frees one. It counts successful host allocations even if a
+// program object is overwritten without Finalize, which would otherwise make that allocation invisible. Keep this
+// off during ordinary play: only the opt-in experiment pays for a pointer/size entry per outstanding allocation.
+static PlatMutex program_memory_lock = PLAT_MUTEX_INIT;
+static nvn_hmap program_memory = {.klen = sizeof(uintptr_t)};   // owned_control -> byte count
+static uint64_t program_memory_bytes, program_memory_made, program_memory_bytes_made;
+static uint64_t program_memory_disabled, program_memory_unmatched_frees, program_memory_duplicates;
+enum { PROGRAM_MEMORY_MAX_CAP = 1u << 16 };   // diagnostic index <= 1 MiB on the 64-bit runtime
+
+static int program_memory_reserve(void) {   // program_memory_lock held
+    if (((uint64_t)program_memory.n + 1) * 4 <= (uint64_t)program_memory.cap * 3) return 1;
+    if (program_memory.cap >= PROGRAM_MEMORY_MAX_CAP) goto fail;
+    nvn_hmap next = {.klen = program_memory.klen, .cap = program_memory.cap ? program_memory.cap * 2 : 64};
+    if (next.cap <= program_memory.cap) goto fail;
+    next.keys = malloc((size_t)next.cap * next.klen);
+    next.vals = calloc(next.cap, sizeof *next.vals);
+    if (!next.keys || !next.vals) {
+        free(next.keys);
+        free(next.vals);
+        goto fail;
+    }
+    // Pre-sized below 3/4 load: these puts cannot allocate or hit nvn_hm_grow's abort-on-OOM path.
+    for (uint32_t i = 0; i < program_memory.cap; i++)
+        if (program_memory.vals[i])
+            nvn_hm_put(&next, program_memory.keys + (size_t)i * program_memory.klen, program_memory.vals[i]);
+    free(program_memory.keys);
+    free(program_memory.vals);
+    program_memory = next;
+    return 1;
+fail:
+    program_memory_disabled = 1;
+    rt_log("runtime-memory: program allocation ledger disabled because its index could not grow (capacity %u, limit %u); byte counts are partial",
+           program_memory.cap, PROGRAM_MEMORY_MAX_CAP);
+    return 0;
+}
+
+static void program_memory_allocated(const void *owned, size_t bytes) {
+    if (!owned || !nvn_memory_diagnostics()) return;
+    uintptr_t address = (uintptr_t)owned;
+    plat_mutex_lock(&program_memory_lock);
+    program_memory_made++;
+    program_memory_bytes_made += bytes;
+    if (!program_memory_disabled && program_memory_reserve()) {
+        uintptr_t old = (uintptr_t)nvn_hm_put(&program_memory, &address, (void *)(uintptr_t)bytes);
+        if (old) program_memory_duplicates++;
+        program_memory_bytes += bytes;
+        program_memory_bytes -= old;
+    }
+    plat_mutex_unlock(&program_memory_lock);
+}
+
+static void program_memory_released(const void *owned) {
+    if (!owned || !nvn_memory_diagnostics()) return;
+    uintptr_t address = (uintptr_t)owned;
+    plat_mutex_lock(&program_memory_lock);
+    uintptr_t bytes = (uintptr_t)nvn_hm_del(&program_memory, &address);
+    if (!bytes) program_memory_unmatched_frees++;
+    program_memory_bytes -= bytes;
+    plat_mutex_unlock(&program_memory_lock);
+}
+
+void nvn_program_memory_stats(NvnMemoryStats *out) {
+    if (!out) return;
+    plat_mutex_lock_shared(&program_memory_lock);
+    out->program_controls = program_memory.n;
+    out->program_control_bytes = program_memory_bytes;
+    out->program_controls_made = program_memory_made;
+    out->program_control_bytes_made = program_memory_bytes_made;
+    out->program_control_index_bytes = (uint64_t)program_memory.cap * (program_memory.klen + sizeof(void *));
+    out->program_ledger_disabled = program_memory_disabled;
+    out->program_unmatched_frees = program_memory_unmatched_frees;
+    out->program_duplicate_allocations = program_memory_duplicates;
+    plat_mutex_unlock_shared(&program_memory_lock);
+}
+
 // NVNboolean nvnProgramInitialize(NVNprogram *p, NVNdevice *d)
 NVN_API(nvnProgramInitialize) {
     prog_t *o = arg_p(c, 0);
@@ -467,6 +542,7 @@ NVN_API(nvnProgramInitialize) {
 static void prog_release(prog_t *o) {
     if (o->serial) gfx_backend()->program_release(o);
     o->serial = 0;
+    program_memory_released(o->owned_control);
     free(o->owned_control);
     o->owned_control = NULL;
 }
@@ -538,6 +614,7 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     o->nstage = (uint32_t)n;
     memcpy(o->sd, next, sizeof next);
     o->owned_control = owned;
+    program_memory_allocated(owned, raw_bytes + portable_bytes);
     o->serial = nvn_new_serial();
     NVN_LOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)o, n, n ? (unsigned long long)next[0].data : 0ull);
     return 1;
@@ -805,14 +882,23 @@ NVN_API(nvnWindowSetCrop) {
 static uint64_t present_period(const win_t *o) {
 #if RT_TARGET_HWAOI
     const char *rate_experiment = cfg_get("TOTK_EXPERIMENTAL_RATE");
-    if (rate_experiment && !strcmp(rate_experiment, "1")) {
+    {
         uint64_t period;
-        const char *value = cfg_get("TOTK_FPS_LIMIT");
+        const char *value = cfg_value("TOTK_FPS_LIMIT");
         if (!hwaoi_rate_period(value, &period))
-            rt_fatal("HWAoI experimental rate requires FPS_LIMIT 30, 60, 90 or 120");
+            rt_fatal("HWAoI requires FPS_LIMIT 30, 60, 90 or 120");
+        int experimental = period < 1000000000ull / 60;
         static volatile int64_t previous;
         if ((uint64_t)plat_xchg64(&previous, (int64_t)period) != period) {
-            rt_log("HWAoI: experimental presentation target %s FPS; game-speed qualification is pending", value ? value : "60");
+            rt_log("HWAoI: presentation target %s FPS%s", value,
+                   frame_step_native_rate() && strcmp(value, "60") ? "; experimental native rate, gameplay acceleration unresolved" :
+                   experimental ? "; presentation-only experiment, native scheduler unchanged" : "");
+        }
+        if (experimental && !frame_step_native_rate() && (!rate_experiment || strcmp(rate_experiment, "1")))
+            period = 1000000000ull / 60;
+        if (!experimental) {
+            uint64_t game_period = (o->interval > 0 ? (uint64_t)o->interval : 1ull) * 1000000000ull / 60;
+            if (period < game_period) period = game_period;
         }
         return period;
     }

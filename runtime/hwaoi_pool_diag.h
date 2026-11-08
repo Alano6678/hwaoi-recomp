@@ -17,7 +17,7 @@ typedef struct {
 } HwaoiActiveJob;
 static struct {
     int on;
-    uint64_t alloc_pc, free_pc, job_pc, executor_lr, next_id, jobs_untracked;
+    uint64_t alloc_pc, free_pc, job_pc, executor_lr, factory_lr[6], heap_getter, heap_getter_lr, next_id, jobs_untracked;
     const RtModule *mods;
     int nmods;
     HwaoiPoolRow rows[256];
@@ -42,6 +42,12 @@ static void hwaoi_pool_diag_init(const RtModule *mods, int count) {
         hwaoi_pool_diag.free_pc = mods[i].base + 0x1adcfa8;
         hwaoi_pool_diag.job_pc = mods[i].base + 0x28708;
         hwaoi_pool_diag.executor_lr = mods[i].base + 0x7fc8c;
+        // main+27318 calls a resource factory through vtable+0xb8. A null
+        // result reaches the deliberate "can't create resource" abort at 275ac.
+        const uint64_t factory_returns[] = {0x2731c, 0x703c98, 0x7041d0, 0x708224, 0x708290, 0x6fdfac};
+        for (unsigned n = 0; n < 6; n++) hwaoi_pool_diag.factory_lr[n] = mods[i].base + factory_returns[n];
+        hwaoi_pool_diag.heap_getter = mods[i].base + 0x1c878;
+        hwaoi_pool_diag.heap_getter_lr = mods[i].base + 0x19d9850;
         hwaoi_pool_diag.mods = mods;
         hwaoi_pool_diag.nmods = count;
         hwaoi_pool_diag.on = 1;
@@ -55,8 +61,14 @@ static void hwaoi_pool_diag_init(const RtModule *mods, int count) {
 static int hwaoi_pool_diag_watches(uint64_t pc) {
     return pc == hwaoi_pool_diag.alloc_pc || pc == hwaoi_pool_diag.free_pc || pc == hwaoi_pool_diag.job_pc;
 }
+static int hwaoi_pool_diag_factory_call(const Cpu *c) {
+    for (unsigned n = 0; n < 6; n++) if (c->x[30] == hwaoi_pool_diag.factory_lr[n]) return 1;
+    return 0;
+}
 static int hwaoi_pool_diag_watches_call(const Cpu *c) {
-    return hwaoi_pool_diag_watches(c->pc) || c->x[30] == hwaoi_pool_diag.executor_lr;
+    return hwaoi_pool_diag_watches(c->pc) || c->x[30] == hwaoi_pool_diag.executor_lr ||
+           hwaoi_pool_diag_factory_call(c) ||
+           (c->pc == hwaoi_pool_diag.heap_getter && c->x[30] == hwaoi_pool_diag.heap_getter_lr);
 }
 
 static int hwaoi_pool_diag_readable(uint64_t a, uint64_t n, int module) {
@@ -167,10 +179,94 @@ static HwaoiPoolRow *hwaoi_pool_diag_row(uint64_t pool) {
     return r;
 }
 
+// Failure-only snapshots at the exact-build resource factory call. Reading the
+// descriptors before the call retains stack-backed input even if the factory
+// rewrites it. No retries, allocator substitutions or guest writes.
+static void hwaoi_resource_factory_diag(Cpu *c) {
+    GuestFn fn = rt_dispatch_lookup(c->pc);
+    if (!fn) rt_fatal("resource-factory: original function missing");
+    uint64_t pc = c->pc, lr = c->x[30], args[4], bytes[4][12] = {{0}};
+    int readable[4];
+    void *host_section = hwaoi_host_section_enter(c);
+    for (unsigned i = 0; i < 4; i++) {
+        args[i] = c->x[i];
+        readable[i] = args[i] && args[i] <= UINT64_MAX - sizeof bytes[i] &&
+                      plat_mem_read(args[i], bytes[i], sizeof bytes[i]);
+    }
+    hwaoi_host_section_leave(host_section);
+    fn(c);
+    if (c->x[0]) return;
+    host_section = hwaoi_host_section_enter(c);
+    static unsigned failures;
+    unsigned sequence = __atomic_add_fetch(&failures, 1, __ATOMIC_RELAXED);
+    if (sequence <= 16) {
+        rt_log("resource-factory: FAILED tid=%u sequence=%u pc=%#llx lr=%#llx args=%#llx,%#llx,%#llx,%#llx",
+               plat_thread_id(), sequence, (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)args[0],
+               (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3]);
+        for (unsigned i = 0; i < 4; i++) {
+            if (!readable[i]) continue;
+            for (unsigned at = 0; at < 12; at += 4)
+                rt_log("resource-factory: arg%u+%#x %#llx %#llx %#llx %#llx", i, at * 8,
+                       (unsigned long long)bytes[i][at], (unsigned long long)bytes[i][at + 1],
+                       (unsigned long long)bytes[i][at + 2], (unsigned long long)bytes[i][at + 3]);
+        }
+        // The observed GPU-pool backing allocator is a module-resident
+        // synchronized wrapper. Follow only this exact-build wrapper type;
+        // the first different parent is recorded, never interpreted or changed.
+        if (hwaoi_pool_diag.executor_lr > 0x7fc8c && readable[0]) {
+            uint64_t base = hwaoi_pool_diag.executor_lr - 0x7fc8c;
+            uint64_t parent = bytes[0][2], table = bytes[0][0];
+            for (unsigned depth = 0; depth < 3 && table == base + 0x27ec4c8; depth++) {
+                uint64_t state[24];
+                if (!parent || parent > UINT64_MAX - sizeof state || !plat_mem_read(parent, state, sizeof state)) break;
+                rt_log("resource-factory: heap-parent depth=%u address=%#llx", depth, (unsigned long long)parent);
+                for (unsigned at = 0; at < 24; at += 4)
+                    rt_log("resource-factory: parent+%#x %#llx %#llx %#llx %#llx", at * 8,
+                           (unsigned long long)state[at], (unsigned long long)state[at + 1],
+                           (unsigned long long)state[at + 2], (unsigned long long)state[at + 3]);
+                table = state[0]; parent = state[2];
+            }
+        }
+    }
+    hwaoi_host_section_leave(host_section);
+}
+
+static void hwaoi_resource_heap_diag(Cpu *c) {
+    GuestFn fn = rt_dispatch_lookup(c->pc);
+    if (!fn) rt_fatal("resource-heap: original getter missing");
+    fn(c);
+    if (!c->x[0]) return;
+    void *host_section = hwaoi_host_section_enter(c);
+    static uint64_t seen[32];
+    uint64_t heap = c->x[0], words[24];
+    int show = 0;
+    plat_mutex_lock(&hwaoi_pool_diag.lock);
+    for (unsigned i = 0; i < 32; i++) {
+        if (seen[i] == heap) break;
+        if (!seen[i]) { seen[i] = heap; show = 1; break; }
+    }
+    plat_mutex_unlock(&hwaoi_pool_diag.lock);
+    if (show && heap <= UINT64_MAX - sizeof words && plat_mem_read(heap, words, sizeof words)) {
+        rt_log("resource-heap: selected heap=%#llx", (unsigned long long)heap);
+        for (unsigned n = 0; n < 24; n += 4)
+            rt_log("resource-heap: +%#x %#llx %#llx %#llx %#llx", n * 8, (unsigned long long)words[n],
+                   (unsigned long long)words[n + 1], (unsigned long long)words[n + 2], (unsigned long long)words[n + 3]);
+    }
+    hwaoi_host_section_leave(host_section);
+}
+
 static void hwaoi_pool_diag_call(Cpu *c) {
     void *host_section = hwaoi_host_section_enter(c);
     GuestFn fn = rt_dispatch_lookup(c->pc);
     if (!fn) rt_fatal("pool-diag: original function missing");
+    if (c->pc == hwaoi_pool_diag.heap_getter && c->x[30] == hwaoi_pool_diag.heap_getter_lr) {
+        hwaoi_host_section_leave(host_section);
+        __attribute__((musttail)) return hwaoi_resource_heap_diag(c);
+    }
+    if (hwaoi_pool_diag_factory_call(c)) {
+        hwaoi_host_section_leave(host_section);
+        __attribute__((musttail)) return hwaoi_resource_factory_diag(c);
+    }
     uint64_t pc = c->pc, lr = c->x[30], arg = c->x[1];
     int job = pc == hwaoi_pool_diag.job_pc, alloc = pc == hwaoi_pool_diag.alloc_pc;
     int known = job || alloc || pc == hwaoi_pool_diag.free_pc;

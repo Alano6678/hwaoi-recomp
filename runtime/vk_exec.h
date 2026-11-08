@@ -104,6 +104,7 @@ typedef struct VkExec {
     VkImage fbl_img[9];                  // images in the feedback layout now
     VkImageAspectFlags fbl_aspect[9];
     int nfbl;
+    int pass_storage_writes;             // conservative storage side effects since this pass began
     uint32_t fbl_mask;                   // attachments of the open pass in that layout: bit i colour i, bit 8 depth
     uint32_t fb_dirty;                   // attachments of the open pass written by a draw or clear since the pass began
                                          // or the last in-pass barrier
@@ -157,6 +158,7 @@ typedef struct {
     uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
+    uint64_t indirect_batches;          // full pass breaks avoided for proven read-only indirect draws
 } VkExecFrame;
 extern VkExecFrame vk_exec_frame;
 void vk_exec_frame_written(const tex_t *t);                    // vk_texture_gpu_written: t rendered or copied into
@@ -167,6 +169,7 @@ void vk_exec_frame_log(const tex_t *presented, uint64_t frame);
 // images are copied out and written as PNGs to TOTK_DUMP_DIR (default "dump"), with passes.txt (targets, pipelines,
 // textures, samplers) and images.txt (per image value statistics). The hooks run only when vk_dump_armed is set.
 extern int vk_dump_armed;
+extern int vk_dump_polling;              // optional file trigger pending; draw/dispatch hooks remain off
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds

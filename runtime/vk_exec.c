@@ -50,6 +50,35 @@ VkExecFrame vk_exec_frame;
 static struct { const uint8_t *mem; uint32_t w, h, fmt, n; } fw[64];   // textures written this frame
 static int nfw;
 
+// Opt-in attribution of ordered CPU readbacks versus ordinary early submits.
+// These observations never change a buffer, a draw or a synchronization point.
+static uint64_t readback_calls, readback_bytes, readback_ns, readback_max_ns, readback_16, automatic_parts;
+static int readback_diagnostics_on(void) {
+    static int enabled = -1;
+    int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
+    if (value < 0) {
+        const char *setting = cfg_get("TOTK_GPU_READBACK_DIAG");
+        value = setting && !strcmp(setting, "1");
+        __atomic_store_n(&enabled, value, __ATOMIC_RELEASE);
+    }
+    return value;
+}
+
+static void readback_diagnostics_frame(uint64_t frame) {
+    if (frame % 60 || !readback_diagnostics_on()) return;
+    uint64_t calls = __atomic_exchange_n(&readback_calls, 0, __ATOMIC_RELAXED);
+    uint64_t bytes = __atomic_exchange_n(&readback_bytes, 0, __ATOMIC_RELAXED);
+    uint64_t elapsed = __atomic_exchange_n(&readback_ns, 0, __ATOMIC_RELAXED);
+    uint64_t maximum = __atomic_exchange_n(&readback_max_ns, 0, __ATOMIC_RELAXED);
+    uint64_t tiny = __atomic_exchange_n(&readback_16, 0, __ATOMIC_RELAXED);
+    uint64_t parts = __atomic_exchange_n(&automatic_parts, 0, __ATOMIC_RELAXED);
+    uint64_t batches = __atomic_exchange_n(&vk_exec_frame.indirect_batches, 0, __ATOMIC_RELAXED);
+    rt_log("gpu-readback: frame=%llu window=60 calls=%llu bytes=%llu cpu_ms=%.3f max_ms=%.3f "
+           "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu", (unsigned long long)frame,
+           (unsigned long long)calls, (unsigned long long)bytes, elapsed / 1e6, maximum / 1e6,
+           (unsigned long long)tiny, (unsigned long long)parts, (unsigned long long)batches);
+}
+
 uint64_t vk_exec_recording_fence(void) { return x_here ? X.fence : 0; }
 
 void vk_exec_frame_written(const tex_t *t) {
@@ -62,6 +91,7 @@ void vk_exec_frame_written(const tex_t *t) {
 }
 
 void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
+    readback_diagnostics_frame(frame);
     if (!(rt_trace & RT_TRACE_GFX)) return;
     VkExecFrame *f = &vk_exec_frame;
     int hit = 0;
@@ -614,6 +644,7 @@ void vk_exec_pass_begin(VkExec *ex) {
     vk_exec_frame.passes++;
     ex->recorded++;
     ex->in_pass = 1;
+    ex->pass_storage_writes = 0;   // pass begin ordered every previous producer through barrier_to
 }
 
 void vk_exec_pass_end(VkExec *ex) {
@@ -823,6 +854,7 @@ static void maybe_split(VkExec *ex) {
     ex->dirty = VK_EXEC_DIRTY_ALL;
     vk_exec_draw_new_cb();
     n_parts++;
+    if (readback_diagnostics_on()) __atomic_fetch_add(&automatic_parts, 1, __ATOMIC_RELAXED);
 }
 
 // An ordered read of the GPU-visible backing at this replay position. In particular, imported guest bytes can be
@@ -834,6 +866,7 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     if (!vk_mem_resolve(addr, size, &source) || !source.buffer || source.avail < size || (source.offset & 3)) return 0;
     VK_MEM_PICK(source);   // choose an existing mirror; a read does not create a new one
     if (!source.buffer) return 0;
+    uint64_t diagnostic_start = readback_diagnostics_on() ? perf_begin() : 0;
     VkCtx *c = vk_ctx();
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation allocation = NULL;
@@ -870,6 +903,16 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     if (result == VK_SUCCESS) memcpy(out, mapped.pMappedData, (size_t)size);
     // split_wait is fatal on submission/wait failure, so this allocation is never freed while the copy is in flight.
     vmaDestroyBuffer(c->vma, buffer, allocation);
+    if (diagnostic_start) {
+        uint64_t elapsed = kern_now_ns() - diagnostic_start;
+        __atomic_fetch_add(&readback_calls, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&readback_bytes, size, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&readback_ns, elapsed, __ATOMIC_RELAXED);
+        if (size == 16) __atomic_fetch_add(&readback_16, 1, __ATOMIC_RELAXED);
+        uint64_t maximum = __atomic_load_n(&readback_max_ns, __ATOMIC_RELAXED);
+        while (elapsed > maximum && !__atomic_compare_exchange_n(&readback_max_ns, &maximum, elapsed, 0,
+                                                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    }
     return result == VK_SUCCESS;
 }
 

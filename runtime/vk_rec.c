@@ -34,7 +34,7 @@ enum {
     R_PAD, R_BeginQuery, R_BeginRendering, R_BindDescriptorSets, R_BindIndexBuffer, R_BindPipeline, R_BindVertexBuffers2,
     R_BlitImage, R_ClearAttachments, R_ClearColorImage, R_ClearDepthStencilImage, R_CopyBuffer, R_CopyBufferToImage,
     R_CopyImage, R_CopyImageToBuffer, R_Dispatch, R_DispatchIndirect, R_Draw, R_DrawIndirect, R_DrawIndexed, R_DrawIndexedIndirect,
-    R_EndQuery, R_EndRendering, R_FillBuffer, R_PipelineBarrier2, R_PushConstants, R_ResetQueryPool, R_ResolveImage,
+    R_EndQuery, R_EndRendering, R_FillBuffer, R_UpdateBuffer, R_PipelineBarrier2, R_PushConstants, R_ResetQueryPool, R_ResolveImage,
     R_SetBlendConstants, R_SetCullMode, R_SetDepthBias, R_SetDepthBiasEnable, R_SetDepthCompareOp, R_SetDepthTestEnable,
     R_SetDepthWriteEnable, R_SetFrontFace, R_SetPrimitiveRestartEnable, R_SetPrimitiveTopology,
     R_SetRasterizerDiscardEnable, R_SetScissorWithCount, R_SetStencilCompareMask, R_SetStencilOp, R_SetStencilReference,
@@ -419,6 +419,24 @@ void rc_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout l, VkShaderStage
     pub();
 }
 
+typedef struct { VkBuffer b; VkDeviceSize o, n; const void *v; } A_UpdateBuffer;
+void rc_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize n, const void *v) {
+    if (!OWNED(cb)) { vkCmdUpdateBuffer(cb, b, o, n, v); return; }
+    // Vulkan consumes the update bytes at recording time. The producer's stack
+    // may be gone when the recorder reaches this packet, so it must own them.
+    // Unsupported/invalid forms retain the direct call after an ordered drain.
+    if (!v || !n || n > 65536 || (o & 3) || (n & 3)) {
+        FALLBACK();
+        vkCmdUpdateBuffer(cb, b, o, n, v);
+        return;
+    }
+    A_UpdateBuffer *a = put(R_UpdateBuffer, sizeof *a + (size_t)n);
+    uint8_t *at = (uint8_t *)(a + 1);
+    *a = (A_UpdateBuffer){b, o, n, NULL};
+    a->v = tail_copy(&at, v, (size_t)n);
+    pub();
+}
+
 void rc_vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di) {
     if (!OWNED(cb)) { vkCmdPipelineBarrier2(cb, di); return; }
     int chained = di->pNext != NULL;
@@ -595,6 +613,7 @@ static void exec_packet(uint32_t op, void *p) {
         break;
     }
     F(PushConstants, a->l, a->st, a->o, a->n, a->v)
+    F(UpdateBuffer, a->b, a->o, a->n, a->v)
 #undef F
     case R_EndRendering: vkCmdEndRendering(cb); break;
     case R_BlitImage: { A_Img *a = p; vkCmdBlitImage(cb, a->s, a->sl, a->d, a->dl, a->n, a->r, a->f); break; }
