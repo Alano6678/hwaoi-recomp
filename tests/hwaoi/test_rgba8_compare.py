@@ -30,7 +30,7 @@ static uint8_t *storage_base;
 static size_t storage_bytes;
 static int readable=1, depth_feature=1, linear_feature=1, allocation_ok=1;
 static unsigned allocations, destroyed_images, destroyed_views, uploads, upload_step;
-static uint16_t staged[16], copied[16];
+static uint16_t staged[NVN_RGBA8_COMPARE_MAX_TEXELS], copied[NVN_RGBA8_COMPARE_MAX_TEXELS];
 static VkImageCreateInfo allocated;
 static view_t source_view={.set_format=1,.format=NVN_FORMAT_RGBA8,
     .set_levels=1,.nlevels=1,.set_layers=1,.nlayers=6};
@@ -54,7 +54,8 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties2(VkPhysicalDevice
 VkResult vmaCreateImage(VmaAllocator allocator,const VkImageCreateInfo *ci,const VmaAllocationCreateInfo *ai,
                        VkImage *image,VmaAllocation *allocation,VmaAllocationInfo *info) {
     (void)allocator;(void)ai;(void)info;allocated=*ci;allocations++;
-    CHECK(ci->format==VK_FORMAT_D16_UNORM && ci->extent.width==1 && ci->extent.height==1 && ci->extent.depth==1);
+    CHECK(ci->format==VK_FORMAT_D16_UNORM && ci->extent.width==source_tex.pub.width &&
+          ci->extent.height==source_tex.pub.height && ci->extent.depth==1);
     CHECK(ci->mipLevels==1 && ci->samples==VK_SAMPLE_COUNT_1_BIT &&
           ci->usage==(VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT));
     CHECK(ci->usage==queried.usage && ci->flags==queried.flags && ci->format==queried.format);
@@ -85,8 +86,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(VkCommandBuffer cb,VkBuffer bu
     (void)image;CHECK(upload_step==2 && cb==(VkCommandBuffer)(uintptr_t)333 && buffer==(VkBuffer)(uintptr_t)444);
     CHECK(layout==VK_IMAGE_LAYOUT_GENERAL && count==1 && !r->bufferOffset && !r->imageSubresource.baseArrayLayer);
     CHECK(r->imageSubresource.aspectMask==VK_IMAGE_ASPECT_DEPTH_BIT && !r->imageSubresource.mipLevel &&
-          r->imageSubresource.layerCount==source_tex.pub.layers && r->imageExtent.width==1 && r->imageExtent.height==1);
-    memcpy(copied,staged,source_tex.pub.layers*sizeof *copied);upload_step=3;
+          r->imageSubresource.layerCount==source_tex.pub.layers && r->imageExtent.width==source_tex.pub.width &&
+          r->imageExtent.height==source_tex.pub.height);
+    memcpy(copied,staged,source_tex.pub.width*source_tex.pub.height*source_tex.pub.layers*sizeof *copied);upload_step=3;
 }
 void vk_upload_end(void) {CHECK(upload_step==4);upload_step=0;uploads++;}
 void rt_log(const char *fmt,...) {
@@ -106,8 +108,10 @@ static Twin *twin_update(VkExec *ex,const VkTexImage *img) {(void)ex;(void)img;r
 '''
     main = r'''
 static void pixel(unsigned layer,uint8_t value) {
-    uint8_t rgba[4]={value,value,value,value};
-    CHECK(!nvn_swizzle(&source_tex.t.d,0,layer,rgba,4,source_tex.t.mem));
+    uint8_t rgba[64][4];unsigned area=source_tex.pub.width*source_tex.pub.height;
+    CHECK(area<=64);
+    for(unsigned i=0;i<area;i++)memset(rgba[i],(uint8_t)(value+i*37),4);
+    CHECK(!nvn_swizzle(&source_tex.t.d,0,layer,rgba,source_tex.pub.width*4,source_tex.t.mem));
 }
 static int compare_ref(int64_t ref,int64_t value,int op) {
     switch(op) {
@@ -140,6 +144,21 @@ static void comparison_equivalence(void) {
                      !memcmp(view.swz,(uint8_t[]){4,3,2,5},4)?2:0;
         CHECK(rgba8_compare_mapping(&img,&view,1,effective)==expected);
     }
+    uint8_t rgba[NVN_RGBA8_COMPARE_MAX_TEXELS][4];
+    uint16_t guarded[NVN_RGBA8_COMPARE_MAX_TEXELS+2];
+    for(unsigned i=0;i<NVN_RGBA8_COMPARE_MAX_TEXELS;i++)memset(rgba[i],(uint8_t)i,4);
+    memset(guarded,0xa5,sizeof guarded);
+    CHECK(nvn_rgba8_compare_count(8,8,6)==384 && !nvn_rgba8_compare_count(0,8,1) &&
+          !nvn_rgba8_compare_count(8,9,1) && !nvn_rgba8_compare_count(UINT32_MAX,8,1) &&
+          !nvn_rgba8_compare_count(8,8,UINT32_MAX));
+    CHECK(nvn_rgba8_compare_texels(rgba,NVN_RGBA8_COMPARE_MAX_TEXELS,guarded+1));
+    for(unsigned i=0;i<NVN_RGBA8_COMPARE_MAX_TEXELS;i++)CHECK(guarded[i+1]==(uint8_t)i*257u);
+    CHECK(guarded[0]==0xa5a5 && guarded[NVN_RGBA8_COMPARE_MAX_TEXELS+1]==0xa5a5);
+    memset(guarded,0xa5,sizeof guarded);rgba[NVN_RGBA8_COMPARE_MAX_TEXELS-1][3]^=1;
+    CHECK(!nvn_rgba8_compare_texels(rgba,NVN_RGBA8_COMPARE_MAX_TEXELS,guarded+1));
+    CHECK(!nvn_rgba8_compare_texels(rgba,0,guarded+1));
+    CHECK(!nvn_rgba8_compare_texels(rgba,NVN_RGBA8_COMPARE_MAX_TEXELS+1,guarded+1));
+    for(unsigned i=0;i<NVN_RGBA8_COMPARE_MAX_TEXELS+2;i++)CHECK(guarded[i]==0xa5a5);
 }
 int main(int argc,char **argv) {
     CHECK(argc==2);const char *mode=argv[1];
@@ -150,10 +169,20 @@ int main(int argc,char **argv) {
         .mirrored=1,.aspect=VK_IMAGE_ASPECT_COLOR_BIT,.swz={2,3,4,5}};
     source_tex.t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_CUBEMAP_ARRAY,.format=NVN_FORMAT_RGBA8,
         .width=1,.height=1,.depth=6,.levels=1,.swizzle_r=2,.swizzle_g=3,.swizzle_b=4,.swizzle_a=5};
-    if(!strcmp(mode,"one")) {
+    int eight=!strncmp(mode,"eight",5);
+    if(!strcmp(mode,"one") || eight) {
         source_tex.pub.layers=1;source_tex.pub.view_type=VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         source_tex.t.d.target=NVN_TEXTURE_TARGET_2D_ARRAY;source_tex.t.d.depth=1;source_view.nlayers=1;
     }
+    if(eight) {
+        source_tex.pub.width=source_tex.pub.height=source_tex.t.d.width=source_tex.t.d.height=8;
+        if(!strcmp(mode,"eight-cube")) {
+            source_tex.pub.layers=6;source_tex.pub.view_type=VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+            source_tex.t.d.target=NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;source_tex.t.d.depth=6;source_view.nlayers=6;
+        }
+    }
+    unsigned area=source_tex.pub.width*source_tex.pub.height;
+    unsigned count=area*source_tex.pub.layers;
     nvn_tex_layout(&source_tex.t.d,&source_tex.t.L);storage_bytes=(size_t)source_tex.t.L.size;
     uint8_t *allocation=calloc(1,storage_bytes+128);CHECK(allocation);storage_base=allocation+64;
     source_tex.t.mem=storage_base;source_tex.pub.addr=(uintptr_t)storage_base;
@@ -164,8 +193,14 @@ int main(int argc,char **argv) {
     uint8_t values[6]={0,1,127,128,254,255};
     if(!strcmp(mode,"bgr-white"))memset(values,255,sizeof values);
     for(unsigned i=0;i<source_tex.pub.layers;i++)pixel(i,values[i]);
-    uint8_t readback[6][4];CHECK(vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,readback));
-    for(unsigned i=0;i<source_tex.pub.layers;i++)for(int j=0;j<4;j++)CHECK(readback[i][j]==values[i]);
+    uint8_t readback[NVN_RGBA8_COMPARE_MAX_TEXELS][4];
+    CHECK(vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,readback,NVN_RGBA8_COMPARE_MAX_TEXELS));
+    for(unsigned layer=0;layer<source_tex.pub.layers;layer++)for(unsigned i=0;i<area;i++)for(int j=0;j<4;j++)
+        CHECK(readback[layer*area+i][j]==(uint8_t)(values[layer]+i*37));
+    // A short destination is rejected atomically, even for a valid 8x8 source.
+    memset(readback,0xa5,sizeof readback);
+    CHECK(!vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,readback,count-1));
+    for(unsigned i=0;i<sizeof readback;i++)CHECK(((uint8_t *)readback)[i]==0xa5);
     // Exhaustive scalar UNORM equality, including endpoints and intermediate values; failure is atomic.
     for(unsigned value=0;value<256;value++) {
         uint8_t data[6][4]={{0}};uint16_t d[6];memset(data[0],(int)value,4);
@@ -181,11 +216,12 @@ int main(int argc,char **argv) {
     else if(!strcmp(mode,"released"))source_tex.released=1;
     else if(!strcmp(mode,"not-mirrored"))source_tex.pub.mirrored=0;
     else if(!strcmp(mode,"unreadable"))readable=0;
-    else if(!strcmp(mode,"width"))source_tex.pub.width=2;
+    else if(!strcmp(mode,"width"))source_tex.pub.width=9;
     else if(!strcmp(mode,"mips"))source_tex.pub.levels=2;
     else if(!strcmp(mode,"layers"))source_tex.pub.layers=2;
     else if(!strcmp(mode,"storage-shape"))source_tex.t.d.width=2;
     else if(!strcmp(mode,"storage-format"))source_tex.t.d.format=NVN_FORMAT_DEPTH16;
+    else if(!strcmp(mode,"storage-target"))source_tex.t.d.target=NVN_TEXTURE_TARGET_3D;
     else if(!strcmp(mode,"missing-storage"))source_tex.t.mem=NULL;
     else if(!strcmp(mode,"swizzle"))source_tex.pub.swz[0]=NVN_TEXTURE_SWIZZLE_ONE;
     else if(!strcmp(mode,"format-identity"))memcpy(source_tex.pub.chan,(uint8_t[]){2,3,4,5},4);
@@ -222,15 +258,19 @@ int main(int argc,char **argv) {
     else if(!strcmp(mode,"shape"))shape_supported=0;
     else if(!strcmp(mode,"create"))allocation_ok=0;
     else if(!strcmp(mode,"limit"))rgba8_compare_count=64;
-    else CHECK(!strcmp(mode,"one") || !strcmp(mode,"six"));
+    else if(!strcmp(mode,"eight-unequal-tail")) {
+        uint8_t linear[64][4];CHECK(!nvn_deswizzle(&source_tex.t.d,0,0,storage_base,linear,32));
+        linear[63][3]^=1;CHECK(!nvn_swizzle(&source_tex.t.d,0,0,linear,32,storage_base));
+    }
+    else CHECK(!strcmp(mode,"one") || !strcmp(mode,"six") || eight);
     // A rejected source never partially replaces the caller's pixels. The
     // eventual tex_info fatal must retain the exact predicate in its diagnostic.
     if(!strcmp(mode,"gpu-owned") || !strcmp(mode,"gpu-write") || !strcmp(mode,"released") ||
        !strcmp(mode,"not-mirrored") || !strcmp(mode,"unreadable") || !strcmp(mode,"width") ||
        !strcmp(mode,"mips") || !strcmp(mode,"layers") || !strcmp(mode,"storage-shape") ||
-       !strcmp(mode,"storage-format") || !strcmp(mode,"missing-storage")) {
+       !strcmp(mode,"storage-format") || !strcmp(mode,"storage-target") || !strcmp(mode,"missing-storage")) {
         uint8_t untouched_pixels[6][4];memset(untouched_pixels,0xa5,sizeof untouched_pixels);
-        CHECK(!vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,untouched_pixels));
+        CHECK(!vk_texture_compare_rgba8_pixels_locked(&source_tex.pub,untouched_pixels,6));
         for(unsigned i=0;i<sizeof untouched_pixels;i++)CHECK(((uint8_t *)untouched_pixels)[i]==0xa5);
     }
     VkDescriptorImageInfo out;tex_info(&ex,&r,5,0,0,&out);
@@ -240,7 +280,8 @@ int main(int argc,char **argv) {
     CHECK(created.components.r==VK_COMPONENT_SWIZZLE_R && created.components.g==VK_COMPONENT_SWIZZLE_G &&
           created.components.b==VK_COMPONENT_SWIZZLE_B && created.components.a==VK_COMPONENT_SWIZZLE_A);
     CHECK(allocated.arrayLayers==source_tex.pub.layers && allocated.flags==(source_tex.pub.layers==6 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0));
-    for(unsigned i=0;i<source_tex.pub.layers;i++)CHECK(copied[i]==values[i]*257u);
+    for(unsigned layer=0;layer<source_tex.pub.layers;layer++)for(unsigned i=0;i<area;i++)
+        CHECK(copied[layer*area+i]==(uint8_t)(values[layer]+i*37)*257u);
     VkImageView first=out.imageView;tex_info(&ex,&r,5,0,0,&out);CHECK(out.imageView==first && uploads==1);
     // Modified source creates a new immutable version; the first content and view survive for already recorded draws.
     pixel(0,42);tex_info(&ex,&r,5,0,0,&out);CHECK(out.imageView!=first && uploads==2 && copied[0]==42*257);
@@ -252,7 +293,25 @@ int main(int argc,char **argv) {
         tex_info(&ex,&r,5,0,0,&out);CHECK(uploads==2 && created.subresourceRange.baseArrayLayer==2 &&
             created.subresourceRange.layerCount==3 && created.subresourceRange.baseMipLevel==0);
     }
-    rgba8_compare_release(&context);CHECK(destroyed_images==2 && destroyed_views==creates && !rgba8_compares);
+    if(eight) {
+        // Change only the last texel: first-pixel-only caches must not reuse the
+        // old image. Reverting the source must find the immutable original.
+        uint8_t linear[64][4];CHECK(!nvn_deswizzle(&source_tex.t.d,0,0,storage_base,linear,32));
+        memset(linear[63],123,4);CHECK(!nvn_swizzle(&source_tex.t.d,0,0,linear,32,storage_base));
+        tex_info(&ex,&r,5,0,0,&out);CHECK(uploads==3 && out.imageView!=first && copied[63]==123*257u);
+        pixel(0,values[0]);tex_info(&ex,&r,5,0,0,&out);CHECK(uploads==3);
+    }
+    unsigned expected_images=eight?3:2;
+    if(eight && source_tex.pub.layers==1) {
+        source_tex.pub.width=source_tex.t.d.width=4;source_tex.pub.height=source_tex.t.d.height=8;
+        nvn_tex_layout(&source_tex.t.d,&source_tex.t.L);CHECK(source_tex.t.L.size==storage_bytes);pixel(0,values[0]);
+        tex_info(&ex,&r,5,0,0,&out);VkImageView portrait=out.imageView;CHECK(uploads==4 && allocated.extent.width==4);
+        source_tex.pub.width=source_tex.t.d.width=8;source_tex.pub.height=source_tex.t.d.height=4;
+        nvn_tex_layout(&source_tex.t.d,&source_tex.t.L);CHECK(source_tex.t.L.size==storage_bytes);pixel(0,values[0]);
+        tex_info(&ex,&r,5,0,0,&out);CHECK(uploads==5 && allocated.extent.width==8 && out.imageView!=portrait);
+        expected_images=5;
+    }
+    rgba8_compare_release(&context);CHECK(destroyed_images==expected_images && destroyed_views==creates && !rgba8_compares);
     CHECK(!view_of.n && !views_by_image.n);free(allocation);
     puts("RGBA8 comparison check passed");return 0;
 }
@@ -312,21 +371,23 @@ int main(void) {
                     str(ROOT/"runtime/vk_formats.c"),str(ROOT/"runtime/nvn_tex.c"),str(ROOT/"runtime/tex_deswizzle.c"),
                     "-o",str(exe)],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=60)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                for case in ("one","six","unequal","gpu-owned","gpu-write","released","not-mirrored","unreadable","width",
-                             "mips","layers","storage-shape","storage-format","missing-storage",
+                for case in ("one","six","eight","eight-cube","eight-unequal-tail","unequal","gpu-owned","gpu-write","released","not-mirrored","unreadable","width",
+                             "mips","layers","storage-shape","storage-format","storage-target","missing-storage",
                              "swizzle","format-identity","sentinel","inverse-map","view-identity",
                              "channel-map","constant-view","alpha-one","mip-range","layer-range","feature","linear-feature",
                              "shape","create","limit","bgr-values","bgr-white","bgr-unequal","bgr-missing-sampler",
                              "bgr-no-compare","bgr-border","bgr-mixed-border","bgr-invalid-wrap"):
                     with self.subTest(opt=opt,case=case):
                         result=subprocess.run([str(exe),case],capture_output=True,text=True,timeout=10)
-                        good=case in ("one","six","format-identity","sentinel","inverse-map","view-identity","bgr-values","bgr-white")
+                        good=case in ("one","six","eight","eight-cube","format-identity","sentinel","inverse-map","view-identity","bgr-values","bgr-white")
                         self.assertEqual(result.returncode,0 if good else 73,result.stdout+result.stderr)
                         self.assertIn("check passed" if good else "vk:",result.stdout if good else result.stderr)
+                        if case == "eight-unequal-tail":
+                            self.assertIn("extent=8x8 layers=1 texel=63", result.stderr)
                         reasons={"gpu-owned":"GPU-owned", "gpu-write":"image-write-recorded", "released":"released",
                                  "not-mirrored":"not-mirrored", "unreadable":"unreadable-storage", "width":"image-extent",
                                  "mips":"image-mips", "layers":"image-layers", "storage-shape":"storage-shape",
-                                 "storage-format":"storage-format", "missing-storage":"missing-storage"}
+                                 "storage-format":"storage-format", "storage-target":"storage-target", "missing-storage":"missing-storage"}
                         if case in reasons:
                             for field in (f"reason={reasons[case]}", "image_format=", "extent=", "mips=", "layers=",
                                           "write_fence=", "storage_format=", "storage_bytes="):

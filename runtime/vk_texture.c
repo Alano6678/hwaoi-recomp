@@ -23,6 +23,7 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
+#include "nvn_rgba8_compare.h"
 #include "nvn_tex.h"
 #include "tex.h"
 #include "vk.h"
@@ -1254,41 +1255,48 @@ static int storage_texels(const tex_t *t, const Region *g, const NVNcopyRegion *
     return 1;
 }
 
-int vk_texture_compare_rgba8_pixels_locked(const VkTexImage *img, uint8_t rgba[6][4]) {
+int vk_texture_compare_rgba8_pixels_locked(const VkTexImage *img, uint8_t rgba[][4], size_t capacity) {
     if (!img) {
         rt_log("vk: RGBA8 comparison rejected: reason=missing-image");
         return 0;
     }
     const Tex *e = (const Tex *)img;   // pub is the first member; callers use a live texture-cache result
     const char *reason = NULL;
+    uint32_t count = nvn_rgba8_compare_count(img->width, img->height, img->layers);
     if (img->format != VK_FORMAT_R8G8B8A8_UNORM) reason = "image-format";
-    else if (img->width != 1 || img->height != 1 || img->depth != 1) reason = "image-extent";
+    else if (!img->width || !img->height || img->width > NVN_RGBA8_COMPARE_MAX_EDGE ||
+             img->height > NVN_RGBA8_COMPARE_MAX_EDGE || img->depth != 1) reason = "image-extent";
     else if (img->levels != 1) reason = "image-mips";
     else if (img->samples != 1) reason = "image-samples";
     else if (img->layers != 1 && img->layers != 6) reason = "image-layers";
+    else if (!rgba || capacity < count) reason = "output-capacity";
     else if (!img->mirrored) reason = "not-mirrored";
     else if (img->gpu_owned) reason = "GPU-owned";
     else if (e->released) reason = "released";
     else if (e->wr_fence) reason = "image-write-recorded";
     else if (e->t.d.format != NVN_FORMAT_RGBA8) reason = "storage-format";
+    else if (e->t.d.target != NVN_TEXTURE_TARGET_2D && e->t.d.target != NVN_TEXTURE_TARGET_2D_ARRAY &&
+             e->t.d.target != NVN_TEXTURE_TARGET_RECTANGLE && e->t.d.target != NVN_TEXTURE_TARGET_CUBEMAP &&
+             e->t.d.target != NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) reason = "storage-target";
     else if (e->f.vk != e->f.ideal) reason = "substituted-format";
-    else if (e->t.d.width != 1 || e->t.d.height != 1 || e->t.d.levels != 1 || e->t.L.layers != img->layers)
+    else if (e->t.d.width != img->width || e->t.d.height != img->height || e->t.d.levels != 1 || e->t.L.layers != img->layers)
         reason = "storage-shape";
     else if (!e->t.mem || !e->t.L.size) reason = "missing-storage";
     else if (!plat_mem_readable((uintptr_t)e->t.mem, e->t.L.size)) reason = "unreadable-storage";
     if (reason) goto rejected;
-    uint8_t next[6][4] = {{0}};
+    uint8_t next[NVN_RGBA8_COMPARE_MAX_TEXELS][4];
+    uint32_t layer_pixels = img->width * img->height;
     for (uint32_t layer = 0; layer < img->layers; layer++) {
-        if (nvn_deswizzle(&e->t.d, 0, layer, e->t.mem, next[layer], 4)) {
+        if (nvn_deswizzle(&e->t.d, 0, layer, e->t.mem, next + layer * layer_pixels, (size_t)img->width * 4)) {
             reason = "storage-layout";
             goto rejected;
         }
     }
-    memcpy(rgba, next, sizeof next);
+    memcpy(rgba, next, (size_t)count * 4);
     return 1;
 rejected:
     // The old fatal omitted the failing predicate. Keep the strict authority/shape
-    // boundary, but distinguish a new shadow-texture shape from stale image writes.
+    // boundary, distinguishing an unsupported shape from stale image writes.
     rt_log("vk: RGBA8 comparison rejected: reason=%s addr=%#llx image_format=%u extent=%ux%ux%u "
            "mips=%u layers=%u samples=%u mirrored=%u GPU-owned=%u released=%d write_fence=%llu "
            "storage_format=%#x storage_extent=%ux%ux%u storage_mips=%u storage_layers=%u "

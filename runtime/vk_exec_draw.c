@@ -737,7 +737,7 @@ typedef struct Rgba8Compare {
     struct Rgba8Compare *next;
     VkTexImage pub;
     VmaAllocation allocation;
-    uint8_t rgba[6][4];
+    uint8_t rgba[NVN_RGBA8_COMPARE_MAX_TEXELS][4];
 } Rgba8Compare;
 static Rgba8Compare *rgba8_compares;
 static unsigned rgba8_compare_count;
@@ -800,11 +800,13 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
         rt_fatal("vk: unsupported RGBA8 comparison cube range");
     uint8_t effective[4];
     int mapping = rgba8_compare_mapping(img, v, hv, effective);
-    uint8_t rgba[6][4];
-    uint16_t depth[6];
-    if (!vk_texture_compare_rgba8_pixels_locked(img, rgba))
-        rt_fatal("vk: RGBA8 comparison source %#llx is not a readable CPU-authoritative 1x1 single-mip texture (layers=%u mirrored=%u GPU-owned=%u)",
-                 (unsigned long long)img->addr, img->layers, img->mirrored, img->gpu_owned);
+    uint8_t rgba[NVN_RGBA8_COMPARE_MAX_TEXELS][4] = {{0}};
+    uint16_t depth[NVN_RGBA8_COMPARE_MAX_TEXELS] = {0};
+    uint32_t count = nvn_rgba8_compare_count(img->width, img->height, img->layers);
+    if (!vk_texture_compare_rgba8_pixels_locked(img, rgba, NVN_RGBA8_COMPARE_MAX_TEXELS))
+        rt_fatal("vk: RGBA8 comparison source %#llx is not a readable CPU-authoritative small single-mip texture "
+                 "(extent=%ux%u layers=%u mirrored=%u GPU-owned=%u)",
+                 (unsigned long long)img->addr, img->width, img->height, img->layers, img->mirrored, img->gpu_owned);
     uint32_t pixels[6];
     memcpy(pixels, rgba, sizeof pixels);
     if (!mapping)
@@ -816,10 +818,16 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
                  img->chan[0], img->chan[1], img->chan[2], img->chan[3],
                  img->alpha_one, effective[0], effective[1], effective[2], effective[3], img->layers,
                  pixels[0], pixels[1], pixels[2], pixels[3], pixels[4], pixels[5]);
-    if (!nvn_rgba8_compare_depth(rgba, img->layers, depth))
+    if (!nvn_rgba8_compare_texels(rgba, count, depth)) {
+        uint32_t bad = 0;
+        while (bad < count && rgba[bad][0] == rgba[bad][1] && rgba[bad][0] == rgba[bad][2] &&
+               rgba[bad][0] == rgba[bad][3]) bad++;
         rt_fatal("vk: RGBA8 comparison source %#llx has unequal components; color comparison selection is unproved; "
-                 "layers=%u rgba_bytes_le=%08x,%08x,%08x,%08x,%08x,%08x",
-                 (unsigned long long)img->addr, img->layers, pixels[0], pixels[1], pixels[2], pixels[3], pixels[4], pixels[5]);
+                 "extent=%ux%u layers=%u texel=%u rgba=%u,%u,%u,%u rgba_bytes_le=%08x,%08x,%08x,%08x,%08x,%08x",
+                 (unsigned long long)img->addr, img->width, img->height, img->layers, bad,
+                 rgba[bad][0], rgba[bad][1], rgba[bad][2], rgba[bad][3],
+                 pixels[0], pixels[1], pixels[2], pixels[3], pixels[4], pixels[5]);
+    }
     // The captured RGBA texels are equal in every component, so selecting R or B before comparison is equivalent.
     // Eglantine's Maxwell TEX lowering independently replicates a depth-compare result to RGB (A stays 1), so the
     // observed R/B exchange also preserves that post-compare result. This is a scoped source-based equivalence,
@@ -835,8 +843,9 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
                                      NVN_TEXTURE_SWIZZLE_B, NVN_TEXTURE_SWIZZLE_A};
     Rgba8Compare *entry;
     for (entry = rgba8_compares; entry; entry = entry->next)
-        if (entry->pub.layers == img->layers && entry->pub.view_type == img->view_type &&
-            !memcmp(entry->rgba, rgba, sizeof rgba)) break;
+        if (entry->pub.width == img->width && entry->pub.height == img->height &&
+            entry->pub.layers == img->layers && entry->pub.view_type == img->view_type &&
+            !memcmp(entry->rgba, rgba, (size_t)count * 4)) break;
     if (!entry) {
         if (rgba8_compare_count >= 64) rt_fatal("vk: RGBA8 comparison content-version limit reached");
         VkCtx *c = vk_ctx();
@@ -849,14 +858,14 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
         if ((f3.optimalTilingFeatures & need) != need) rt_fatal("vk: D16 comparison conversion lacks required device features");
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, .imageType = VK_IMAGE_TYPE_2D,
-            .format = VK_FORMAT_D16_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = img->layers,
+            .format = VK_FORMAT_D16_UNORM, .extent = {img->width, img->height, 1}, .mipLevels = 1, .arrayLayers = img->layers,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
         VkPhysicalDeviceImageFormatInfo2 fi = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
             .format = ci.format, .type = ci.imageType, .tiling = ci.tiling, .usage = ci.usage, .flags = ci.flags};
         VkImageFormatProperties2 p = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
         if (vkGetPhysicalDeviceImageFormatProperties2(c->phys, &fi, &p) != VK_SUCCESS ||
-            p.imageFormatProperties.maxExtent.width < 1 || p.imageFormatProperties.maxExtent.height < 1 ||
+            p.imageFormatProperties.maxExtent.width < ci.extent.width || p.imageFormatProperties.maxExtent.height < ci.extent.height ||
             p.imageFormatProperties.maxExtent.depth < 1 || p.imageFormatProperties.maxMipLevels < 1 ||
             p.imageFormatProperties.maxArrayLayers < ci.arrayLayers || !(p.imageFormatProperties.sampleCounts & ci.samples))
             rt_fatal("vk: D16 comparison conversion shape/usage is unsupported");
@@ -866,13 +875,14 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
         if (vmaCreateImage(c->vma, &ci, &ai, &entry->pub.image, &entry->allocation, NULL) != VK_SUCCESS)
             rt_fatal("vk: D16 comparison image creation failed");
         entry->pub.format = ci.format, entry->pub.type = ci.imageType, entry->pub.view_type = img->view_type;
-        entry->pub.width = entry->pub.height = entry->pub.depth = entry->pub.levels = entry->pub.samples = 1;
+        entry->pub.width = img->width, entry->pub.height = img->height;
+        entry->pub.depth = entry->pub.levels = entry->pub.samples = 1;
         entry->pub.layers = img->layers, entry->pub.aspect = VK_IMAGE_ASPECT_DEPTH_BIT, entry->pub.usage = ci.usage;
         memcpy(entry->pub.swz, depth_swizzle, 4); // scalar comparison is preserved; do not select depth's absent B channel
-        memcpy(entry->rgba, rgba, sizeof rgba);
+        memcpy(entry->rgba, rgba, (size_t)count * 4);
         VkCommandBuffer cb = vk_upload_begin();
         VkBuffer buffer;
-        memcpy(vk_staging(img->layers * sizeof *depth, &buffer, NULL), depth, img->layers * sizeof *depth);
+        memcpy(vk_staging(count * sizeof *depth, &buffer, NULL), depth, count * sizeof *depth);
         VkImageMemoryBarrier2 bar = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_NONE, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -881,7 +891,8 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
             .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, img->layers}};
         VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &bar};
         vkCmdPipelineBarrier2(cb, &di);
-        VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, img->layers}, .imageExtent = {1, 1, 1}};
+        VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, img->layers},
+                                 .imageExtent = {img->width, img->height, 1}};
         vkCmdCopyBufferToImage(cb, buffer, entry->pub.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
         bar.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, bar.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
         bar.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, bar.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
@@ -890,9 +901,9 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
         vk_upload_end();   // vk_sync flushes this batch before the replay submission that samples the new version
         entry->next = rgba8_compares, rgba8_compares = entry;
         rgba8_compare_count++;
-        rt_log("vk: RGBA8 comparison source %#llx preserved as D16, layers=%u values=%u,%u,%u,%u,%u,%u version=%u "
+        rt_log("vk: RGBA8 comparison source %#llx preserved as D16, extent=%ux%u layers=%u values=%u,%u,%u,%u,%u,%u version=%u "
                "mapping=%u wrap=%u,%u,%u compare=%u",
-               (unsigned long long)img->addr, img->layers, depth[0], depth[1], depth[2], depth[3], depth[4], depth[5], rgba8_compare_count,
+               (unsigned long long)img->addr, img->width, img->height, img->layers, depth[0], depth[1], depth[2], depth[3], depth[4], depth[5], rgba8_compare_count,
                mapping, sampler ? sampler->ws : 0, sampler ? sampler->wt : 0, sampler ? sampler->wr : 0,
                sampler ? sampler->cmp_mode : 0);
     }

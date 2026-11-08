@@ -25,10 +25,10 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 | | Part | Progress |
 | --- | --- | --- |
 | ✅ | Static recompiler | All three guest modules generate, compile and link into a native Windows executable. |
-| ✅ | Boot and resources | The matching build passes title/module checks and loads its game resources. |
+| ✅ | Boot and resources | The matching build passes title/module checks and loads its game resources. Automatic GPU mirroring now checks Windows system-commit headroom. |
 | ✅ | Opening movies and audio | Both opening movies play through; audio and voices work in the tested opening. |
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
-| 🔧 | Rendering | Outdoor scenes and initial combat render. Texture views, depth/stencil handling, colour space and storage-write tracking have received fixes. |
+| 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
 | 🔧 | Combat performance | Major stalls and unbounded command-recording growth have been addressed. Further combat optimization continues. |
 | 🧪 | 30 / 60 / 90 / 120 FPS | The native scheduler-unlock candidate exceeds 60 FPS in game. Approximately 120 FPS has been measured in menu/presentation tests; non-60 modes still accelerate gameplay. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |

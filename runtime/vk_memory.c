@@ -11,11 +11,13 @@
 // (fault handler); here virtual pools are a GPU-side page table over device-local memory and dirty pages come from
 // GetWriteWatch (mem_written_pages), so neither is needed.
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
 #include "gfx.h"
+#include "game_target.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
@@ -1416,6 +1418,24 @@ static void refuse(PoolRec *r, int why, const char *what) {
 }
 
 // Replay thread: the pool's mirror on its first buffer use.
+// A discrete allocation can also consume Windows system commit. Leave room
+// for later textures/decoder work instead of exhausting commit at startup.
+// Explicit mirror/verify modes retain their diagnostic behavior.
+static int mirror_commit_room(uint64_t bytes, double *available_mb) {
+    *available_mb = -1;
+#ifdef _WIN32
+    if (!RT_TARGET_HWAOI || strcmp(cfg_value("TOTK_MEMORY"), "auto")) return 1;
+    double process_mb = 0, used_mb = 0, limit_mb = 0;
+    plat_commit_info(&process_mb, &used_mb, &limit_mb);
+    if (!isfinite(used_mb) || !isfinite(limit_mb) || used_mb < 0 || limit_mb <= 0) return 1;
+    *available_mb = limit_mb > used_mb ? limit_mb - used_mb : 0;
+    return *available_mb >= (double)bytes / 1048576.0 + 3072.0;
+#else
+    (void)bytes;
+    return 1;
+#endif
+}
+
 static void mirror_create(PoolRec *r) {
     VkCtx *c = vk_ctx();
     uint64_t n = r->import_hi - r->import_lo;
@@ -1438,6 +1458,13 @@ static void mirror_create(PoolRec *r) {
         char why[128];
         snprintf(why, sizeof why, "its %.1f MiB mirror does not fit the VRAM budget (%.0f of %.0f MiB in use)",
                  n / 1048576.0, used / 1048576.0, budget / 1048576.0);
+        return refuse(r, MR_BUDGET, why);
+    }
+    double commit_available;
+    if (!mirror_commit_room(n, &commit_available)) {
+        char why[176];
+        snprintf(why, sizeof why, "system commit budget: %.0f MiB available; a %.0f MiB mirror needs 3072 MiB headroom; "
+                 "using the existing host import", commit_available, (double)n / 1048576.0);
         return refuse(r, MR_BUDGET, why);
     }
     plat_mutex_lock(&gen_lock);

@@ -340,9 +340,10 @@ const VkTexImage *vk_texture_by_id(const dpool_ref *pool, int id, view_t *view, 
 void vk_texture_lock(void);
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t *view, int *has_view);
-// Texture lock held; img must come from a texture lookup. Exact 1x1, one-mip, one/six-layer native RGBA8 only.
+// Texture lock held; img must come from a lookup. Up to 8x8, one-mip, one/six-layer native RGBA8 only.
 // Reads real storage through the original layout only while CPU-authoritative and never recorded for GPU writes.
-int vk_texture_compare_rgba8_pixels_locked(const VkTexImage *img, uint8_t rgba[6][4]);
+// capacity counts destination texels; a rejection leaves the entire caller buffer untouched.
+int vk_texture_compare_rgba8_pixels_locked(const VkTexImage *img, uint8_t rgba[][4], size_t capacity);
 VkSampler vk_sampler_by_id_locked(const dpool_ref *pool, int id);
 // The slot's sampler with nearest filtering and no anisotropy: a depth texture read without a compare lands on one texel
 // on the Switch although the game binds a linear sampler, and MacNativeGames samples it the same way. VK_NULL_HANDLE
