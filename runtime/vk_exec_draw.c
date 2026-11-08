@@ -29,6 +29,8 @@
 #include "nvn_geometry_control.h"
 #include "nvn_indirect_reset.h"
 #include "nvn_rgba8_compare.h"
+#include "vk_quad.h"
+#include "game_target.h"
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
@@ -466,6 +468,7 @@ void vk_exec_draw_shutdown(void) {
     if (!c) return;
     twins_release(c);
     rgba8_compare_release(c);
+    vk_quad_shutdown();
     for (int i = 0; Z.ready && i < DV_COUNT; i++) {
         if (Z.img[i].sview != Z.img[i].view) vkDestroyImageView(c->device, Z.img[i].sview, NULL);
         vkDestroyImageView(c->device, Z.img[i].view, NULL);
@@ -3238,11 +3241,60 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 // then the established direct-draw index expansion; never reinterpret QUADS as
 // a triangle-list draw or read the stale guest VA. This synchronous fallback is
 // deliberately bounded and logged; it is correctness work, not a speedup.
+static int gpu_quads_graphics(const VkExec *ex) {
+    if (!ex || !ex->prog) return 0;
+    int vertex = 0;
+    for (int stage = GFX_STAGE_VS; stage <= GFX_STAGE_FS; stage++) {
+        const prog_t *source = program_stage_source(ex, stage);
+        if (!source) continue;
+        NVNshaderData shader = {0};
+        int found = program_stage_lookup(source, (unsigned)stage, &shader);
+        if (found < 0) return 0;
+        if (!found) continue;
+        // bound_stage exposes legacy-shaped lowered controls. Admission needs
+        // the original immutable NVN2 control, not that derived representation.
+        if ((stage != GFX_STAGE_VS && stage != GFX_STAGE_FS) || !gfx_shader_is_nvn2(shader.control)) return 0;
+        if (stage == GFX_STAGE_VS) vertex = 1;
+    }
+    return vertex;
+}
+
+static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = cfg_get("TOTK_GPU_QUADS");
+        enabled = value && !strcmp(value, "ab") ? 2 : value ? !strcmp(value, "1") : RT_TARGET_HWAOI;
+    }
+    if (!enabled || (enabled == 2 && !rt_ab()) || !gpu_quads_graphics(ex)) return 0;
+    VkMemSpan source;
+    if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &source) || !source.buffer ||
+        source.avail < sizeof(VkDrawIndirectCommand) || (source.offset & 3)) return 0;
+    VK_MEM_USE(source);
+    VkQuadIndirect converted;
+    if (!vk_quad_indirect_prepare(ex, &source, d->ind, &converted)) return 0;
+    VK_MEM_BOUND(source);
+    vk_mem_count(source.cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
+    vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
+    bind_gen++;
+    ex->dirty |= VK_EXEC_DIRTY_ALL;
+    c0_binst = 0; // NVN2 graphics uses the draw's BaseInstance, as for native indexed indirect
+    __atomic_fetch_add(&vk_exec_frame.quads_gpu, 1, __ATOMIC_RELAXED);
+    if (!prepare_draw(ex, d->prim, INT32_MAX, 0)) return 1;
+    vkCmdBindIndexBuffer(ex->cb, converted.indices, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexedIndirect(ex->cb, converted.arguments, converted.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+    vk_exec_frame.draws++;
+    ex->recorded += 2;
+    note_work(ex, 1, 0);
+    return 1;
+}
+
 static void op_draw_ind(VkExec *ex, const p_draw_ind *d) {
     if (ex->render_disabled) return;
     if (!d->ind || (d->ind & 3) || d->ind > UINT64_MAX - sizeof(VkDrawIndirectCommand))
         rt_fatal("vk: array indirect arguments at %#llx are invalid/alignment overflow", (unsigned long long)d->ind);
     if (d->prim == NVN_DRAW_PRIMITIVE_QUADS) {
+        if (gpu_quads_draw(ex, d)) return;
+        __atomic_fetch_add(&vk_exec_frame.quads_cpu, 1, __ATOMIC_RELAXED);
         VkDrawIndirectCommand a;
         if (!vk_exec_read_buffer(ex, d->ind, sizeof a, &a))
             rt_fatal("vk: cannot read GPU-visible array indirect arguments at %#llx", (unsigned long long)d->ind);

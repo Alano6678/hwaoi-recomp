@@ -29,7 +29,7 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 | ✅ | Opening movies and audio | Both opening movies play through; audio and voices work in the tested opening. |
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
 | 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
-| 🔧 | Combat performance | Major stalls and unbounded command-recording growth have been addressed. Further combat optimization continues. |
+| 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
 | 🧪 | 30 / 60 / 90 / 120 FPS | The native scheduler-unlock candidate exceeds 60 FPS in game. Approximately 120 FPS has been measured in menu/presentation tests; non-60 modes still accelerate gameplay. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |

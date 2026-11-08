@@ -37,6 +37,7 @@ def source(mutation=None):
 #define VK_MEM_USE(s) do { used++; (s).buffer=(VkBuffer)(uintptr_t)0x2222; } while(0)
 #define VK_MEM_BOUND(s) do { bound++; } while(0)
 VkExecFrame vk_exec_frame;
+static int gpu_quads_draw(VkExec *ex,const p_draw_ind *d){(void)ex;(void)d;return 0;}
 static unsigned used,bound,barriers,reads,prepares,draws,indexed,notes,counts;
 static unsigned expected_barriers=1;
 static const char *batch_setting;

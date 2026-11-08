@@ -1,0 +1,29 @@
+// Original GPU conversion of a bounded NVN array-QUADS indirect command.
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) readonly buffer Source { uint words[]; } src;
+layout(set=0,binding=1,std430) buffer Header { uint words[]; } dst;
+layout(push_constant) uniform Params { uint sourceWord; } pc;
+void main() {
+    uvec4 a=uvec4(src.words[pc.sourceWord],src.words[pc.sourceWord+1],src.words[pc.sourceWord+2],src.words[pc.sourceWord+3]);
+    uint n=a.x&~3u;
+    uint error=0u;
+    if(n!=0u && a.y!=0u) {
+        if(n>1048576u) error|=1u;
+        if(a.z>2147483647u) error|=2u;
+        if(a.y>2147483647u) error|=4u;
+        if(a.w>2147483647u) error|=8u;
+        if(n>4294967295u-a.z) error|=16u;
+    }
+    bool drawEnabled=n!=0u && a.y!=0u && error==0u;
+    dst.words[0]=drawEnabled?(n/4u)*6u:0u;
+    dst.words[1]=drawEnabled?a.y:0u;
+    dst.words[2]=0u; // firstIndex
+    dst.words[3]=0u; // vertexOffset: expanded indices retain exact firstVertex semantics
+    dst.words[4]=drawEnabled?a.w:0u;
+    dst.words[5]=drawEnabled?((n/4u+63u)/64u):0u;
+    dst.words[6]=1u; dst.words[7]=1u;
+    dst.words[8]=error;
+    dst.words[9]=a.x; dst.words[10]=a.y; dst.words[11]=a.z; dst.words[12]=a.w;
+    dst.words[13]=0x51554144u;
+}

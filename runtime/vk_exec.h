@@ -159,6 +159,7 @@ typedef struct {
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
     uint64_t indirect_batches;          // full pass breaks avoided for proven read-only indirect draws
+    uint64_t quads_gpu, quads_cpu;       // GPU conversion versus ordered CPU argument fallback
 } VkExecFrame;
 extern VkExecFrame vk_exec_frame;
 void vk_exec_frame_written(const tex_t *t);                    // vk_texture_gpu_written: t rendered or copied into

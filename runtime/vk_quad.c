@@ -1,0 +1,186 @@
+// Original GPU argument/index adapter. No game shader, address or patch is used.
+// GPU-written arguments stay on the GPU; invalid bounded forms draw nothing and
+// report a fatal error from their completion callback, without a CPU fence stall.
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "host.h"
+#include "vk_quad.h"
+#include "platform/platform.h"
+#include "quad_prepare_spv.h"
+#include "quad_expand_spv.h"
+
+#define QUAD_SLOTS 64u
+#define QUAD_SPARES 32u
+#define QUAD_INDEX_BYTES (UINT64_C(1048576) / 4 * 6 * 4)
+
+typedef struct QuadBlock {
+    struct QuadBlock *next;
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    uint8_t *mapped;
+    uint64_t fence, address[QUAD_SLOTS];
+    uint8_t submitted[QUAD_SLOTS];
+    uint32_t used;
+} QuadBlock;
+
+static struct {
+    int tried, ready;
+    VkDevice device;
+    VkDescriptorSetLayout set;
+    VkPipelineLayout layout;
+    VkPipeline prepare, expand;
+    VkBuffer indices;
+    VmaAllocation allocation;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    uint64_t stride;
+} Q;
+static PlatMutex quad_lock = PLAT_MUTEX_INIT;
+static QuadBlock *spares, *current;
+static uint32_t spare_count;
+static uint64_t current_fence;
+
+static void block_free(QuadBlock *b) {
+    vmaDestroyBuffer(vk_ctx()->vma, b->buffer, b->allocation);
+    free(b);
+}
+
+static void block_done(void *arg) {
+    QuadBlock *b = arg;
+    for (uint32_t i = 0; i < b->used; i++) {
+        if (!b->submitted[i]) continue;
+        const volatile uint32_t *w = (const volatile uint32_t *)(b->mapped + i * Q.stride);
+        if (w[13] != 0x51554144u || w[8])
+            rt_fatal("vk: GPU QUADS indirect validation failed: source=%#llx status=%#x marker=%#x "
+                     "vertices=%u instances=%u first=%u base=%u",
+                     (unsigned long long)b->address[i], w[8], w[13], w[9], w[10], w[11], w[12]);
+    }
+    plat_mutex_lock(&quad_lock);
+    int keep = spare_count < QUAD_SPARES;
+    if (keep) { b->next = spares; spares = b; spare_count++; }
+    plat_mutex_unlock(&quad_lock);
+    if (!keep) block_free(b);
+}
+
+static int quad_pipeline(const uint32_t *words, size_t bytes, VkPipeline *pipeline) {
+    VkCtx *c = vk_ctx();
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = words};
+    VkShaderModule module;
+    if (vkCreateShaderModule(c->device, &mi, NULL, &module) != VK_SUCCESS) return 0;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = Q.layout,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                  .module = module, .pName = "main"}};
+    VkResult result = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, pipeline);
+    vkDestroyShaderModule(c->device, module, NULL);
+    return result == VK_SUCCESS;
+}
+
+static int quad_init(void) {
+    if (Q.tried) return Q.ready;
+    Q.tried = 1;
+    VkCtx *c = vk_ctx(); Q.device = c->device;
+    Q.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+    if (!Q.push) return 0;
+    Q.stride = c->props.limits.minStorageBufferOffsetAlignment;
+    if (Q.stride < 256) Q.stride = 256;
+    VkDescriptorSetLayoutBinding binding[3];
+    memset(binding, 0, sizeof binding);
+    for (uint32_t i = 0; i < 3; i++) binding[i] = (VkDescriptorSetLayoutBinding){.binding = i,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 3, .pBindings = binding};
+    if (vkCreateDescriptorSetLayout(c->device, &si, NULL, &Q.set) != VK_SUCCESS) return 0;
+    VkPushConstantRange range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 4};
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &Q.set, .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
+    if (vkCreatePipelineLayout(c->device, &li, NULL, &Q.layout) != VK_SUCCESS) return 0;
+    if (!quad_pipeline(quad_prepare_spv, sizeof quad_prepare_spv, &Q.prepare) ||
+        !quad_pipeline(quad_expand_spv, sizeof quad_expand_spv, &Q.expand)) return 0;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = QUAD_INDEX_BYTES,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &Q.indices, &Q.allocation, NULL) != VK_SUCCESS) return 0;
+    Q.ready = 1;
+    rt_log("vk: GPU QUADS indirect conversion ready; argument readback is unnecessary for NVN2 graphics");
+    return 1;
+}
+
+static QuadBlock *quad_block(VkExec *ex) {
+    // A completion callback can free an old block. Never dereference current
+    // after advancing to another fence, even when the spare cache was full.
+    if (current_fence != ex->fence) current = NULL, current_fence = ex->fence;
+    if (current && current->used < QUAD_SLOTS) return current;
+    plat_mutex_lock(&quad_lock);
+    QuadBlock *b = spares;
+    if (b) spares = b->next, spare_count--;
+    plat_mutex_unlock(&quad_lock);
+    if (!b) {
+        b = calloc(1, sizeof *b);
+        if (!b) return NULL;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = Q.stride * QUAD_SLOTS,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+            .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &b->buffer, &b->allocation, &info) != VK_SUCCESS) { free(b); return NULL; }
+        b->mapped = info.pMappedData;
+    }
+    b->used = 0; b->fence = ex->fence; memset(b->submitted, 0, sizeof b->submitted);
+    vk_completion_add(ex->fence, block_done, b);
+    current = b;
+    return b;
+}
+
+int vk_quad_indirect_prepare(VkExec *ex, const VkMemSpan *source, uint64_t address, VkQuadIndirect *out) {
+    if (!ex || !ex->fence || !source || !out || !source->buffer || source->avail < 16 || (source->offset & 3) ||
+        source->offset > UINT64_MAX - 16 || !quad_init()) return 0;
+    VkCtx *c = vk_ctx();
+    uint64_t alignment = c->props.limits.minStorageBufferOffsetAlignment;
+    if (!alignment) alignment = 1;
+    uint64_t offset = source->offset / alignment * alignment, lead = source->offset - offset;
+    if ((lead & 3) || lead / 4 > UINT32_MAX || lead + 16 > c->props.limits.maxStorageBufferRange) return 0;
+    QuadBlock *b = quad_block(ex);
+    if (!b) return 0;
+    uint32_t slot = b->used++;
+    uint64_t header = slot * Q.stride;
+    memset(b->mapped + header, 0, 64); b->address[slot] = address;
+    VkDescriptorBufferInfo buffer[3] = {{source->buffer, offset, lead + 16}, {b->buffer, header, 64}, {Q.indices, 0, QUAD_INDEX_BYTES}};
+    VkWriteDescriptorSet write[3]; memset(write, 0, sizeof write);
+    for (uint32_t i = 0; i < 3; i++) write[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &buffer[i]};
+    vk_exec_barrier(ex); // producers + the previous draw's index reads precede conversion/reuse
+    rec_push(Q.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.layout, 0, 3, write);
+    uint32_t word = (uint32_t)(lead / 4);
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.prepare);
+    vkCmdPushConstants(ex->cb, Q.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &word);
+    vkCmdDispatch(ex->cb, 1, 1, 1);
+    VkMemoryBarrier2 memory = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &memory};
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.expand);
+    vkCmdDispatchIndirect(ex->cb, b->buffer, header + 20);
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    b->submitted[slot] = 1;
+    ex->recorded += 8;
+    *out = (VkQuadIndirect){Q.indices, b->buffer, header};
+    return 1;
+}
+
+void vk_quad_shutdown(void) {
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    while (spares) { QuadBlock *b = spares; spares = b->next; block_free(b); }
+    spare_count = 0; current = NULL; current_fence = 0;
+    if (Q.indices) vmaDestroyBuffer(c->vma, Q.indices, Q.allocation);
+    if (Q.prepare) vkDestroyPipeline(c->device, Q.prepare, NULL);
+    if (Q.expand) vkDestroyPipeline(c->device, Q.expand, NULL);
+    if (Q.layout) vkDestroyPipelineLayout(c->device, Q.layout, NULL);
+    if (Q.set) vkDestroyDescriptorSetLayout(c->device, Q.set, NULL);
+    memset(&Q, 0, sizeof Q);
+}
