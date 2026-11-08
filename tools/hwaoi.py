@@ -121,11 +121,20 @@ def rate_profile(exefs):
     need(module.sha256 == expected, "rate profile: main SHA-256 mismatch")
     entries = [line.split("#", 1)[0].split() for line in patch.read_text(encoding="utf-8").splitlines()]
     sites = [f for f in entries if f and f[0] == "site"]
-    need(len(sites) == 1 and len(sites[0]) == 15 and sites[0][:3] == ["site", "hwaoi_rate", "main"],
-         "rate profile: expected one verified scheduler site")
-    site = sites[0]; address, original = int(site[3], 16), int(site[4], 16)
-    need(address == 0x6c281c and struct.unpack("<I", module.code(address, 4))[0] == original,
-         "rate profile: scheduler instruction mismatch")
+    expected_sites = {0x6c281c: ("hwaoi_rate", 0xb9403368, 15),
+                      0x6c2b50: ("hwaoi_step", 0xbd403d00, 30),
+                      0x6c2b80: ("hwaoi_step", 0x1e201820, 26)}
+    need(len(sites) == len(expected_sites), "rate profile: expected three verified scheduler/step sites")
+    seen = set()
+    for site in sites:
+        address, original = int(site[3], 16), int(site[4], 16)
+        expected_site = expected_sites.get(address)
+        need(expected_site is not None and address not in seen and
+             (site[1], original, len(site)) == expected_site and site[2] == "main",
+             "rate profile: unexpected scheduler/step site")
+        need(struct.unpack("<I", module.code(address, 4))[0] == original,
+             f"rate profile: scheduler/step instruction mismatch at main+{address:#x}")
+        seen.add(address)
     return patch
 
 
@@ -290,7 +299,7 @@ def launch_interactive(args, identity):
         options["HWAOI_SCENE_SHARPNESS"] = env["HWAOI_SCENE_SHARPNESS"] = args.scene_sharpness
     # Retain selected inherited diagnostics in the private launch report.
     for key in ("HWAOI_OUTPUT_RES", "HWAOI_SCENE_RES", "HWAOI_FPS_LIMIT", "HWAOI_EXPERIMENTAL_RATE", "HWAOI_APP_POOL", "HWAOI_VK_PRESENT", "HWAOI_DISPLAY_POOL_TEST",
-                "HWAOI_GPU_WRITE_DIAG", "HWAOI_GPU_READBACK_DIAG", "HWAOI_GPU_QUADS", "HWAOI_INDIRECT_BATCH", "HWAOI_UI_DRAW_DIAG", "HWAOI_RUNTIME_MEMORY_DIAG", "HWAOI_VK_VALIDATION",
+                "HWAOI_GPU_WRITE_DIAG", "HWAOI_GPU_READBACK_DIAG", "HWAOI_GPU_QUADS", "HWAOI_INDIRECT_BATCH", "HWAOI_UI_DRAW_DIAG", "HWAOI_RUNTIME_MEMORY_DIAG", "HWAOI_RATE_DIAG", "HWAOI_RATE_UNLOCK", "HWAOI_VK_VALIDATION",
                 "VK_LAYER_PATH", "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO", "HWAOI_DUMP_TRIGGER",
                 "HWAOI_DUMP_TEX", "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_METADATA", "HWAOI_SCENE_SHARPNESS", "HWAOI_NATIVE_1080",
                 "DKB_SHADER_DUMP"):

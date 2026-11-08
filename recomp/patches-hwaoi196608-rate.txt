@@ -5,6 +5,21 @@
 # Override only nodes configured at 60 Hz. Preserve all other timer rates.
 # x9/x10 are dead before GetSystemTickFrequency at 6c2830. The equality mask
 # CLZ(old^60)>>5 selects the target without changing NZCV. Page+0xb0 is a u32.
-# Experimental until native game-speed qualification is complete.
+# A live trace of this exact build at 120 Hz still inherited 1/60 s from
+# [parent+0x3c], so changing only the wait doubles game speed. Scale inherited
+# steps by node_elapsed_seconds*60, preserving the parent's intentional time scale.
+# At both sites x0 is the post-wait tick, x28 the previous tick, x26 frequency.
+# This is the same clock subtraction as the original variable-step branch at
+# 6c2b60, independent of how many updates run between two display presents.
+# Both new paths cap elapsed time at 1/15 s to bound long stalls/loading gaps.
+# The no-parent fixed-step path instead selects bounded elapsed seconds directly.
+# The no-parent variable-step path already measures elapsed ticks and stays intact.
+# Only original 60-Hz nodes change. x8/x12/x13 and s1/s2 are dead across both
+# sites. No present-time feedback or global clock scaling is used.
+# Neither alternative changes NZCV, the live x9 controller or x10 node pointer.
+# Experimental until animation, movement and combat speed qualification is complete.
 set hwaoi_rate TOTK_RATE_UNLOCK 0
 site hwaoi_rate main 006c281c b9403368 b9403368 @page:x9 b940b129 521e0d0a 5ac0114a 53057d4a 4b0a03ea 4a080129 0a0a0129 4a090108
+set hwaoi_step TOTK_RATE_UNLOCK 0
+site hwaoi_step main 006c2b50 bd403d00 bd403d00 cb1c000c 9e630181 9e630342 1e621821 1e624021 5291112d 72a7b10d 1e2701a2 1e225821 5280078d 1e2301a2 1e220821 1e26002c b9403148 521e0d08 5ac01108 53057d08 4b0803e8 52a7f00d 4a0d018c 0a08018c 4a0d018c 1e270181 1e210800
+site hwaoi_step main 006c2b80 1e201820 1e201820 cb1c000c 9e630181 9e630342 1e621821 1e624021 5291112d 72a7b10d 1e2701a2 1e225821 1e26000c b9403148 521e0d08 5ac01108 53057d08 4b0803e8 1e26002d 4a0c01ad 0a0801ad 4a0d018c 1e270180

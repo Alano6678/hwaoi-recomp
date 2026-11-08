@@ -217,6 +217,42 @@ static RateClockSite rate_clock_sites[1024];
 static _Atomic uint64_t rate_clock_overflow;
 static _Atomic int rate_clock_enabled = -1;
 
+// HWAoI's scheduler can take its step from a parent, a measured interval, or
+// 1/requested_Hz. Observe those inputs without changing any guest clock/data.
+// Only its once-per-node clock call is sampled, never the inner pacing loop.
+typedef struct {
+    uint64_t node, parent, calls, window_start_ns;
+    double sum_seconds;
+    uint32_t original_hz, requested_hz, flags;
+    float seconds, parent_seconds;
+} RateNode;
+static RateNode rate_nodes[32];
+static PlatMutex rate_node_lock = PLAT_MUTEX_INIT;
+
+static void rate_node_observe(const Cpu *c) {
+    if (!RT_TARGET_HWAOI) return;
+    const RtLoaded *main = ldr_module(0);
+    if (!main || strcmp(main->name, "main") || c->x[30] != main->base + 0x6c2854) return;
+    RateNode value = {.node = c->x[27], .requested_hz = (uint32_t)c->x[19]};
+    if (!value.node || value.node > UINT64_MAX - 0x34 || c->sp > UINT64_MAX - 0x30 ||
+        !plat_mem_read(value.node + 0x30, &value.original_hz, 4) ||
+        !plat_mem_read(value.node + 0x18, &value.seconds, 4) ||
+        !plat_mem_read(c->sp + 0x28, &value.parent, 8) ||
+        !plat_mem_read(c->sp + 0xc, &value.flags, 4)) return;
+    if (value.parent && (value.parent > UINT64_MAX - 0x40 ||
+        !plat_mem_read(value.parent + 0x3c, &value.parent_seconds, 4))) return;
+    plat_mutex_lock(&rate_node_lock);
+    for (unsigned i = 0; i < 32; i++) {
+        if (rate_nodes[i].node && rate_nodes[i].node != value.node) continue;
+        value.calls = rate_nodes[i].calls + 1;
+        value.window_start_ns = rate_nodes[i].window_start_ns ? rate_nodes[i].window_start_ns : kern_now_ns();
+        value.sum_seconds = rate_nodes[i].sum_seconds + value.seconds;
+        rate_nodes[i] = value;
+        break;
+    }
+    plat_mutex_unlock(&rate_node_lock);
+}
+
 static int rate_clock_on(void) {
     int on = atomic_load_explicit(&rate_clock_enabled, memory_order_relaxed);
     if (on < 0) {
@@ -230,6 +266,7 @@ static int rate_clock_on(void) {
 static void rate_clock_observe(void) {
     Cpu *c = kern_cpu();
     if (!c || !c->x[30] || (c->x[30] & 3)) return;
+    rate_node_observe(c);
     uint64_t lr = c->x[30];
     unsigned hash = (unsigned)((lr >> 2) ^ (lr >> 14)) & 1023;
     for (unsigned n = 0; n < 8; n++) {
@@ -262,6 +299,27 @@ static void rate_clock_observe(void) {
 
 void hwaoi_rate_diagnostic_frame(uint64_t frame) {
     if (!rate_clock_on() || frame % 120) return;
+    RateNode nodes[32];
+    uint64_t node_now = kern_now_ns();
+    plat_mutex_lock(&rate_node_lock);
+    memcpy(nodes, rate_nodes, sizeof nodes);
+    for (unsigned i = 0; i < 32; i++) {
+        rate_nodes[i].calls = 0;
+        rate_nodes[i].sum_seconds = 0;
+        rate_nodes[i].window_start_ns = node_now;
+    }
+    plat_mutex_unlock(&rate_node_lock);
+    for (unsigned i = 0; i < 32; i++) {
+        const RateNode *s = &nodes[i];
+        if (s->calls) rt_log("rate-node: node=%#llx calls=%llu original_hz=%u requested_hz=%u "
+                            "last_seconds=%.9g parent=%#llx parent_seconds=%.9g fixed=%u "
+                            "step_sum=%.6f wall=%.6f",
+                            (unsigned long long)s->node, (unsigned long long)s->calls,
+                            s->original_hz, s->requested_hz, (double)s->seconds,
+                            (unsigned long long)s->parent, (double)s->parent_seconds, s->flags & 1,
+                            s->sum_seconds, node_now > s->window_start_ns ?
+                            (node_now - s->window_start_ns) * 1e-9 : 0.0);
+    }
     uint64_t counts[20] = {0}, total = 0;
     RateClockSite *sites[20] = {0};
     for (unsigned n = 0; n < 1024; n++) {

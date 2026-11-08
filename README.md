@@ -13,12 +13,12 @@ The game's ARM64 code is translated to C ahead of time and compiled with a C/C++
 
 ## Current status
 
-**Early development build — updated November 8, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
+**Early development build — updated November 9, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
 
 Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
 
 > [!WARNING]
-> **Frame-rate modes other than 60 FPS currently accelerate gameplay.** Game-speed correction is still in progress.
+> **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
 >
 > **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
 
@@ -30,7 +30,7 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
 | 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
 | 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
-| 🧪 | 30 / 60 / 90 / 120 FPS | The native scheduler-unlock candidate exceeds 60 FPS in game. Approximately 120 FPS has been measured in menu/presentation tests; non-60 modes still accelerate gameplay. |
+| 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets; movement still has a separate frame-dependent speed error. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
 
@@ -63,7 +63,7 @@ The experimental native frame-rate profile is generated with:
 python tools/hwaoi.py generate --rate-unlock --out work/generated/hwaoi196608-full --limit 0 --jobs 2
 ```
 
-After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It remains off by default while game-speed correction is being tested. The frame-rate target can then be selected in the host settings.
+After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It remains off by default while gameplay timing is being tested. The frame-rate target can then be selected in the host settings. Older generations without the matching step profile must be regenerated. `HWAOI_RATE_DIAG=1` optionally logs scheduler-step totals against wall time without altering the clock.
 
 Press **Esc** for host settings, **F10** to cycle the performance overlay, and **F11** for fullscreen. Resolution changes require a restart. Actual FPS depends on the scene, hardware and selected resolution.
 

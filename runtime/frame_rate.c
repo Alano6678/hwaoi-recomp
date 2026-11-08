@@ -75,6 +75,8 @@ void frame_step_init(void) {
         const char *requested = cfg_get("TOTK_RATE_UNLOCK");
         if (rate < 0 && requested && !strcmp(requested, "1"))
             rt_fatal("frame rate: native unlock requires the exact-build HWAoI rate profile; regenerate first");
+        if (rt_patch_enabled(rate) != rt_patch_enabled(rt_patch_set("hwaoi_step")))
+            rt_fatal("frame rate: HWAoI native unlock requires the matching step profile; regenerate first");
         if (rt_patch_enabled(rate)) {
             uint8_t *page = rt_patch_page();
             if (!page) rt_fatal("frame rate: native rate patch page unavailable");
@@ -82,7 +84,7 @@ void frame_step_init(void) {
         }
         frame_limit_live();
         rt_log("frame rate: HWAoI %s", hwaoi_rate_word ?
-               "native 60-Hz scheduler nodes use the requested rate; game-speed qualification pending" :
+               "native 60-Hz nodes use the requested rate and node-local elapsed step; gameplay qualification pending" :
                "original game clock; host presentation cap is independent");
         return;
     }
@@ -150,7 +152,7 @@ static void frame_limit_live(void) {
     if (RT_TARGET_HWAOI) {
         if (hwaoi_rate_word) atomic_store_explicit(hwaoi_rate_word, (uint32_t)hz, memory_order_release);
         rt_log("frame rate: HWAoI %s target %d fps%s", hwaoi_rate_word ? "native scheduler" : "presentation", hz,
-               hz > 60 ? " (experimental; original game clock retained)" : "");
+               hwaoi_rate_word ? " (experimental node-local elapsed step)" : "");
         return;
     }
     if (fps60_set == -2) fps60_set = rt_patch_set("fps60");

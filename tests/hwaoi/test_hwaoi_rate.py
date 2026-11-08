@@ -14,6 +14,66 @@ from nvn2_compute_c0_test import function
 
 @unittest.skipUnless(os.name=="nt" and CC.is_file(),"Windows Clang required")
 class HwaoiRateTests(unittest.TestCase):
+    def test_native_step_profile_guard_and_live_rate_word(self):
+        source = r'''
+#include <assert.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "frame_rate.c"
+const int rt_game_version=0;
+uint64_t rt_guest_start_ns;unsigned rt_trace;
+static uint8_t page[4096];static unsigned version=1;static const char *rate="60";
+static int has_step=1,rate_on=1;
+const char *cfg_get(const char *key){
+ if(!strcmp(key,"TOTK_RATE_UNLOCK"))return "1";
+ if(!strcmp(key,"TOTK_FPS_LIMIT"))return rate;
+ return NULL;
+}
+unsigned cfg_version(void){return version;}
+int rt_patch_set(const char *name){return !strcmp(name,"hwaoi_rate")?0:!strcmp(name,"hwaoi_step")&&has_step?1:-1;}
+int rt_patch_enabled(int set){return set==0?rate_on:set==1;}
+void *rt_patch_page(void){return page;}
+void rt_patch_disable(int set){(void)set;assert(0);}
+void rt_patch_switch(int set,int on){(void)set;(void)on;assert(0);}
+double gfx_window_refresh_hz(void){return 60;}
+uint64_t kern_now_ns(void){return 0;}
+int plat_mem_read(uint64_t a,void *out,size_t n){(void)a;(void)out;(void)n;assert(0);return 0;}
+void rt_log(const char *fmt,...){(void)fmt;}
+void rt_fatal(const char *fmt,...){(void)fmt;exit(73);}
+int main(int argc,char **argv){
+ assert(argc==2);if(!strcmp(argv[1],"stale"))has_step=0;
+ if(!strcmp(argv[1],"step_only"))rate_on=0;
+ memset(page,0xa5,sizeof page);frame_step_init();assert(has_step&&rate_on);
+ assert(!frame_step_realtime()&&frame_step_native_rate()); // node clock, no borrowed host/TotK clock
+ uint64_t now=1000000000;frame_step_present(now,1);
+ const char *rates[]={"30","60","90","120","60"};
+ const unsigned hz[]={30,60,90,120,60};
+ for(unsigned r=0;r<5;r++){
+  rate=rates[r];version++;frame_step_cap_ns();
+  assert(*(uint32_t*)(page+0xb0)==hz[r]);
+  frame_step_present(now,1);
+  for(unsigned i=0;i<8;i++){now+=1000000000/hz[r];frame_step_present(now,1);}
+ }
+ // Presents and loading gaps never write a guessed step into another game's
+ // patch words. Only the native scheduler's target word is host-controlled.
+ now+=1000000000;frame_step_present(now,1);
+ for(unsigned i=0;i<sizeof page;i++)if(i<0xb0||i>=0xb4)assert(page[i]==0xa5);
+ puts("native step guard and live rate word passed");return 0;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="hwaoi-measured-step-") as tmp:
+            folder=Path(tmp); path=folder/"fixture.c";path.write_text(source,encoding="utf-8")
+            (folder/"layout.h").write_text("#define MOD_MAIN_BASE 0x7000000000ull\n",encoding="ascii")
+            for opt in ("-O0","-O2"):
+                exe=folder/"fixture.exe"
+                result=subprocess.run([str(CC),opt,"-march=x86-64-v3","-I",str(ROOT/"runtime"),"-I",str(folder),str(path),"-o",str(exe)],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                for mode,code in (("good",0),("stale",73),("step_only",73)):
+                    result=subprocess.run([str(exe),mode],capture_output=True,text=True,timeout=10)
+                    self.assertEqual(result.returncode,code,result.stdout+result.stderr)
+
     def test_actual_present_policy_and_default_behavior(self):
         policy=function((ROOT/"runtime/nvn_api_obj.c").read_text(encoding="utf-8"),"static uint64_t present_period(")
         source=r'''
