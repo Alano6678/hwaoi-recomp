@@ -42,6 +42,9 @@ class CompilerCacheTests(unittest.TestCase):
             self.assertEqual((out / "work/saves/DATA.BIN").read_bytes(), b"keep save")
             with self.assertRaises(ValueError):
                 cache.inside(out, "../escape")
+            # Deferred bundle inputs still fail their hash check before replacing a working file.
+            with self.assertRaisesRegex(ValueError, "hash check"):
+                cache.synchronize(bundle, out, {"source/runtime/a.c": "0" * 64}, dest, Path("work/backups/bad"))
 
     def test_stable_tool_paths_and_identity_change_on_repair(self):
         with tempfile.TemporaryDirectory() as tmp:

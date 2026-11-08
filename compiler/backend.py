@@ -35,15 +35,19 @@ def save(path, value):
     pending.replace(path)
 
 
-def bundle_check(bundle):
-    """Verify the exact shipped file set, including the compiler and translator."""
+def bundle_check(bundle, *, defer_materialized=False):
+    """Validate the bundle; build-only inputs may be hash-checked during synchronization."""
     bundle = Path(bundle).resolve(strict=True)
     manifest = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))
     require(manifest.get("format") == "hwaoi-compiler-v1", "Unsupported compiler bundle")
     for relative, expected in manifest["files"].items():
         path = (bundle / relative).resolve()
         require(path.is_relative_to(bundle) and path.is_file(), f"Missing bundle file: {relative}")
-        require(hwaoi.sha256(path) == expected, f"Bundle file changed: {relative}. Extract the ZIP again.")
+        critical_source = relative.startswith(("source/compiler/", "source/tools/hwrecomp/", "source/config/games/")) or relative == "source/tools/hwaoi.py"
+        deferred = defer_materialized and not critical_source and (relative.startswith(("source/", "llvm/", "deps/", "translator/")) or
+                                           relative in ("bin/ninja.exe", "bin/zlib1.dll"))
+        if not deferred:
+            require(hwaoi.sha256(path) == expected, f"Bundle file changed: {relative}. Extract the ZIP again.")
     for relative in ("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe",
                      "bin/zlib1.dll", "translator/totk_xlate.exe", "translator/totk_xlate.id",
                      "deps/include/vma/vk_mem_alloc.h", "source/tools/hwaoi.py"):
@@ -117,12 +121,15 @@ class Tee:
 
 
 def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False):
+    started = time.perf_counter()
     require(os.name == "nt" and platform.machine().lower() in ("amd64", "x86_64"), "Windows x64 is required")
     require(0 <= jobs <= 8 and resolution in RESOLUTIONS, "Invalid build settings")
     bundle = Path(bundle).resolve(strict=True)
     nup = Path(nup).resolve(strict=True)
     print("[1/6] Checking compiler files and game identity...", flush=True)
-    manifest = bundle_check(bundle)
+    manifest = bundle_check(bundle, defer_materialized=True)
+    checked = time.perf_counter()
+    print(f"  Bundle preflight: {checked - started:.2f}s; managed inputs verified before use.", flush=True)
     identity = inspect_nup(nup)
     before = nup.stat()
     output = Path(output).resolve()
@@ -160,17 +167,21 @@ def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False):
         save(marker, state)
         backup = Path("work/backups") / f"compiler-{time.time_ns()}"
         sources = {p: sha for p, sha in manifest["files"].items() if p.startswith("source/")}
+        syncing = time.perf_counter()
         cache.synchronize(bundle, output, sources, lambda p: Path(p).relative_to("source"), backup, state.get("source_files"))
         state["source_files"] = sources
         toolchain_stamp = cache.prepare_tools(bundle, output, manifest, backup)
+        print(f"  Source/tool synchronization: {time.perf_counter() - syncing:.2f}s", flush=True)
+        state["setup_timings"] = {"preflight": round(checked - started, 3),
+                                  "source_tools": round(time.perf_counter() - syncing, 3)}
         save(marker, state)
         with (output / "compiler.log").open("a", encoding="utf-8") as log, contextlib.redirect_stdout(Tee(sys.stdout, log)):
-            return build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp)
+            return build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp, started)
 
 
-def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp):
+def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp, total_started):
     started = time.perf_counter()
-    timings = {}
+    timings = dict(state.get("setup_timings", {}))
     def done(stage, began):
         timings[stage] = round(time.perf_counter() - began, 3)
         state["timings"] = timings
@@ -256,6 +267,7 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
         require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "Source NUP changed during build")
         state.update(status="complete", executable_sha256=hwaoi.sha256(game / "hwaoi.exe"))
         state["timings"]["stages_total"] = round(time.perf_counter() - started, 3)
+        state["timings"]["total"] = round(time.perf_counter() - total_started, 3)
         save(output / STATE, state)
         print("BUILD COMPLETE. Use Open compiled game in the compiler window.\n"
               "Keep the NUP at its original location: the game reads resources from it.\n"

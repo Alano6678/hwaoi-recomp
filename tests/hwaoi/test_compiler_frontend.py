@@ -37,6 +37,10 @@ class CompilerFrontendTests(unittest.TestCase):
             (root / "bin/ninja.exe").write_bytes(b"different")
             with self.assertRaisesRegex(ValueError, "changed"):
                 backend.bundle_check(root)
+            backend.bundle_check(root, defer_materialized=True)  # unused compiler input is verified by synchronization
+            (root / "source/tools/hwaoi.py").write_bytes(b"changed validator")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                backend.bundle_check(root, defer_materialized=True)
             manifest = self.bundle(root)
             del manifest["files"]["bin/ninja.exe"]
             (root / "bundle.json").write_text(json.dumps(manifest))

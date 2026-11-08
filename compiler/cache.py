@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+from functools import lru_cache
 
 STATE = "hwaoi-compiler.json"
 
@@ -33,9 +34,15 @@ def write_changed(path, data):
     pending.replace(path)
 
 
+@lru_cache(maxsize=32)
+def canonical_root(root):
+    return root.resolve()
+
+
 def inside(root, relative):
-    path = (root / relative).resolve()
-    require(path != root.resolve() and path.is_relative_to(root.resolve()), "Workspace path escaped its output folder")
+    boundary = canonical_root(root)
+    path = (boundary / relative).resolve()
+    require(path != boundary and path.is_relative_to(boundary), "Workspace path escaped its output folder")
     return path
 
 
