@@ -319,6 +319,10 @@ def launch_interactive(args, identity):
         script = local_output(args.input_script, "reports").resolve(strict=True)
         need(script.is_file(), "diagnostic input script must be a local file under work/reports")
         options["HWAOI_INPUT_SCRIPT"] = env["HWAOI_INPUT_SCRIPT"] = str(script)
+    if args.no_captures:
+        for key in ("HWAOI_SHOTS", "HWAOI_SHOTS_DIR", "HWAOI_SHOTS_FULL", "HWAOI_SHOTS_LATEST"):
+            options.pop(key, None)
+            env.pop(key, None)
     report = {"stage": "interactive experimental launch", "executable": str(exe), "sha256": sha256(exe),
               "exefs_sha256": identity["exefs_sha256"], "runtime_options": options,
               "dependencies": {"translator": sha256(translator), "zlib": sha256(zlib)},
@@ -372,6 +376,7 @@ def main(argv=None):
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
     launch.add_argument("--input-feed", type=Path, help="opt-in expiring diagnostic controls under work/reports")
     launch.add_argument("--input", dest="input_mode", choices=("auto", "keyboard", "none"), default="auto", help="physical input policy; diagnostic scripts/feed remain available")
+    launch.add_argument("--no-captures", action="store_true", help="disable automatic diagnostic screenshots for normal play")
     launch.add_argument("--scene-sharpness", type=scene_sharpness, help="experimental 3D sharpening strength 0..100, or game for original parameters (default)")
     launch.add_argument("--experimental-rate-control", action="store_true", help="opt-in unqualified 30/60/90/120 presentation-rate experiments")
     launch.add_argument("--resolution", choices=("1280x720", "1920x1080", "2560x1440", "3840x2160"), help="native game resolution; non-1080p modes remain experimental; requires display-settings generation")

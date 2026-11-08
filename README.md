@@ -38,7 +38,11 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 
 ## Trying the development build
 
-This is currently a source/development workflow. The inherited upstream installers and release scripts are not HWAoI-ready.
+The [Releases page](https://github.com/Alano6678/hwaoi-recomp/releases) provides an experimental Windows x64 compiler package. Extract the complete ZIP, open **HWAoI-Compiler.exe**, select your own matching **NUP** and a new output folder, then click **Compile game**. Python, the C/C++ toolchain and the shader translator are bundled; no separate tool installation is needed.
+
+After compilation, use **Open compiled game**. Keep the NUP and output folder at their original locations. Allow at least **20 GiB of free output space**; an AVX2 CPU, Vulkan GPU and sufficient memory are required (32 GiB RAM recommended). The compiler accepts only the exact build below; encrypted XCI/NSP files and other versions are unsupported. The resulting local game files are not for redistribution.
+
+Source builds remain available. The inherited upstream installers and release scripts are not HWAoI-ready; this fork uses its own compiler frontend.
 
 Only the exact build recorded in [the HWAoI game profile](config/games/hwaoi-update-196608.json) is accepted. The tools check the title and module hashes before selecting game-specific patches, and leave the original game package unchanged.
 

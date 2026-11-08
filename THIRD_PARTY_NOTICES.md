@@ -1,5 +1,20 @@
 # Third-party notices
 
+## HWAoI portable compiler preview
+
+The HWAoI compiler ZIP is assembled by `tools/package_hwaoi_compiler.py`, independently
+of the historical upstream release scripts. It includes the fork source and licenses,
+CPython 3.12.10 with Tcl/Tk, NumPy 2.5.4, lz4 4.4.5 and python-zstandard 0.25.0;
+llvm-mingw 20261020; Ninja 1.13.2; SDL3, Opus, libvpx, Zstandard, Vulkan headers/import
+library and Vulkan Memory Allocator from the versions listed below; and native zlib.
+The HWAoI shader translator is a managed, self-contained Windows x64 build, with
+the .NET 10 runtime and its dependencies. It contains no game shaders or game code.
+The package retains component license texts under `licenses/`, `python/`, `llvm/`
+and `source/`, including .NET notices and Python wheel notices. `bundle.json`
+records the SHA-256 of every shipped file and the fork source revision.
+No ROMs, keys, firmware, extracted modules, generated game C or built games are included.
+The release's `START-HERE.txt` describes supported inputs and the local build workflow.
+
 ## HWAoI fork base
 
 This repository imports DKB Recomp from https://github.com/Lucas-blip-png/dkb-pc-recomp

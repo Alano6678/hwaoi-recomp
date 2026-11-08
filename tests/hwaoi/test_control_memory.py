@@ -18,11 +18,17 @@ class ControlMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hwaoi-control-memory-") as temporary:
             directory = Path(temporary)
             source = (ROOT / "runtime/nvn_api_cmd.c").read_text(encoding="utf-8")
-            old = subprocess.check_output(["git", "show", "HEAD:runtime/nvn_api_cmd.c"], cwd=ROOT).decode("utf-8")
             declaration = "NVN_API(nvnCommandBufferEndRecording)"
-            # RED isolates the old exhaustion behavior while keeping the same current diagnostic counters/providers.
+            # Self-contained negative control: omit exhaustion accounting while
+            # retaining the actual recorder/counters/providers. No moving HEAD
+            # reference or Git installation is needed to detect a regression.
+            current = function(source, declaration)
+            start = current.index("    // Checking only ctl_size")
+            end = current.index("    put_hdr(", start)
+            omitted = current[:start] + ("    if (!o->ctl_size) memory_event(c, o, "
+                                        "NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, MIN_CONTROL_SIZE);\n") + current[end:]
             baseline = directory / "old-exhaustion.c"
-            baseline.write_text(source.replace(function(source, declaration), function(old, declaration)), encoding="utf-8")
+            baseline.write_text(source.replace(current, omitted), encoding="utf-8")
             for optimization in ("0", "2"):
                 for name, production in (("working", ROOT / "runtime/nvn_api_cmd.c"), ("baseline", baseline)):
                     executable = directory / f"{name}-o{optimization}.exe"
