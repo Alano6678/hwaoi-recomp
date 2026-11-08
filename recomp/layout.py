@@ -10,6 +10,7 @@ main, subsdk0..9, sdk. Each base is aligned to 2 MiB. Everything must stay below
 IPC buffers can encode.
 """
 import json
+import os
 from pathlib import Path
 
 from nso import Nso
@@ -44,7 +45,13 @@ def write(mods, outdir):
     """layout.json for Python tools and layout.h for the runtime."""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / 'layout.json').write_text(json.dumps(
+    def changed(path, text):
+        if path.is_file() and path.read_text(encoding='utf-8') == text:
+            return
+        pending = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        pending.write_text(text, encoding='utf-8')
+        pending.replace(path)
+    changed(outdir / 'layout.json', json.dumps(
         [{'name': n, 'base': f'{b:#x}', 'size': f'{s:#x}'} for n, b, s in mods], indent=1) + '\n')
     lines = ['// Module layout chosen by recomp/layout.py. Generated; do not edit.', '#pragma once', '']
     for n, b, s in mods:
@@ -52,7 +59,7 @@ def write(mods, outdir):
         lines.append(f'#define MOD_{n.upper()}_SIZE {s:#x}ull')
     lines += ['', f'#define MOD_COUNT {len(mods)}',
               '#define MOD_LIST(X) ' + ' '.join(f'X({n}, {n.upper()})' for n, _, _ in mods), '']
-    (outdir / 'layout.h').write_text('\n'.join(lines))
+    changed(outdir / 'layout.h', '\n'.join(lines))
 
 
 def read(outdir):

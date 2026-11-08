@@ -370,7 +370,8 @@ def main(argv=None):
     build.add_argument("--deps", type=Path, required=True, help="Existing include/lib/bin runtime dependency tree")
     build.add_argument("--toolchain", type=Path, default=Path("F:/llvm-mingw"))
     build.add_argument("--ninja", type=Path, default=Path("F:/Ninja/ninja.exe"))
-    build.add_argument("--jobs", type=int, default=2)
+    build.add_argument("--jobs", type=int, default=0, help="0 selects workers from available RAM/commit; 1..8 sets a ceiling")
+    build.add_argument("--toolchain-stamp", type=Path, help="compiler/dependency identity for incremental builds")
     launch = sub.add_parser("launch", help="Open the experimental game with live input and local logs")
     launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/hwaoi.exe")
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
@@ -457,13 +458,17 @@ def main(argv=None):
                 need((args.romfs / ("cache.bin" if storage.get("storage") == "nup-cache-v1" else "romfs.bin")).is_file(),
                      "prepared HWAoI RomFS storage is missing")
                 need(args.deps.is_dir() and args.ninja.is_file(), "runtime dependency tree or Ninja missing")
-                need(1 <= args.jobs <= 8, "build jobs must be in 1..8")
+                need(0 <= args.jobs <= 8, "build jobs must be 0 (automatic) or in 1..8")
                 out = local_output(args.out, "build")
-                run([sys.executable, ROOT / "tools/build_game.py", "--version", BUILD_NAME,
+                command = [sys.executable, ROOT / "tools/build_game.py", "--version", BUILD_NAME,
                      "--gen", generated, "--out", out, "--expected", generated / "expected.json",
                      "--exefs", args.exefs.resolve(), "--romfs", args.romfs.resolve(),
                      "--profile", ROOT / "work/saves/hwaoi196608", "--toolchain", args.toolchain,
-                     "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build"])
+                     "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build"]
+                if args.toolchain_stamp:
+                    need(args.toolchain_stamp.is_file(), "toolchain identity stamp is missing")
+                    command += ["--toolchain-stamp", args.toolchain_stamp.resolve()]
+                run(command)
                 report = {"stage": "linked experimental runtime", "output": str(out),
                           "game_boot_enabled": False, "experimental_interactive_command": "python tools/hwaoi.py launch",
                           "playable": False, "sha256": sha256(out / "hwaoi.exe"),

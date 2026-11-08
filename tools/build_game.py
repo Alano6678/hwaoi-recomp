@@ -37,8 +37,8 @@ objects Ninja just rebuilt (new mtime). A mismatch deletes the object, Ninja rec
 summary line. A fork checks the hardlinked generated objects against build/<version>/obj/objects.sha256 (read-only; a
 bad shared object stops the fork and asks for a main build run, which recompiles it and breaks the shared inode).
 
-Compile jobs share a memory budget (MEM_BUDGET, default the smaller of 50 GiB and 80% of RAM) at JOB_MEM per job, so a
-big machine does not run out of memory on the largest chunks. Each phase reports its wall time and the peak memory
+Compile concurrency uses available physical RAM and system commit. One large unit is budgeted at 2.5 GiB, other
+workers at 512 MiB, plus 1 GiB headroom; C units over 4 MiB use a one-job pool. Each phase reports its wall time and peak memory
 of its processes (Windows job object accounting: committed private bytes).
 
 --ninja PATH names the Ninja to run; without MSYS2 the bin/ninja.exe of the release folder (tools/make_release.py) is used.
@@ -67,6 +67,7 @@ import urllib.request
 from pathlib import Path
 
 import romfs_index
+import hostmem
 from build_shaders import stale as stale_shaders
 from check_content import GENERATED_MARKER
 
@@ -157,6 +158,15 @@ GiB = 1 << 30
 # (295k-entry tables). 768 MiB leaves headroom for the largest file.
 JOB_MEM = 768 << 20
 MEM_BUDGET = 50 * GiB  # total for all compile jobs
+
+
+def compile_jobs(requested, cpus, available):
+    """One large HWAoI compile can use 2.2 GiB; budget for it and the small workers."""
+    if requested < 0 or requested > 8:
+        raise ValueError('jobs must be 0 (automatic) or 1..8')
+    budget = max(0, available - GiB)
+    safe = max(1, 1 + (budget - (2560 << 20)) // (512 << 20))
+    return max(1, min(requested or 8, cpus, safe))
 
 
 def below_root(p):
@@ -310,7 +320,7 @@ def port_version():
     return path.read_text(encoding='utf-8').strip() if path.is_file() else 'unknown'
 
 
-def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=None, make_lib=False):
+def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=None, make_lib=False, toolchain_stamp=None):
     """build.ninja text, and the object lists per module. With prebuilt the generated objects already exist in
     out/obj and are link inputs without a compile edge. runtime_lib: a prebuilt library replaces the runtime objects
     except INSTALL_SIDE. make_lib: build only that library, from the runtime objects except INSTALL_SIDE."""
@@ -334,6 +344,9 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '',
         'pool gen',
         f'  depth = {pool_depth}',
+        '',
+        'pool large_gen',
+        '  depth = 1',
         '',
         'rule cc_gen',
         '  command = $cc $genflags -MD -MF $out.d -c $in -o $out',
@@ -359,14 +372,19 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '',
     ]
     objs = {}
+    compile_edges = []
+    stamp = f' | {ninja_path(toolchain_stamp)}' if toolchain_stamp else ''
     for mod, files in mods.items():
         objs[mod] = []
         for f in files:
             o = out / 'obj' / mod / (f.stem + '.o')
             if not prebuilt:
-                lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}')
-                lines.append('  pool = gen')
+                compile_edges.append((f.stat().st_size, f, o))
             objs[mod].append(o)
+    # Start expensive units early without changing the canonical link order.
+    for size, f, o in sorted(compile_edges, key=lambda e: (-e[0], e[1].as_posix())):
+        lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}{stamp}')
+        lines.append('  pool = large_gen' if size >= 4 << 20 else '  pool = gen')
     rt = []
     sources = runtime_sources(skip)
     if make_lib:
@@ -378,9 +396,10 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     for src in sources:
         o = runtime_object(out, src)
         if src.suffix == '.rc':   # windres writes no depfile: the files totk.rc embeds are listed by hand
-            lines.append(f'build {ninja_path(o)}: rc {ninja_path(src)} | {ninja_path(RUNTIME / "totk.manifest")}')
+            lines.append(f'build {ninja_path(o)}: rc {ninja_path(src)} | {ninja_path(RUNTIME / "totk.manifest")}' +
+                         (f' {ninja_path(toolchain_stamp)}' if toolchain_stamp else ''))
         else:
-            lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}')
+            lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}{stamp}')
             if src.suffix == '.cpp':   # the Ampere lowering headers (runtime/third_party/eglantine) need C++20
                 lines.append(f'  rtflags = $rtflags -std=c++20 -I {cmd_path(RUNTIME / "third_party" / "eglantine")}')
         rt.append(o)
@@ -730,6 +749,7 @@ def main():
                     help=f'build only <out>/{LIB_NAME} from runtime/ (no generated C, no totk.exe)')
     ap.add_argument('--runtime-lib', type=Path, help=f'link against this {LIB_NAME} instead of compiling runtime/ '
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
+    ap.add_argument('--toolchain-stamp', type=Path, help='validated compiler/dependency identity; changes rebuild objects')
     ap.add_argument('--expected', type=Path,
                     help='expected hashes (default tools/data/expected-<display version>.json)')
     args = ap.parse_args()
@@ -790,8 +810,10 @@ def main():
     mods = {m: chunk_files(gen, m) for m in linked}
 
     cpus = os.cpu_count() or 1
-    budget = min(MEM_BUDGET, int(total_ram() * 0.8))
-    jobs = args.jobs or max(1, min(cpus, budget // JOB_MEM))
+    readings = [n for n in (hostmem.available_ram(), hostmem.available_commit()) if n is not None]
+    budget = min([MEM_BUDGET, int(total_ram() * 0.8), *readings])
+    jobs = compile_jobs(args.jobs or 0, cpus, budget)
+    print(f'build_game: available build memory {mib(budget)}, selected {jobs} jobs; large units limited to one', flush=True)
     missing = [n for n in names if n not in hashes]
     if missing:
         sys.exit(f'{expected}: no exefs_sha256 for {missing}')
@@ -833,7 +855,7 @@ def main():
     if runtime_lib and not runtime_lib.is_file():
         sys.exit(f'{runtime_lib} not found: build it with --make-runtime-lib')
     text, objs, exe = ninja_file(gen, out, mods, jobs, skip, pairs is not None, runtime_lib,
-                                 args.make_runtime_lib)
+                                 args.make_runtime_lib, args.toolchain_stamp)
     write_if_changed(out / 'build.ninja', text)
 
     env = dict(os.environ)

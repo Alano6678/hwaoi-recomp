@@ -50,3 +50,15 @@ def available_ram():
         return None
     headroom = _job_headroom()
     return status.avail if headroom is None else min(status.avail, headroom)
+
+
+def available_commit():
+    """System commit headroom, capped by this process's job limit; None off Windows."""
+    if sys.platform != 'win32':
+        return None
+    status = _MemStatus()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    headroom = _job_headroom()
+    return status.apf if headroom is None else min(status.apf, headroom)

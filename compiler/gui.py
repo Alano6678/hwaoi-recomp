@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import ctypes
+import json
 import os
 import queue
 import subprocess
@@ -23,8 +24,8 @@ class Window:
         self.nup, self.output = tk.StringVar(), tk.StringVar()
         self.resolution = tk.StringVar(value="1920x1080")
         self.unlock = tk.BooleanVar(value=False)
-        self.jobs = tk.IntVar(value=2)
-        self.status = tk.StringVar(value="Select your game NUP and a new output folder.")
+        self.jobs = tk.IntVar(value=0)
+        self.status = tk.StringVar(value="Select your game NUP and a new or existing HWAoI output folder.")
         root.title("HWAoI Recomp Compiler")
         root.geometry("860x690")
         root.minsize(740, 610)
@@ -56,8 +57,8 @@ class Window:
         options.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 5))
         unlock = ttk.Checkbutton(options, text="Enable experimental 30 / 60 / 90 / 120 FPS controls", variable=self.unlock)
         unlock.pack(side="left")
-        ttk.Label(options, text="    Build jobs").pack(side="left")
-        jobs = ttk.Spinbox(options, from_=1, to=8, width=3, textvariable=self.jobs)
+        ttk.Label(options, text="    Build jobs (0 = auto)").pack(side="left")
+        jobs = ttk.Spinbox(options, from_=0, to=8, width=3, textvariable=self.jobs)
         jobs.pack(side="left", padx=7)
         self.fields.extend((unlock, jobs))
         ttk.Label(panel, foreground="#875300", wraplength=780, text=
@@ -69,7 +70,7 @@ class Window:
                       row=7, column=0, columnspan=3, sticky="w", pady=(0, 14))
         actions = ttk.Frame(panel)
         actions.grid(row=8, column=0, columnspan=3, sticky="ew")
-        self.build_button = ttk.Button(actions, text="Compile game", command=self.compile)
+        self.build_button = ttk.Button(actions, text="Compile / update", command=self.compile)
         self.build_button.pack(side="left")
         self.launch_button = ttk.Button(actions, text="Open compiled game", command=self.launch)
         self.launch_button.pack(side="left", padx=9)
@@ -87,9 +88,19 @@ class Window:
             self.nup.set(value)
 
     def pick_output(self):
-        parent = filedialog.askdirectory(title="Select a parent folder for the new HWAoI-Game folder")
+        parent = filedialog.askdirectory(title="Select an existing HWAoI output or a parent folder for a new build")
         if parent:
-            self.output.set(str(Path(parent) / "HWAoI-Game"))
+            selected = Path(parent) if (Path(parent) / STATE).is_file() else Path(parent) / "HWAoI-Game"
+            self.output.set(str(selected))
+            if (selected / STATE).is_file():
+                try:
+                    state = json.loads((selected / STATE).read_text(encoding="utf-8"))
+                    if not self.nup.get():
+                        self.nup.set(state.get("nup", ""))
+                    self.resolution.set(state.get("resolution", "1920x1080"))
+                    self.unlock.set(state.get("rate_unlock", False))
+                except (OSError, ValueError):
+                    pass
 
     def busy(self, on):
         for field in self.fields:
@@ -128,10 +139,10 @@ class Window:
     def compile(self):
         try:
             if not Path(self.nup.get()).is_file() or not self.output.get().strip():
-                raise ValueError("Choose your game NUP and a new output folder first.")
+                raise ValueError("Choose your game NUP and output folder first.")
             jobs = self.jobs.get()
-            if not 1 <= jobs <= 8:
-                raise ValueError("Build jobs must be between 1 and 8.")
+            if not 0 <= jobs <= 8:
+                raise ValueError("Build jobs must be 0 (automatic) or between 1 and 8.")
         except (ValueError, tk.TclError) as error:
             messagebox.showerror("Check your selection", str(error))
             return
@@ -168,7 +179,7 @@ class Window:
         if self.process and self.process.poll() is None:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.process.pid)], capture_output=True,
                            creationflags=subprocess.CREATE_NO_WINDOW)
-            self.status.set("Build cancelled. Choose a fresh output folder to retry.")
+            self.status.set("Build cancelled. Compile in the same output folder to resume.")
 
     def close(self):
         self.cancel()
@@ -191,7 +202,7 @@ def main():
         root.update_idletasks()
         root.update()
         assert not window.unlock.get() and window.resolution.get() == "1920x1080"
-        assert window.jobs.get() == 2
+        assert window.jobs.get() == 0
         for widget in (window.build_button, window.launch_button, window.cancel_button, window.log):
             x, y = widget.winfo_rootx() - root.winfo_rootx(), widget.winfo_rooty() - root.winfo_rooty()
             assert x >= 0 and y >= 0 and x + widget.winfo_width() <= root.winfo_width()

@@ -10,11 +10,15 @@ import shutil
 import subprocess
 import sys
 import traceback
+import time
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "tools"))
 from hwrecomp.nup import Nup, extract_exefs
 import hwaoi
+if str(SOURCE) not in sys.path:
+    sys.path.insert(0, str(SOURCE))
+from compiler import cache
 
 STATE = "hwaoi-compiler.json"
 RESOLUTIONS = ("1280x720", "1920x1080", "2560x1440", "3840x2160")
@@ -61,12 +65,13 @@ def inspect_nup(path):
         return {"header": archive.header_sha256, "toc": archive.toc_sha256, "size": archive.file_size}
 
 
-def fresh_output(output, bundle, nup):
+def fresh_output(output, bundle, nup, allow_lock=False):
     output, bundle, nup = Path(output).resolve(), Path(bundle).resolve(), Path(nup).resolve()
     require(not output.is_relative_to(bundle) and not bundle.is_relative_to(output),
             "Choose an output folder outside the extracted compiler folder")
     require(not nup.is_relative_to(output), "The output folder must not contain the source NUP")
-    require(not output.exists() or (output.is_dir() and not any(output.iterdir())),
+    require(not output.exists() or (output.is_dir() and all(allow_lock and p.name == ".hwaoi-compiler.lock"
+            and p.is_file() and p.stat().st_size <= 1 for p in output.iterdir())),
             "Output folder is not empty. Choose a new empty folder; existing files are never overwritten.")
     parent = output
     while not parent.exists():
@@ -111,53 +116,153 @@ class Tee:
         self.log.flush()
 
 
-def build(bundle, nup, output, jobs=2, resolution="1920x1080", unlock=False):
+def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False):
     require(os.name == "nt" and platform.machine().lower() in ("amd64", "x86_64"), "Windows x64 is required")
-    require(1 <= jobs <= 8 and resolution in RESOLUTIONS, "Invalid build settings")
+    require(0 <= jobs <= 8 and resolution in RESOLUTIONS, "Invalid build settings")
     bundle = Path(bundle).resolve(strict=True)
     nup = Path(nup).resolve(strict=True)
     print("[1/6] Checking compiler files and game identity...", flush=True)
     manifest = bundle_check(bundle)
     identity = inspect_nup(nup)
     before = nup.stat()
-    output = fresh_output(output, bundle, nup)
-    shutil.copytree(bundle / "source", output, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    state = {"format": "hwaoi-local-build-v1", "status": "incomplete", "source_revision": manifest["source_revision"],
-             "nup": str(nup), "nup_identity": identity, "resolution": resolution, "rate_unlock": bool(unlock)}
-    save(output / STATE, state)
-    with (output / "compiler.log").open("w", encoding="utf-8") as log, contextlib.redirect_stdout(Tee(sys.stdout, log)):
+    output = Path(output).resolve()
+    marker = output / STATE
+    existing = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else None
+    if existing is None:
+        output = fresh_output(output, bundle, nup, allow_lock=True)
+    else:
+        require(isinstance(existing, dict) and existing.get("format") == "hwaoi-local-build-v1" and existing.get("nup_identity") == identity and
+                Path(existing.get("nup", "")).resolve() == nup, "This output belongs to a different source NUP")
+        require(not output.is_relative_to(bundle) and not bundle.is_relative_to(output) and not nup.is_relative_to(output),
+                "Choose an output folder outside the compiler and source NUP")
+        require(shutil.disk_usage(output).free >= 2 << 30, "Updating needs at least 2 GiB free")
+    output.mkdir(parents=True, exist_ok=True)
+    with cache.workspace_lock(output):
+        # Recheck after acquiring the lock, before replacing managed source files.
+        if marker.is_file():
+            current = json.loads(marker.read_text(encoding="utf-8"))
+            require(current.get("nup_identity") == identity and current.get("format") == "hwaoi-local-build-v1" and
+                    Path(current.get("nup", "")).resolve() == nup,
+                    "Output identity changed while waiting for its lock")
+            existing = current
+        else:
+            require(all(p.name == ".hwaoi-compiler.lock" for p in output.iterdir()), "Unmarked output folder is not empty")
+        game = output / "work/build/hwaoi196608"
+        if (game / "hwaoi.exe").is_file():
+            try:
+                with (game / "hwaoi.exe").open("r+b"):
+                    pass
+            except OSError as error:
+                raise ValueError("Close the compiled game before updating this output folder") from error
+        state = dict(existing or {})
+        state.update(format="hwaoi-local-build-v1", status="incomplete", source_revision=manifest["source_revision"],
+                     nup=str(nup), nup_identity=identity, resolution=resolution, rate_unlock=bool(unlock))
+        save(marker, state)
+        backup = Path("work/backups") / f"compiler-{time.time_ns()}"
+        sources = {p: sha for p, sha in manifest["files"].items() if p.startswith("source/")}
+        cache.synchronize(bundle, output, sources, lambda p: Path(p).relative_to("source"), backup, state.get("source_files"))
+        state["source_files"] = sources
+        toolchain_stamp = cache.prepare_tools(bundle, output, manifest, backup)
+        save(marker, state)
+        with (output / "compiler.log").open("a", encoding="utf-8") as log, contextlib.redirect_stdout(Tee(sys.stdout, log)):
+            return build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp)
+
+
+def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest, before, toolchain_stamp):
+    started = time.perf_counter()
+    timings = {}
+    def done(stage, began):
+        timings[stage] = round(time.perf_counter() - began, 3)
+        state["timings"] = timings
+        save(output / STATE, state)
+        print(f"  {stage}: {timings[stage]:.2f}s", flush=True)
+    try:
+        exefs = output / "work/game/exefs"
+        print("[2/6] Extracting and hashing executable modules...", flush=True)
+        began = time.perf_counter()
         try:
-            exefs = output / "work/game/exefs"
-            print("[2/6] Extracting and hashing executable modules...", flush=True)
+            verified = hwaoi.verify(exefs)
+            print("  Reusing verified executable modules.", flush=True)
+        except (OSError, ValueError):
+            cache.quarantine(output, exefs)
             with Nup(nup) as archive:
                 extract_exefs(archive, exefs)
-            hwaoi.verify(exefs)
-            print("[3/6] Preparing the read-only game resource cache...", flush=True)
-            common = ["--exefs", exefs]
+            verified = hwaoi.verify(exefs)
+        done("exefs", began)
+        print("[3/6] Preparing the read-only game resource cache...", flush=True)
+        began = time.perf_counter()
+        common = ["--exefs", exefs]
+        romfs = output / "work/game/romfs"
+        resource = cache.resource_cache(romfs, state["nup_identity"], verified["exefs_sha256"], nup, state.get("resource_cache"))
+        if resource is None:
+            cache.quarantine(output, romfs)
             run_tool(bundle, output, *common, "prepare-romfs", "--nup", nup)
-            print("[4/6] Translating ARM64 game code to C...", flush=True)
+            resource = cache.resource_cache(romfs, state["nup_identity"], verified["exefs_sha256"], nup, None, prepared=True)
+            require(resource is not None, "Prepared resource cache failed validation")
+        else:
+            print("  Reusing verified resource cache.", flush=True)
+        state["resource_cache"] = resource
+        done("resources", began)
+        print("[4/6] Translating ARM64 game code to C...", flush=True)
+        began = time.perf_counter()
+        generated = output / "work/generated/hwaoi196608-full"
+        generation_key = cache.generation_key(output, manifest, unlock)
+        reuse = state.get("generation_key") == generation_key and state.get("generated_files")
+        try:
+            hwaoi.require_successful_generation(generated)
+            reuse = reuse and cache.generated_files(generated) == state["generated_files"]
+        except (OSError, ValueError):
+            reuse = False
+        if reuse:
+            print("  Reusing verified generated C; generator and profile unchanged.", flush=True)
+        else:
+            if generated.exists() and not (generated / "hwaoi-input.json").is_file():
+                cache.quarantine(output, generated)
             run_tool(bundle, output, *common, "generate", "--rate-unlock" if unlock else "--display-settings",
-                     "--out", "work/generated/hwaoi196608-full", "--limit", "0", "--jobs", jobs)
-            print("[5/6] Compiling and linking the native Windows game (this can take a while)...", flush=True)
-            run_tool(bundle, output, *common, "build", "--romfs", "work/game/romfs", "--deps", bundle / "deps",
-                     "--toolchain", bundle / "llvm", "--ninja", bundle / "bin/ninja.exe", "--jobs", jobs)
-            print("[6/6] Installing the shader translator and launch settings...", flush=True)
-            game = output / "work/build/hwaoi196608"
-            shutil.copytree(bundle / "translator", game / "xlate-managed-irbanks")
-            shutil.copy2(bundle / "bin/zlib1.dll", game / "zlib1.dll")
+                     "--out", "work/generated/hwaoi196608-full", "--limit", "0", "--jobs", min(jobs or 2, 2))
+            state["generation_key"] = generation_key
+            state["generated_files"] = cache.generated_files(generated)
+        done("generation", began)
+        print("[5/6] Compiling and linking the native Windows game (this can take a while)...", flush=True)
+        began = time.perf_counter()
+        run_tool(bundle, output, *common, "build", "--romfs", "work/game/romfs", "--deps", output / "work/toolchain/deps",
+                 "--toolchain", output / "work/toolchain/llvm", "--ninja", output / "work/toolchain/ninja.exe",
+                 "--toolchain-stamp", toolchain_stamp, "--jobs", jobs)
+        done("compile_link", began)
+        print("[6/6] Installing the shader translator and launch settings...", flush=True)
+        game = output / "work/build/hwaoi196608"
+        delivery = {p: sha for p, sha in manifest["files"].items() if p.startswith("translator/") or p == "bin/zlib1.dll"}
+        def destination(relative):
+            return Path("work/build/hwaoi196608") / ("zlib1.dll" if relative == "bin/zlib1.dll" else
+                Path("xlate-managed-irbanks") / Path(relative).relative_to("translator"))
+        cache.synchronize(bundle, output, delivery, destination, Path("work/backups") / f"delivery-{time.time_ns()}",
+                          state.get("delivery_files"))
+        state["delivery_files"] = delivery
+        if not (game / "hwaoi.ini").is_file():
             (game / "hwaoi.ini").write_text("[settings]\noutput_res=" + resolution +
                                            "\nrender_scale=100\nfps_limit=60\n", encoding="utf-8")
-            after = nup.stat()
-            require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "Source NUP changed during build")
-            state.update(status="complete", executable_sha256=hwaoi.sha256(game / "hwaoi.exe"))
-            save(output / STATE, state)
-            print("BUILD COMPLETE. Use Open compiled game in the compiler window.\n"
-                  "Keep the NUP at its original location: the game reads resources from it.\n"
-                  "This local output contains game-derived files and is not for redistribution.", flush=True)
-        except Exception:
-            traceback.print_exc(file=sys.stdout)
-            raise
+        else:
+            lines = (game / "hwaoi.ini").read_text(encoding="utf-8").splitlines(keepends=True)
+            found = False
+            for i, line in enumerate(lines):
+                if line.split("=", 1)[0].strip().lower() == "output_res" and "=" in line:
+                    found = True
+                    if line.split("=", 1)[1].strip() != resolution:
+                        lines[i] = f"output_res={resolution}\n"
+            if not found:
+                lines.append(f"\n[display]\noutput_res={resolution}\n")
+            cache.write_changed(game / "hwaoi.ini", "".join(lines).encode("utf-8"))
+        after = nup.stat()
+        require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "Source NUP changed during build")
+        state.update(status="complete", executable_sha256=hwaoi.sha256(game / "hwaoi.exe"))
+        state["timings"]["stages_total"] = round(time.perf_counter() - started, 3)
+        save(output / STATE, state)
+        print("BUILD COMPLETE. Use Open compiled game in the compiler window.\n"
+              "Keep the NUP at its original location: the game reads resources from it.\n"
+              "This local output contains game-derived files and is not for redistribution.", flush=True)
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+        raise
     return output
 
 
@@ -183,7 +288,7 @@ def main():
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--nup", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--jobs", type=int, default=0)
     parser.add_argument("--resolution", choices=RESOLUTIONS, default="1920x1080")
     parser.add_argument("--unlock", action="store_true")
     args = parser.parse_args()
