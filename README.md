@@ -42,7 +42,7 @@ The [Releases page](https://github.com/Alano6678/hwaoi-recomp/releases) provides
 
 After compilation, use **Open compiled game**. Keep the NUP and output folder at their original locations. Allow at least **20 GiB of free output space**; an AVX2 CPU, Vulkan GPU and sufficient memory are required (32 GiB RAM recommended). The compiler accepts only the exact build below; encrypted XCI/NSP files and other versions are unsupported. The resulting local game files are not for redistribution.
 
-Current source builds support updating or resuming an existing compiler-owned output folder. Verified resource caches, unchanged generated C and native objects are reused; saves and settings are retained, and replaced source files are backed up under `work/backups`. **Build jobs = 0** chooses concurrency from available RAM and system commit, with large C files limited to one concurrent compile. Compilation optimization levels are unchanged.
+Current source builds support updating or resuming an existing compiler-owned output folder. Verified resource caches, unchanged generated C and native objects are reused; saves and settings are retained, and replaced source files are backed up under `work/backups`. **Build jobs = 0** chooses generation and compilation concurrency from available RAM and system commit, with large C files limited to one concurrent compile. Compilation optimization levels are unchanged.
 
 Source builds remain available. The inherited upstream installers and release scripts are not HWAoI-ready; this fork uses its own compiler frontend.
 

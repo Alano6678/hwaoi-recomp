@@ -354,7 +354,7 @@ def main(argv=None):
     gen = sub.add_parser("generate", help="Run the generator with verified HWAoI inputs and optional fork profiles")
     gen.add_argument("--out", type=Path, default=DEFAULT_GENERATED)
     gen.add_argument("--limit", type=int, default=256, help="Functions per module; 0 explicitly requests all")
-    gen.add_argument("--jobs", type=int, default=2)
+    gen.add_argument("--jobs", type=int, default=0, help="0 selects workers from available RAM/commit; 1..8 sets a ceiling")
     gen.add_argument("--native-1080", action="store_true", help="select the exact-build HWAoI native 1080p profile")
     gen.add_argument("--display-settings", action="store_true", help="select exact-build native resolution settings (720p..4K)")
     gen.add_argument("--rate-unlock", action="store_true", help="generate the experimental exact-build native scheduler-rate profile with display settings")
@@ -403,7 +403,7 @@ def main(argv=None):
                                    "relocations": m["relocation_count"], "imports": len(m["imports"])}
                                   for m in report["linkage_inventory"]], "runtime_verified": False}
         elif args.action == "generate":
-            need(0 <= args.limit <= 1000000 and 1 <= args.jobs <= 8, "invalid limit/jobs")
+            need(0 <= args.limit <= 1000000 and 0 <= args.jobs <= 8, "invalid limit/jobs")
             out = local_output(args.out, "generated")
             need(not (args.native_1080 and (args.display_settings or args.rate_unlock)), "select one code profile")
             patch = display_profile(args.exefs) if args.display_settings else native_1080_profile(args.exefs) if args.native_1080 else None

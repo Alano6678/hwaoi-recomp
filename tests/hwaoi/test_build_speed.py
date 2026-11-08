@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import build_game
 sys.path.insert(0, str(ROOT / "recomp"))
 import layout
+import gen
 
 
 class BuildSpeedTests(unittest.TestCase):
@@ -23,6 +24,15 @@ class BuildSpeedTests(unittest.TestCase):
         self.assertEqual(build_game.compile_jobs(0, 1, 20 << 30), 1)
         with self.assertRaises(ValueError):
             build_game.compile_jobs(-1, 24, 20 << 30)
+        with self.assertRaises(ValueError):
+            gen.pick_jobs(-1)
+        with patch.object(gen.os, "cpu_count", return_value=24), patch.object(gen.hostmem, "available_ram", return_value=12 << 30), \
+             patch.object(gen.hostmem, "available_commit", return_value=20 << 30):
+            self.assertEqual(gen.pick_jobs(0)[0], 6)
+            self.assertEqual(gen.pick_jobs(2)[0], 2)
+        with patch.object(gen.hostmem, "available_ram", return_value=20 << 30), \
+             patch.object(gen.hostmem, "available_commit", return_value=2 << 30):
+            self.assertEqual(gen.pick_jobs(8)[0], 1)
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp); mods = [("main", 0x100000, 4096)]
             layout.write(mods, out); old = (out / "layout.h").stat().st_mtime_ns

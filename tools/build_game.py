@@ -850,7 +850,7 @@ def main():
         if out != main_out:   # forks hold hardlinks to the main build's objects; the main build keeps its own
             unlink_shared(out, mods)
         if why:
-            print(f'build_game: compiling all generated C: {why}')
+            print(f'build_game: checking generated C for changes ({why})')
     runtime_lib = args.runtime_lib.resolve() if args.runtime_lib else None
     if runtime_lib and not runtime_lib.is_file():
         sys.exit(f'{runtime_lib} not found: build it with --make-runtime-lib')

@@ -219,7 +219,7 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             if generated.exists() and not (generated / "hwaoi-input.json").is_file():
                 cache.quarantine(output, generated)
             run_tool(bundle, output, *common, "generate", "--rate-unlock" if unlock else "--display-settings",
-                     "--out", "work/generated/hwaoi196608-full", "--limit", "0", "--jobs", min(jobs or 2, 2))
+                     "--out", "work/generated/hwaoi196608-full", "--limit", "0", "--jobs", jobs)
             state["generation_key"] = generation_key
             state["generated_files"] = cache.generated_files(generated)
         done("generation", began)

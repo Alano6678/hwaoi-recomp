@@ -595,14 +595,16 @@ MEM_SHARE = 0.8  # of the free memory the workers may take, the rest is for the 
 
 def pick_jobs(requested):
     """Worker count and the reason for it: --jobs if given, else the CPU count capped by the free memory."""
-    if requested:
-        return requested, '--jobs'
+    if requested is not None and requested < 0:
+        raise ValueError('--jobs must be nonnegative (0 selects automatically)')
     cpus = os.cpu_count() or 4
-    free = hostmem.available_ram()
+    readings = [n for n in (hostmem.available_ram(), hostmem.available_commit()) if n is not None]
+    free = min(readings) if readings else None
+    ceiling = min(requested or 8, cpus)
     if free is None:
-        return cpus, f'{cpus} CPUs, free memory unknown'
+        return min(ceiling, 2), f'{cpus} CPUs, free memory unknown: conservative two-worker limit'
     by_mem = max(1, int(free * MEM_SHARE) // WORKER_MEM)
-    return min(cpus, by_mem), f'{cpus} CPUs, {free / 2**30:.1f} GiB free memory allows {by_mem}'
+    return max(1, min(ceiling, by_mem)), f'{cpus} CPUs, {free / 2**30:.1f} GiB free RAM/commit allows {by_mem}'
 
 
 def main():
