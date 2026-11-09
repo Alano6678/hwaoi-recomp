@@ -61,6 +61,7 @@ def verify(exefs, profile_path=PROFILE):
     need(set(hashes) == {*MODULES, "rtld"}, "profile must contain all four observed modules")
     hashes["main.npdm"] = sha256(exefs / "main.npdm")
     return {"title_id": profile["title_id"], "ncm_version": profile["ncm_version"],
+            "romfs_inventory": profile["romfs_inventory"],
             "display_version": profile.get("display_version"), "exefs": str(exefs),
             "exefs_sha256": hashes, "modules": module_details,
             "generated_modules": list(MODULES),

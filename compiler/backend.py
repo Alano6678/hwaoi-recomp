@@ -15,6 +15,7 @@ import time
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "tools"))
 from hwrecomp.nup import Nup, extract_exefs
+from hwaoi_romfs import verified_application
 import hwaoi
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
@@ -43,30 +44,42 @@ def bundle_check(bundle, *, defer_materialized=False):
     for relative, expected in manifest["files"].items():
         path = (bundle / relative).resolve()
         require(path.is_relative_to(bundle) and path.is_file(), f"Missing bundle file: {relative}")
-        critical_source = relative.startswith(("source/compiler/", "source/tools/hwrecomp/", "source/config/games/")) or relative == "source/tools/hwaoi.py"
+        critical_source = relative.startswith(("source/compiler/", "source/tools/hwrecomp/", "source/config/games/")) or relative in (
+            "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py")
         deferred = defer_materialized and not critical_source and (relative.startswith(("source/", "llvm/", "deps/", "translator/")) or
                                            relative in ("bin/ninja.exe", "bin/zlib1.dll"))
         if not deferred:
             require(hwaoi.sha256(path) == expected, f"Bundle file changed: {relative}. Extract the ZIP again.")
     for relative in ("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe",
                      "bin/zlib1.dll", "translator/totk_xlate.exe", "translator/totk_xlate.id",
-                     "deps/include/vma/vk_mem_alloc.h", "source/tools/hwaoi.py"):
+                     "deps/include/vma/vk_mem_alloc.h", "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py"):
         require(relative in manifest["files"], f"Incomplete bundle: {relative}")
     return manifest
 
 
-def inspect_nup(path):
-    """Reject the wrong title/build before extracting any executable member."""
+def nup_profile():
     profile = json.loads((SOURCE / "config/games/hwaoi-update-196608.json").read_text(encoding="utf-8"))
-    expected = {**profile["modules"], "main.npdm": profile["npdm_sha256"]}
+    return {**profile, "exefs_sha256": {**profile["modules"], "main.npdm": profile["npdm_sha256"]}}
+
+
+def inspect_nup(path):
+    """Reject the wrong title/build or incomplete resources before extraction."""
     with Nup(path) as archive:
-        packages, files = archive.exefs()
-        require(not any(p.kind in (2, 3) for p in archive.packages), "DLC/addon packages are not supported")
-        require(packages[0].title_id == int(profile["title_id"], 16), "This is not the supported HWAoI title")
-        require(packages[-1].version == profile["ncm_version"], "Unsupported game update (requires NCM 196608)")
-        require({name: member.sha256 for name, (_, member) in files.items()} == expected,
-                "Game modules do not match the supported build. No patches were applied.")
+        for package in archive.packages[:16]:
+            kind = {0: "base", 1: "update", 2: "addon", 3: "addon_update", 4: "system"}[package.kind]
+            print(f"  NUP package {package.index}: {kind}, title={package.title_id:016X}, "
+                  f"NCM={package.version}, standalone={bool(package.flags & 1)}", flush=True)
+        packages, _, _ = verified_application(archive, nup_profile())
+        if packages[0].kind == 1:
+            print("  No base record: using the standalone update with the complete verified game inventory.", flush=True)
         return {"header": archive.header_sha256, "toc": archive.toc_sha256, "size": archive.file_size}
+
+
+def extract_game_exefs(nup, output):
+    with Nup(nup) as archive:
+        # Keep extraction on exactly the same selection as preflight and RomFS.
+        packages, _, _ = verified_application(archive, nup_profile())
+        return extract_exefs(archive, output, packages[0].index if len(packages) == 1 else None)
 
 
 def fresh_output(output, bundle, nup, allow_lock=False):
@@ -196,8 +209,7 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             print("  Reusing verified executable modules.", flush=True)
         except (OSError, ValueError):
             cache.quarantine(output, exefs)
-            with Nup(nup) as archive:
-                extract_exefs(archive, exefs)
+            extract_game_exefs(nup, exefs)
             verified = hwaoi.verify(exefs)
         done("exefs", began)
         print("[3/6] Preparing the read-only game resource cache...", flush=True)

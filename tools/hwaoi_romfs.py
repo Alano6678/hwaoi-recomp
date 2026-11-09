@@ -18,6 +18,65 @@ from hwrecomp.nup import Nup, ABSENT, require
 STORAGE = "nup-cache-v1"
 
 
+def romfs_inventory(files):
+    """Layout/compression-independent identity of declared paths, sizes and hashes.
+
+    This proves the selected tree has the profiled resources, not that payload
+    bytes are intact. Compressed bytes are checked during preparation; raw bytes
+    are still hashed on their first runtime open.
+    """
+    files = sorted(files, key=lambda item: item[0].encode("utf-8"))
+    digest = hashlib.sha256(b"hwaoi-romfs-inventory-v1\0")
+    digest.update(struct.pack("<Q", len(files)))
+    for path, member in files:
+        name = path.encode("utf-8")
+        digest.update(struct.pack("<I", len(name)))
+        digest.update(name)
+        digest.update(struct.pack("<Q", member.size))
+        digest.update(bytes.fromhex(member.sha256))
+    return {"algorithm": "sha256-path-size-content-v1", "files": len(files), "sha256": digest.hexdigest()}
+
+
+def verified_application(archive, expected):
+    """Select one exact HWAoI build, including self-contained standalone updates.
+
+    A standalone flag alone never proves a complete game. Require the complete
+    profiled executable set AND resource inventory before extraction/caching.
+    Keep the general NUP reader's explicit-selection analysis policy unchanged.
+    """
+    require(not any(p.kind in (2, 3) for p in archive.packages),
+            "NUP contains DLC/addon packages, which this compiler does not support. "
+            "Select a game package without DLC; base + update or a complete standalone update is supported.")
+    title = int(expected["title_id"], 16)
+    if any(p.kind == 0 for p in archive.packages):
+        packages, exefs = archive.exefs()
+        require(packages[0].title_id == title, "NUP title ID mismatch: this is not the supported HWAoI title")
+    else:
+        updates = [p for p in archive.packages if p.kind == 1 and p.flags & 1 and p.title_id in (title, title | 0x800)]
+        require(bool(updates), "NUP has no base or matching HWAoI standalone update. "
+                "Select the complete game dump, not a DLC/system package or a different title.")
+        maximum = max(p.version for p in updates)
+        latest = [p for p in updates if p.version == maximum]
+        require(len(latest) == 1, "NUP contains ambiguous standalone updates at the same NCM version")
+        package = latest[0]
+        require(package.exefs_dir != ABSENT and package.romfs_dir != ABSENT,
+                "Standalone update is incomplete: ExeFS and RomFS are required. "
+                "Include the matching base game and its update in one NUP.")
+        packages, exefs = archive.exefs(package.index)
+    require(packages[-1].version == expected["ncm_version"],
+            f"NUP update version mismatch: requires NCM {expected['ncm_version']} (not a display version)")
+    actual = {name: member.sha256 for name, (_, member) in exefs.items()}
+    require(actual == expected["exefs_sha256"],
+            "NUP ExeFS does not match the verified HWAoI profile. "
+            "Wrong build or incomplete game dump; no patches were applied.")
+    files = select_romfs(archive, packages)
+    require(romfs_inventory(files) == expected.get("romfs_inventory"),
+            "NUP RomFS inventory does not match the complete supported game. "
+            "An update-only/delta dump may be missing base files; include the matching base game and update. "
+            "A modified resource tree is also unsupported.")
+    return packages, exefs, files
+
+
 def select_romfs(archive, packages):
     selected = {}
     for package in packages:
@@ -38,14 +97,8 @@ def prepare(nup_path, output, expected, reserve_bytes=8 << 30):
     output.parent.mkdir(parents=True, exist_ok=True)
     with Nup(nup_path) as archive:
         before = archive.path.stat()
-        require(not any(p.kind in (2, 3) for p in archive.packages),
-                "DLC/addon packages are not supported by the current empty-AOC runtime")
-        packages, exefs = archive.exefs()
+        packages, exefs, files = verified_application(archive, expected)
         actual = {name: member.sha256 for name, (_, member) in exefs.items()}
-        require(actual == expected["exefs_sha256"], "NUP ExeFS does not match the verified local HWAoI profile")
-        require(packages[0].title_id == int(expected["title_id"], 16), "NUP title ID mismatch")
-        require(packages[-1].version == expected["ncm_version"], "NUP update version mismatch")
-        files = select_romfs(archive, packages)
         unique = {(m.offset, m.stored_size, m.sha256): m for _, m in files if m.codec == 1}
         estimated = sum((m.size + 15) & ~15 for m in unique.values())
         require(shutil.disk_usage(output.parent).free >= estimated + reserve_bytes,
@@ -91,6 +144,7 @@ def prepare(nup_path, output, expected, reserve_bytes=8 << 30):
                     "source": "validated NUP tables; raw payload hashes checked lazily on first runtime open",
                     "title_id": expected["title_id"], "ncm_version": expected["ncm_version"],
                     "exefs_sha256": actual, "nup_path": str(archive.path), "nup_size": archive.file_size,
+                    "romfs_inventory": expected["romfs_inventory"],
                     "nup_header_sha256": archive.header_sha256, "nup_toc_sha256": archive.toc_sha256,
                     "nup_toc_offset": toc_offset, "nup_toc_size": toc_size,
                     "cache_size": offset, "cache_sha256": cache_hash.hexdigest(),

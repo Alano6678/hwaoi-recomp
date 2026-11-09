@@ -5,6 +5,11 @@
   "npdm_sha256": "c979f3c1bc4803349d8f1c6eeba941759aa0a5109144b563770239d568d48091",
   "display_version": null,
   "note": "NCM version is opaque; no display version is present in the supplied NUP metadata.",
+  "romfs_inventory": {
+    "algorithm": "sha256-path-size-content-v1",
+    "files": 2153,
+    "sha256": "576493de81a327f8adbc229f50287dc68b43b735a1f4927a12ce6be54b5015cb"
+  },
   "modules": {
     "main": "4c33cfd4c818d9ed62822af792782b4ea443417ed24acea6f1cee739cde604c3",
     "rtld": "b01d53da100a51eb40d408d7011cd5b09d7f4ee2578ef536d089855b51ee5e0f",

@@ -1,6 +1,7 @@
 """Synthetic NUP/cache/index tests, with a native storage-routing check."""
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 import struct
 import subprocess
@@ -12,22 +13,107 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/prototype"))
 from test_formats import make_nup, refresh_toc_hash, TITLE_ID
-from hwaoi_romfs import prepare
+from hwaoi_romfs import prepare, romfs_inventory, select_romfs, verified_application
 from hwrecomp.nup import Nup
 import romfs_index
 
 
 class RomfsTests(unittest.TestCase):
-    def fixture(self, directory):
+    def fixture(self, directory, *, kind=0, title=TITLE_ID, version=0):
         payloads = {"raw.bin": b"raw fixture bytes", "z.bin": b"compressed fixture" * 1024}
-        raw, offsets = make_nup([{"files": [(n, d, int(n == "z.bin")) for n, d in payloads.items()]}])
+        raw, offsets = make_nup([{"kind": kind, "title_id": title, "version": version, "flags": int(kind == 1),
+                                  "files": [(n, d, int(n == "z.bin")) for n, d in payloads.items()]}])
         struct.pack_into("<I", raw, 0x80 + 0x30 + 0x10, 1)  # synthetic tree also serves as RomFS
         refresh_toc_hash(raw)
         path = directory / "fixture.nup"
         path.write_bytes(raw)
-        expected = {"title_id": f"{TITLE_ID:016X}", "ncm_version": 0,
+        expected = {"title_id": f"{TITLE_ID:016X}", "ncm_version": version,
                     "exefs_sha256": {n: hashlib.sha256(d).hexdigest() for n, d in payloads.items()}}
+        with Nup(path) as archive:
+            expected["romfs_inventory"] = romfs_inventory(select_romfs(archive, archive.packages))
         return path, expected, payloads
+
+    def test_complete_standalone_update_prepares_and_keeps_source_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            path, expected, payloads = self.fixture(folder, kind=1, title=TITLE_ID | 0x800, version=10)
+            original = path.read_bytes()
+            result = prepare(path, folder / "romfs", expected, reserve_bytes=0)
+            self.assertEqual(result["files"], len(payloads))
+            self.assertEqual(path.read_bytes(), original)
+            manifest = json.loads((folder / "romfs/index.json").read_text())
+            self.assertEqual(manifest["selected_packages"], [0])
+            self.assertEqual(manifest["romfs_inventory"], expected["romfs_inventory"])
+
+    def test_inventory_is_independent_of_offsets_compression_and_iteration_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path, expected, _ = self.fixture(Path(temp))
+            with Nup(path) as archive:
+                files = select_romfs(archive, archive.packages)
+                repacked = [(name, replace(member, offset=0x100000, stored_size=17, codec=1)) for name, member in reversed(files)]
+                self.assertEqual(romfs_inventory(repacked), expected["romfs_inventory"])
+                self.assertNotEqual(romfs_inventory(files[:-1]), expected["romfs_inventory"])
+                name, member = files[0]
+                for changed in (replace(member, size=member.size + 1), replace(member, sha256="0" * 64)):
+                    self.assertNotEqual(romfs_inventory([(name, changed), *files[1:]]), expected["romfs_inventory"])
+                self.assertNotEqual(romfs_inventory([("renamed", member), *files[1:]]), expected["romfs_inventory"])
+
+    def test_standalone_identity_version_resource_and_missing_tree_refusals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            path, expected, _ = self.fixture(folder, kind=1, version=10)
+            original = path.read_bytes()
+            for field, value, error in (("title_id", f"{TITLE_ID + 0x10000:016X}", "no base or matching"),
+                                        ("ncm_version", 11, "version mismatch"),
+                                        ("romfs_inventory", {"files": 999}, "RomFS inventory")):
+                bad = {**expected, field: value}
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, error):
+                    prepare(path, folder / field, bad, reserve_bytes=0)
+                self.assertFalse((folder / field).exists())
+            raw = bytearray(original)
+            struct.pack_into("<I", raw, 0x80 + 0x30 + 0x10, 0xffffffff)
+            refresh_toc_hash(raw);path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, "Standalone update is incomplete"):
+                prepare(path, folder / "missing-romfs", expected, reserve_bytes=0)
+            self.assertFalse((folder / "missing-romfs").exists())
+
+    def test_standalone_latest_selection_does_not_blend_older_or_unrelated_updates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            _, expected, payloads = self.fixture(folder, kind=1, version=10)
+            files = [(n, data, 0) for n, data in payloads.items()]
+            packages = [{"kind": 1, "flags": 1, "version": 9, "files": [("obsolete.bin", b"older", 0)]},
+                        {"kind": 1, "flags": 1, "version": 10, "files": files},
+                        {"kind": 1, "flags": 1, "version": 99, "title_id": TITLE_ID + 0x10000, "files": files}]
+            def archive_of(packages, first_romfs=None):
+                raw, _ = make_nup(packages)
+                for i in range(len(packages)):
+                    struct.pack_into("<I", raw, 0x80 + 0x30 + i * 0x40 + 0x10, i * 2 + 1)
+                if first_romfs is not None:
+                    struct.pack_into("<I", raw, 0x80 + 0x30 + 0x10, first_romfs)
+                refresh_toc_hash(raw)
+                path = folder / "selection.nup";path.write_bytes(raw)
+                return Nup(path)
+            with archive_of(packages) as archive:
+                chosen, _, _ = verified_application(archive, expected)
+                self.assertEqual([p.index for p in chosen], [1])
+            with archive_of([*packages, packages[1]]) as archive:
+                with self.assertRaisesRegex(ValueError, "ambiguous standalone"):
+                    verified_application(archive, expected)
+            with archive_of([packages[0], {**packages[1], "files": files[:1]}]) as archive:
+                with self.assertRaisesRegex(ValueError, "ExeFS does not match"):
+                    verified_application(archive, expected)
+            with archive_of([packages[1], {**packages[1], "version": 11}]) as archive:
+                with self.assertRaisesRegex(ValueError, "version mismatch"):
+                    verified_application(archive, expected)
+            with archive_of([packages[1], {**packages[2], "files": files[:1]}], first_romfs=3) as archive:
+                # Complete ExeFS but a missing resource: point the selected
+                # synthetic RomFS at a separate, partial tree in this fixture.
+                with self.assertRaisesRegex(ValueError, "RomFS inventory"):
+                    verified_application(archive, expected)
+            with archive_of([packages[1], {"kind": 2, "title_id": TITLE_ID + 1, "files": files}]) as archive:
+                with self.assertRaisesRegex(ValueError, "DLC/addon"):
+                    verified_application(archive, expected)
 
     def test_virtual_files_match_and_original_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:

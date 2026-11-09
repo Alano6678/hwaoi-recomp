@@ -134,8 +134,8 @@ class CompilerCacheTests(unittest.TestCase):
                     self.fail(action)
             disk = type("Disk", (), {"free": 60 << 30})()
             with patch.object(backend, "bundle_check", return_value=manifest), patch.object(backend, "inspect_nup", return_value=identity), \
-                 patch.object(backend.hwaoi, "verify", side_effect=verify), patch.object(backend, "Nup"), \
-                 patch.object(backend, "extract_exefs", side_effect=extract), patch.object(backend, "run_tool", side_effect=tool), \
+                 patch.object(backend.hwaoi, "verify", side_effect=verify), \
+                 patch.object(backend, "extract_game_exefs", side_effect=extract), patch.object(backend, "run_tool", side_effect=tool), \
                  patch.object(backend.shutil, "disk_usage", return_value=disk), contextlib.redirect_stdout(io.StringIO()):
                 backend.build(bundle, nup, out)
                 self.assertEqual(calls, ["prepare-romfs", "generate", "build"])
