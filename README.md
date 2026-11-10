@@ -13,9 +13,11 @@ The game's ARM64 code is translated to C ahead of time and compiled with a C/C++
 
 ## Current status
 
-**Early development build — updated November 9, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
+**Early development build — updated November 11, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
 
 Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
+
+Current source packs viewport and fixed-state command records and bounds the reusable upload-batch cache. A paired opening-scene log comparison at 1080p / 60 FPS measured retained command-copy peaks of **1128 → 1013 MiB** (about 10% lower), a **137 MiB** lower process private-commit peak, and **59.9 FPS** in both runs. These measurements cover the stationary opening scene; 16 GiB RAM systems and extended combat still need validation.
 
 > [!WARNING]
 > **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
@@ -30,6 +32,7 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
 | 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
 | 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
+| 🔧 | Memory use | Command records use less space and completed upload batches retain at most eight spare objects. A bounded read-only vertex-cache experiment is available but remains disabled by default: its low-memory path is still too slow. |
 | 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets; movement still has a separate frame-dependent speed error. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
@@ -78,5 +81,7 @@ For a useful [issue report](https://github.com/Alano6678/hwaoi-recomp/issues), i
 ## Credits and license
 
 Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with its revision pinned in [config/upstream.json](config/upstream.json). Menu adaptations also credit [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp); the full inherited attributions remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Thanks to [LibertyPrime27](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized) for identifying the NVN/GFX stage-ID mismatch in GPU QUADS admission and for their ongoing performance and package-support work. Further integration is being coordinated in [issue #2](https://github.com/Alano6678/hwaoi-recomp/issues/2).
 
 GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE) and [LICENSE-MIT](LICENSE-MIT).

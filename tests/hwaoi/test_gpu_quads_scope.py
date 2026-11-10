@@ -1,5 +1,6 @@
 """NVN2-only GPU QUADS admission and restoration of guest graphics binding state."""
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,7 @@ DEPS = Path("F:/TotKDependencies/runtime/deps/include")
 
 def source():
     text = (ROOT / "runtime/vk_exec_draw.c").read_text()
+    stages = "\n".join(re.findall(r"^#define NVN_STAGE_\w+ \d+$", text, re.MULTILINE)) + "\n"
     prefix = r'''
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +24,7 @@ def source():
 #include "game_target.h"
 #include "vk_quad.h"
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
-static unsigned present=(1u<<GFX_STAGE_VS)|(1u<<GFX_STAGE_FS),nvn2=~0u;
+static unsigned present=(1u<<NVN_STAGE_VS)|(1u<<NVN_STAGE_FS),nvn2=~0u;
 static unsigned reset,prepares,indices,draws,notes,counts;
 static int backed=1,converted=1,draw_ok=1;
 static const char *setting="1";
@@ -56,10 +58,12 @@ static void note_work(const VkExec *ex,int kind,uint64_t work){(void)ex;CHECK(ki
     main = r'''
 int main(int argc,char **argv){
  CHECK(argc==2);VkExec ex={.prog=(const prog_t *)(uintptr_t)1,.fence=1};p_draw_ind draw={NVN_DRAW_PRIMITIVE_QUADS,0,0x10000};
- CHECK(gpu_quads_graphics(&ex));nvn2&=~(1u<<GFX_STAGE_FS);CHECK(!gpu_quads_graphics(&ex));nvn2=~0u;
- present|=1u<<GFX_STAGE_GS;CHECK(!gpu_quads_graphics(&ex));present&=~(1u<<GFX_STAGE_GS);
- present|=1u<<GFX_STAGE_TCS;CHECK(!gpu_quads_graphics(&ex));present&=~(1u<<GFX_STAGE_TCS);
- present=1u<<GFX_STAGE_FS;CHECK(!gpu_quads_graphics(&ex));present=(1u<<GFX_STAGE_VS)|(1u<<GFX_STAGE_FS);
+ _Static_assert(NVN_STAGE_FS==1 && GFX_STAGE_FS==4,"different NVN and translator stage namespaces");
+ CHECK(gpu_quads_graphics(&ex));nvn2&=~(1u<<NVN_STAGE_FS);CHECK(!gpu_quads_graphics(&ex));nvn2=~0u;
+ for(unsigned stage=NVN_STAGE_GS;stage<NVN_STAGE_CS;stage++){
+  present|=1u<<stage;CHECK(!gpu_quads_graphics(&ex));present&=~(1u<<stage);
+ }
+ present=1u<<NVN_STAGE_FS;CHECK(!gpu_quads_graphics(&ex));present=(1u<<NVN_STAGE_VS)|(1u<<NVN_STAGE_FS);
  if(!strcmp(argv[1],"off"))setting="0";
  else if(!strcmp(argv[1],"legacy"))nvn2=0;
  else if(!strcmp(argv[1],"unbacked"))backed=0;
@@ -78,7 +82,7 @@ int main(int argc,char **argv){
  puts("GPU QUADS scope checks passed");return 0;
 }
 '''
-    return prefix + function(text, "static int gpu_quads_graphics(") + function(text, "static int gpu_quads_draw(") + main
+    return stages + prefix + function(text, "static int gpu_quads_graphics(") + function(text, "static int gpu_quads_draw(") + main
 
 
 @unittest.skipUnless(os.name == "nt" and CC.is_file(), "Windows Clang required")
