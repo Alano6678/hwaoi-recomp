@@ -100,6 +100,7 @@ int main(int argc,char **argv){
  nvn2&=~(1u<<NVN_STAGE_FS);CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_NOT_NVN2 && stage==NVN_STAGE_FS);nvn2=~0u;
  present|=1u<<NVN_STAGE_GS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_STAGE && stage==NVN_STAGE_GS);present&=~(1u<<NVN_STAGE_GS);
  present|=1u<<NVN_STAGE_TCS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_STAGE);present&=~(1u<<NVN_STAGE_TCS);
+ present|=1u<<4;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_STAGE && stage==4);present&=~(1u<<4);   // TES (NVN stage 4)
  present=1u<<NVN_STAGE_FS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_NO_VERTEX);present=(1u<<NVN_STAGE_VS)|(1u<<NVN_STAGE_FS);
  if(!strcmp(argv[1],"batch")||!strcmp(argv[1],"nobatch")||!strcmp(argv[1],"invalidate")||!strcmp(argv[1],"order")){
   // Scissor and texture-invalidation-only barriers (0x10, recorded as nothing) separate batched draws; a copy or an

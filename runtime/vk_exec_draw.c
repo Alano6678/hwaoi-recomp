@@ -3442,10 +3442,10 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 }
 
 // Non-indexed indirect arguments may be GPU-written. Native Vulkan topologies
-// consume the actual backing buffer. QUADS require an ordered 16-byte readback,
-// then the established direct-draw index expansion; never reinterpret QUADS as
-// a triangle-list draw or read the stale guest VA. This synchronous fallback is
-// deliberately bounded and logged; it is correctness work, not a speedup.
+// consume the actual backing buffer. QUADS are converted on the GPU (vk_quad_indirect_prepare) for programs of a
+// vertex and a fragment stage; anything else takes an ordered 16-byte readback, then the established direct-draw index
+// expansion; never reinterpret QUADS as a triangle-list draw or read the stale guest VA. The readback submits and
+// waits for the GPU once per draw: a fight's ~150 such draws a frame cost ~30 ms (gpu_quads_graphics below).
 // Why gpu_quads_draw declined a draw (QF_*): the readback fallback costs a full GPU round trip per draw, so each
 // reason is counted and its first occurrences are logged with the stage involved (quads_fallback_log).
 enum { QF_DISABLED = 1, QF_NO_PROGRAM, QF_LOOKUP, QF_STAGE, QF_NOT_NVN2, QF_NO_VERTEX, QF_RESOLVE, QF_PREPARE, QF_N };
