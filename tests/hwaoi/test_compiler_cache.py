@@ -111,7 +111,7 @@ class CompilerCacheTests(unittest.TestCase):
                 if not (folder / "main").is_file():
                     raise FileNotFoundError("missing synthetic module")
                 return {"exefs_sha256": hashes}
-            def extract(archive, folder):
+            def extract(archive, folder, update=None):
                 self.put(folder, "main")
             def tool(b, o, *args):
                 action = args[2]; calls.append(action)
@@ -136,6 +136,7 @@ class CompilerCacheTests(unittest.TestCase):
             with patch.object(backend, "bundle_check", return_value=manifest), patch.object(backend, "inspect_nup", return_value=identity), \
                  patch.object(backend.hwaoi, "verify", side_effect=verify), \
                  patch.object(backend, "extract_game_exefs", side_effect=extract), patch.object(backend, "run_tool", side_effect=tool), \
+                 patch.object(backend, "install_game_dlc", return_value={}), \
                  patch.object(backend.shutil, "disk_usage", return_value=disk), contextlib.redirect_stdout(io.StringIO()):
                 backend.build(bundle, nup, out)
                 self.assertEqual(calls, ["prepare-romfs", "generate", "build"])

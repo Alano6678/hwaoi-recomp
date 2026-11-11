@@ -361,6 +361,7 @@ def main(argv=None):
     inspect.add_argument("--report", type=Path, default=ROOT / "work/reports/hwaoi-linkage.json")
     romfs = sub.add_parser("prepare-romfs", help="Prepare verified compressed cache; raw resources stay in the NUP")
     romfs.add_argument("--nup", type=Path, required=True)
+    romfs.add_argument("--update-nup", type=Path, help="separate update NUP for a base-only game NUP (optional)")
     romfs.add_argument("--out", type=Path, default=ROOT / "work/game/romfs")
     gen = sub.add_parser("generate", help="Run the generator with verified HWAoI inputs and optional fork profiles")
     gen.add_argument("--out", type=Path, default=DEFAULT_GENERATED)
@@ -404,7 +405,7 @@ def main(argv=None):
             report = launch_interactive(args, identity)
         elif args.action == "prepare-romfs":
             from hwaoi_romfs import prepare
-            report = prepare(args.nup, local_output(args.out, "game"), identity)
+            report = prepare(args.nup, local_output(args.out, "game"), identity, update_path=args.update_nup)
         elif args.action == "audit":
             report = audit(args.exefs, identity)
             destination = local_output(args.report, "reports")
