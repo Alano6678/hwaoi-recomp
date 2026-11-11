@@ -32,16 +32,18 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 static const char *const known[] = {
     "AB", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_WINDOW", "BARRIER_ELIDE", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
-    "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
+    "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MENU", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
+    "BIND_ZL", "BIND_ZR", "BINDS_PLAYER", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
     "EXEFS", "EXPERIMENTAL_GEOMETRY", "FEEDBACK", "FIX_C0", "FIX_INDIRECT_RESET", "FIX_VS_FAULT", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
     "EXPERIMENTAL_RATE", "RATE_DIAG", "RATE_UNLOCK", "FS_DIAG", "GPU_INDEX", "GPU_NAME", "GPU_WRITE_DIAG", "HIGHFPS_FIX", "INPUT", "INPUT_FEED", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
     "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LOCALE", "LOD_GUARD", "MEMORY", "MENU_LANG", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "NX2_READ_NOWAIT",
-    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_LAYOUT", "PATCH_OUTPUT", "PATCH_SCENE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SCENE", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT",
+    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES",
+    "P2_BIND_A", "P2_BIND_B", "P2_BIND_X", "P2_BIND_Y", "P2_BIND_LCLICK", "P2_BIND_RCLICK", "P2_BIND_L", "P2_BIND_R", "P2_BIND_ZL", "P2_BIND_ZR", "P2_BIND_PLUS", "P2_BIND_MINUS", "P2_BIND_LEFT", "P2_BIND_UP", "P2_BIND_RIGHT", "P2_BIND_DOWN", "P2_BIND_LSTICK_LEFT", "P2_BIND_LSTICK_UP", "P2_BIND_LSTICK_RIGHT", "P2_BIND_LSTICK_DOWN", "P2_BIND_RSTICK_LEFT", "P2_BIND_RSTICK_UP", "P2_BIND_RSTICK_RIGHT", "P2_BIND_RSTICK_DOWN", "P2_BIND_MENU",
+    "PAD_LAYOUT", "PATCH_OUTPUT", "PATCH_SCENE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SCENE", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "PLAYER1_DEVICE", "PLAYER1_TYPE", "PLAYER2_DEVICE", "PLAYER2_TYPE",
     "PRESENT_HOLD", "PREWARM_XLATE", "PRIORITY_DIAG", "PROBE_MOVIE", "PROBE_MOVIE_SHOT", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
     "PROFILE_BUSY", "PROFILE_IP_ONLY", "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_END", "REEXEC",
     "RENDER_SCALE", "REPLAY_ASYNC", "RUNTIME_MEMORY_DIAG", "DUMP_TRIGGER", "NATIVE_1080", "GPU_READBACK_DIAG", "GPU_QUADS", "VERTEX_CACHE", "INDIRECT_BATCH", "SCENE_RES", "DISPLAY_POOL_TEST", "DUMP_METADATA",
@@ -66,13 +68,15 @@ static const struct { const char *key, *section; } sections[] = {
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
     {"VOLUME", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
-    {"PAD_LAYOUT", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
+    {"P2_BIND_A", "input"}, {"P2_BIND_B", "input"}, {"P2_BIND_X", "input"}, {"P2_BIND_Y", "input"}, {"P2_BIND_LCLICK", "input"}, {"P2_BIND_RCLICK", "input"}, {"P2_BIND_L", "input"}, {"P2_BIND_R", "input"}, {"P2_BIND_ZL", "input"}, {"P2_BIND_ZR", "input"}, {"P2_BIND_PLUS", "input"}, {"P2_BIND_MINUS", "input"}, {"P2_BIND_LEFT", "input"}, {"P2_BIND_UP", "input"}, {"P2_BIND_RIGHT", "input"}, {"P2_BIND_DOWN", "input"}, {"P2_BIND_LSTICK_LEFT", "input"}, {"P2_BIND_LSTICK_UP", "input"}, {"P2_BIND_LSTICK_RIGHT", "input"}, {"P2_BIND_LSTICK_DOWN", "input"}, {"P2_BIND_RSTICK_LEFT", "input"}, {"P2_BIND_RSTICK_UP", "input"}, {"P2_BIND_RSTICK_RIGHT", "input"}, {"P2_BIND_RSTICK_DOWN", "input"}, {"P2_BIND_MENU", "input"},
+    {"BINDS_PLAYER", "input"}, {"PAD_LAYOUT", "input"}, {"PLAYER1_DEVICE", "input"}, {"PLAYER1_TYPE", "input"}, {"PLAYER2_DEVICE", "input"},
+    {"PLAYER2_TYPE", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
     {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
     {"BIND_RIGHT", "input"}, {"BIND_DOWN", "input"}, {"BIND_LSTICK_LEFT", "input"}, {"BIND_LSTICK_UP", "input"},
     {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
-    {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"},
+    {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"}, {"BIND_MENU", "input"},
     {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"FREE_CORES", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"},
     {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"PIPE_PREBUILD", "performance"},
@@ -95,7 +99,7 @@ static const struct { const char *key, *section; } sections[] = {
 #define RESTART 0
 static const CfgMeta metas[] = {
     // Screen
-    {"FULLSCREEN", "0", "0|1", LIVE}, {"WINDOW_SIZE", "1920x1080", NULL, LIVE},
+    {"FULLSCREEN", "0", "0|1", LIVE}, {"WINDOW_SIZE", "1280x720", NULL, LIVE},
     {"VK_PRESENT", "mailbox", "mailbox|fifo|immediate", LIVE}, {"GPU_INDEX", "", NULL, RESTART},
     {"PERF_OVERLAY", "off", "off|fps|full", LIVE},
 #if RT_TARGET_HWAOI
@@ -121,12 +125,16 @@ static const CfgMeta metas[] = {
     {"REALTIME", "1", "0|1", RESTART}, {"CLOTH_REALTIME", "1", "0|1", RESTART},
     {"HIGHFPS_FIX", "1", "0|1", RESTART},
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR", RESTART},
-    {"OPERATION_MODE", "docked", "docked|handheld", RESTART},
+    {"OPERATION_MODE", "docked", "docked|handheld", LIVE},
     {"ASSUME_FOCUS", "1", "0|1", LIVE},   // read on every focus change (ov_system.c)
     // Sound, Controls, Menu
     {"VOLUME", "100", "0..100", LIVE},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
     {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
+    // Players (input.c assign): auto | keyboard | none | pad:<SDL GUID>:<n>; controller type pro (Pro Controller) | dual (Joy-Con pair)
+    {"PLAYER1_DEVICE", "auto", NULL, LIVE}, {"PLAYER1_TYPE", "pro", "pro|dual", LIVE},
+    {"PLAYER2_DEVICE", "auto", NULL, LIVE}, {"PLAYER2_TYPE", "pro", "pro|dual", LIVE},
+    {"BINDS_PLAYER", "1", "1|2", LIVE},   // the player whose bindings the Controls tab remap rows edit
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|ru", LIVE},
     // Advanced: scheduling

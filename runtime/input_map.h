@@ -11,10 +11,16 @@
 enum {
     B_A = 0, B_B, B_X, B_Y, B_STICK_L, B_STICK_R, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN,
     B_SL_LEFT = 16, B_SL_UP, B_SL_RIGHT, B_SL_DOWN, B_SR_LEFT, B_SR_UP, B_SR_RIGHT, B_SR_DOWN,
-    ACTION_COUNT = 24
+    // Not a Switch button: opens the menu (Esc by default; no gamepad button unless bound). input.c takes its bit off
+    // before the game sees it.
+    B_MENU = 24,
+    ACTION_COUNT = 25
 };
+// Actions a gamepad button can drive: the Switch buttons and the menu (the stick directions take keys only).
+#define INPUT_IS_BUTTON(a) ((a) < B_SL_LEFT || (a) == B_MENU)
 
-// Keys and mouse buttons. F1, F10, F11 and Esc belong to the menu and the window, F8 to the flight recorder: no ids.
+// Keys and mouse buttons. F1, F10 and F11 belong to the menu and the window, F8 to the flight recorder: no ids. Esc is
+// the default menu key (B_MENU) and always cancels a key capture, so the remapping rows never bind it.
 enum {
     KEY_NONE = 0,
     KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J, KEY_K, KEY_L, KEY_M,   // letters and digits are
@@ -30,6 +36,7 @@ enum {
     // the punctuation keys of a US keyboard, by position; the character on the key follows the keyboard layout
     KEY_MINUS, KEY_EQUALS, KEY_LBRACKET, KEY_RBRACKET, KEY_SEMICOLON, KEY_APOSTROPHE, KEY_COMMA, KEY_PERIOD, KEY_SLASH,
     KEY_BACKSLASH, KEY_GRAVE,
+    KEY_ESCAPE,
     KEY_COUNT
 };
 
@@ -63,8 +70,17 @@ typedef struct InputMap {
 
 // The tables in effect. Defaults are the layout in docs/controls.md; input_map_reset restores them.
 extern InputMap input_map;
+// Co-op: each player has its own tables. Player 1's are input_map (TOTK_BIND_<action>), player 2's input_map_p2
+// (TOTK_P2_BIND_<action>); both start from the defaults.
+extern InputMap input_map_p2;
+InputMap *input_map_player(int player);
+// The setting name holding player's line for action: TOTK_BIND_<action> or TOTK_P2_BIND_<action>.
+void input_bind_var(int player, int action, char *out, size_t n);
 
 void input_map_reset(void);
+// 1 when key opens the menu for either player (bound to B_MENU). Read by the window thread unlocked: a race with a
+// remap only decides one key press.
+int input_map_key_opens_menu(int key);
 // The script and totk.ini names, any case when parsed; NULL for an id without one. Actions: A B X Y LCLICK RCLICK L R ZL
 // ZR PLUS MINUS LEFT UP RIGHT DOWN, then LSTICK_LEFT LSTICK_UP LSTICK_RIGHT LSTICK_DOWN and the same for RSTICK (the
 // stick directions the keys drive). Keys: a-z 0-9 space tab lshift ... (key_names in input_map.c). Pads: south east ...
@@ -77,6 +93,7 @@ const char *input_pad_name(int pad);
 // layout; pad:default keeps each layout's own button. Stick directions take keys only. Invalid entries are logged and
 // skipped; when none is valid the action keeps its bindings. 1 when applied.
 int input_map_bind(const char *button, const char *list);
+int input_map_bind_into(InputMap *m, const char *button, const char *list);   // the same into table m
 // Applies the TOTK_BIND_<action> settings (cfg_get) over the defaults: at start, and again when one of them changes.
 void input_map_configure(void);
 
@@ -87,12 +104,15 @@ void input_map_configure(void);
 int input_pad_layout_pick(const char *setting, int east_labelled_a);
 // down[pad] != 0 for the gamepad inputs held. Returns the Switch button bits (0..15) the layout's pad table presses.
 uint64_t input_map_pad_buttons(const uint8_t down[PAD_COUNT], int layout);
+uint64_t input_map_pad_buttons_m(const InputMap *m, const uint8_t down[PAD_COUNT], int layout);   // with table m
 
 // down[key] != 0 for the keys held. Returns the Switch button bits (0..15) the table presses.
 uint64_t input_map_buttons(const uint8_t down[KEY_COUNT]);
+uint64_t input_map_buttons_m(const InputMap *m, const uint8_t down[KEY_COUNT]);   // with table m
 // out = x, y of the stick (0 left, 1 right) from its four direction actions; up is +y; a diagonal is scaled to the
 // unit circle.
 void input_map_stick(const uint8_t down[KEY_COUNT], int stick, int32_t out[2]);
+void input_map_stick_m(const InputMap *m, const uint8_t down[KEY_COUNT], int stick, int32_t out[2]);
 // Mouse motion in raw counts over dt_s seconds to right-stick deflection: full deflection at 3000 / sens counts/s.
 // Clamped to the unit circle, up (negative dy) is +y.
 void input_mouse_stick(int32_t dx, int32_t dy, double dt_s, float sens, int32_t out[2]);

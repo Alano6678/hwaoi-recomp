@@ -16,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from compiler.backend import RESOLUTIONS, STATE
 
 
+OUTPUT_NAME = "HWAoI-Game"   # a new build's folder inside the chosen parent
+
+
 class Window:
     def __init__(self, root, bundle):
         self.root, self.bundle = root, bundle
@@ -24,7 +27,7 @@ class Window:
         self.nup, self.output = tk.StringVar(), tk.StringVar()
         self.update_nup, self.dlc_nup = tk.StringVar(), tk.StringVar()   # optional; empty = not used
         self.resolution = tk.StringVar(value="1920x1080")
-        self.unlock = tk.BooleanVar(value=False)
+        self.unlock = tk.BooleanVar(value=True)
         self.jobs = tk.IntVar(value=0)
         self.status = tk.StringVar(value="Select your game NUP and a new or existing HWAoI output folder.")
         root.title("HWAoI Recomp Compiler")
@@ -67,15 +70,16 @@ class Window:
         self.fields.append(resolution)
         options = ttk.Frame(panel)
         options.grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 5))
-        unlock = ttk.Checkbutton(options, text="Enable experimental 30 / 60 / 90 / 120 FPS controls", variable=self.unlock)
+        unlock = ttk.Checkbutton(options, text="Allow 90 / 120 FPS settings (they speed up the game)", variable=self.unlock)
         unlock.pack(side="left")
         ttk.Label(options, text="    Build jobs (0 = auto)").pack(side="left")
         jobs = ttk.Spinbox(options, from_=0, to=8, width=3, textvariable=self.jobs)
         jobs.pack(side="left", padx=7)
         self.fields.extend((unlock, jobs))
         ttk.Label(panel, foreground="#875300", wraplength=780, text=
-                  "Non-60 FPS modes currently accelerate gameplay. Higher resolutions are unstable. "
-                  "1080p / 60 FPS is the testing baseline.").grid(row=9, column=0, columnspan=4, sticky="w", pady=(5, 9))
+                  "90 / 120 FPS speed up the whole game (1.5x / 2x): gameplay advances a fixed step per frame. "
+                  "Play at 60 FPS for normal speed, and use frame generation (e.g. Lossless Scaling 2x) for smoother "
+                  "motion. Higher resolutions are unstable.").grid(row=9, column=0, columnspan=4, sticky="w", pady=(5, 9))
         ttk.Label(panel, style="Sub.TLabel", wraplength=780, text=
                   "Windows 10/11 x64, AVX2 CPU and Vulkan graphics required. Keep the game NUP after compiling "
                   "(update and DLC files are copied into the output). "
@@ -113,9 +117,9 @@ class Window:
             self.dlc_nup.set(value)
 
     def pick_output(self):
-        parent = filedialog.askdirectory(title="Select an existing HWAoI output or a parent folder for a new build")
+        parent = filedialog.askdirectory(title="Select an existing game output folder, or a parent folder for a new build")
         if parent:
-            selected = Path(parent) if (Path(parent) / STATE).is_file() else Path(parent) / "HWAoI-Game"
+            selected = Path(parent) if (Path(parent) / STATE).is_file() else Path(parent) / OUTPUT_NAME
             self.output.set(str(selected))
             if (selected / STATE).is_file():
                 try:
@@ -125,7 +129,7 @@ class Window:
                         self.update_nup.set(state.get("update_nup") or "")
                         self.dlc_nup.set(state.get("dlc_nup") or "")
                     self.resolution.set(state.get("resolution", "1920x1080"))
-                    self.unlock.set(state.get("rate_unlock", False))
+                    self.unlock.set(state.get("rate_unlock", True))
                 except (OSError, ValueError):
                     pass
 
@@ -238,7 +242,7 @@ def main():
         root.update()
         root.update_idletasks()
         root.update()
-        assert not window.unlock.get() and window.resolution.get() == "1920x1080"
+        assert window.unlock.get() and window.resolution.get() == "1920x1080"
         assert window.jobs.get() == 0
         assert window.update_nup.get() == "" and window.dlc_nup.get() == ""
         for widget in (window.build_button, window.launch_button, window.cancel_button, window.log):

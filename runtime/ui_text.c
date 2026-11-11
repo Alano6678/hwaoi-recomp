@@ -36,7 +36,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SAVE_FAILED] = "could not save settings",
     [UI_MENU_VERSION] = RT_GAME_TITLE " %s",
 
-    [UI_MENU_FULLSCREEN] = "Fullscreen", [UI_MENU_FULLSCREEN_DESC] = "Fills the screen with the game; F11 toggles it.",
+    [UI_MENU_FULLSCREEN] = "Fullscreen", [UI_MENU_WINDOWED] = "Windowed", [UI_MENU_FULLSCREEN_MODE] = "Fullscreen", [UI_MENU_FULLSCREEN_DESC] = "Fills the screen with the game; F11 toggles it.",
     [UI_MENU_WINDOW_SIZE] = "Window size", [UI_MENU_WINDOW_SIZE_DESC] = "Size of the game window when not fullscreen.",
     [UI_MENU_WINDOW_SIZE_CUSTOM] = "Custom",
     [UI_MENU_PRESENT] = "Presentation", [UI_MENU_PRESENT_DESC] = "How finished frames reach the screen.",
@@ -96,8 +96,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
 
     [UI_MENU_FPS_LIMIT] = "Target frame rate",
 #if RT_TARGET_HWAOI
-    [UI_MENU_FPS_LIMIT_DESC] = "Target frame rate. Actual FPS depends on the scene and hardware. With the experimental "
-                               "native rate unlock enabled, modes other than 60 FPS currently accelerate gameplay.",
+    [UI_MENU_FPS_LIMIT_DESC] = "WARNING: 90 and 120 FPS speed up the whole game (1.5x and 2x), because gameplay advances "
+                               "one fixed step per frame. Use 60 FPS for normal speed; for smoother motion keep 60 FPS "
+                               "and add frame generation (for example Lossless Scaling 2x).",
 #else
     [UI_MENU_FPS_LIMIT_DESC] = "The most frames per second the game draws. Above 60 is experimental and needs Game speed "
                                "follows the clock.",
@@ -148,9 +149,32 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_DESC] = "How far a gamepad stick moves before the game sees it. Raise it if the character or the camera moves on its own.",
     [UI_MENU_MOUSE_SENS] = "Mouse camera sensitivity",
     [UI_MENU_MOUSE_SENS_DESC] = "How fast the mouse turns the camera.",
+    [UI_MENU_PLAYERS] = "Players and console",
+    [UI_BINDS_PLAYER] = "Bindings for",
+    [UI_BINDS_PLAYER_DESC] = "Whose buttons the rows below change. Each player has their own bindings, for their keyboard "
+                             "and their gamepad; change this row (left / right) to switch between player 1 and player 2.",
+    [UI_BINDS_PLAYER_1] = "Player 1", [UI_BINDS_PLAYER_2] = "Player 2",
+    [UI_MENU_CONSOLE_MODE] = "Console mode",
+    [UI_MENU_CONSOLE_MODE_DESC] = "Docked or handheld, as if the console were in or out of its dock. Switching while playing "
+                                  "tells the game the console was docked or undocked. Two-player mode always uses separate "
+                                  "controllers.",
+    [UI_MENU_CONSOLE_DOCKED] = "Docked", [UI_MENU_CONSOLE_HANDHELD] = "Handheld",
+    [UI_MENU_PLAYER1_DEVICE] = "Player 1 input", [UI_MENU_PLAYER2_DEVICE] = "Player 2 input",
+    [UI_MENU_PLAYER_DEVICE_DESC] = "The device this player uses: a gamepad of any brand, or the keyboard and mouse. Each device "
+                                   "drives one player only. Auto takes the next free gamepad; player 1 also keeps the "
+                                   "keyboard and mouse unless another player chose them.",
+    [UI_MENU_PLAYER1_TYPE] = "Player 1 controller", [UI_MENU_PLAYER2_TYPE] = "Player 2 controller",
+    [UI_MENU_PLAYER_TYPE_DESC] = "The Switch controller the game sees for this player. Any gamepad works as either; Pro "
+                                 "Controller is the usual choice.",
+    [UI_MENU_DEVICE_AUTO] = "Auto", [UI_MENU_DEVICE_KEYBOARD] = "Keyboard and mouse", [UI_MENU_DEVICE_NONE] = "None",
+    [UI_MENU_DEVICE_MISSING] = "Gamepad not connected",
+    [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Joy-Con pair",
+    [UI_MENU_PLAYER2_OFF_NOTE] = "not connected",
 
-    [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or "
-                      "X clears a cell. A key in use moves here; a controller button swaps with the one it replaces.",
+    [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button, or click "
+                      "Leave unbound to leave it empty. Delete or X also clears a cell. A key in use moves here; a "
+                      "controller button swaps with the one it replaces.",
+    [UI_BINDS_UNBIND] = "Leave unbound",
     [UI_BINDS_COL_KEY1] = "Key 1", [UI_BINDS_COL_KEY2] = "Key 2", [UI_BINDS_COL_PAD] = "Controller",
     [UI_BINDS_GROUP_BUTTONS] = "Buttons", [UI_BINDS_GROUP_MOVE] = "Movement", [UI_BINDS_GROUP_CAMERA] = "Camera",
     [UI_BINDS_PRESS_KEY] = "Press a key or mouse button for %s",
@@ -167,7 +191,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_BIND_LSTICK_LEFT] = "Move left", [UI_BIND_LSTICK_UP] = "Move forward", [UI_BIND_LSTICK_RIGHT] = "Move right",
     [UI_BIND_LSTICK_DOWN] = "Move back",
     [UI_BIND_RSTICK_LEFT] = "Camera left", [UI_BIND_RSTICK_UP] = "Camera up", [UI_BIND_RSTICK_RIGHT] = "Camera right",
-    [UI_BIND_RSTICK_DOWN] = "Camera down",
+    [UI_BIND_RSTICK_DOWN] = "Camera down", [UI_BIND_MENU] = "Open menu",
+    [UI_BIND_DESC_MENU] = "Opens and closes this menu. Esc on the keyboard; controllers have no button for it until you "
+                          "bind one. Held for half a second, that controller button presses Minus (map) instead.",
     [UI_BIND_DESC_A] = "Interact, pick up, talk.", [UI_BIND_DESC_B] = "Run, cancel, go back.",
     [UI_BIND_DESC_X] = "Jump.", [UI_BIND_DESC_Y] = "Attack.", [UI_BIND_DESC_LCLICK] = "Crouch.",
     [UI_BIND_DESC_RCLICK] = "First-person view.", [UI_BIND_DESC_L] = "Abilities.",
@@ -307,7 +333,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SAVE_FAILED] = "не удалось сохранить настройки",
     [UI_MENU_VERSION] = RT_GAME_TITLE " %s",
 
-    [UI_MENU_FULLSCREEN] = "Полный экран", [UI_MENU_FULLSCREEN_DESC] = "Игра на весь экран; F11 переключает режим.",
+    [UI_MENU_FULLSCREEN] = "Полный экран", [UI_MENU_WINDOWED] = "В окне", [UI_MENU_FULLSCREEN_MODE] = "Полный экран", [UI_MENU_FULLSCREEN_DESC] = "Игра на весь экран; F11 переключает режим.",
     [UI_MENU_WINDOW_SIZE] = "Размер окна", [UI_MENU_WINDOW_SIZE_DESC] = "Размер окна игры вне полноэкранного режима.",
     [UI_MENU_WINDOW_SIZE_CUSTOM] = "Другой",
     [UI_MENU_PRESENT] = "Вывод кадров", [UI_MENU_PRESENT_DESC] = "Как готовые кадры попадают на экран.",
@@ -362,8 +388,14 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_GAMMA_DESC] = "Ниже 1 осветляет тёмные и средние тона, выше 1 затемняет их; 1 — без изменений.",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
+#if RT_TARGET_HWAOI
+    [UI_MENU_FPS_LIMIT_DESC] = "ВНИМАНИЕ: 90 и 120 FPS ускоряют всю игру (в 1,5 и 2 раза), потому что игровая логика "
+                               "делает фиксированный шаг за кадр. Для нормальной скорости выберите 60 FPS; для плавности "
+                               "оставьте 60 FPS и включите генерацию кадров (например, Lossless Scaling 2x).",
+#else
     [UI_MENU_FPS_LIMIT_DESC] = "Наибольшее число кадров в секунду. Выше 60 — экспериментальный режим, нужна «Скорость "
                                "игры по часам».",
+#endif
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_FPS_DISPLAY] = "Как у монитора", [UI_MENU_FPS_DISPLAY_HZ] = "Как у монитора (%.0f Гц)",
@@ -410,7 +442,26 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_DESC] = "Насколько нужно отклонить стик геймпада, чтобы игра это заметила. Увеличьте, если персонаж или камера двигаются сами.",
     [UI_MENU_MOUSE_SENS] = "Чувствительность мыши",
     [UI_MENU_MOUSE_SENS_DESC] = "Как быстро мышь поворачивает камеру.",
+    [UI_MENU_PLAYERS] = "Игроки и консоль",
+    [UI_BINDS_PLAYER] = "Назначения для",
+    [UI_BINDS_PLAYER_DESC] = "Чьи кнопки меняют строки ниже. У каждого игрока свои назначения; выберите эту строку, чтобы "
+                             "переключиться между игроком 1 и игроком 2.",
+    [UI_BINDS_PLAYER_1] = "Игрок 1", [UI_BINDS_PLAYER_2] = "Игрок 2",
+    [UI_MENU_CONSOLE_MODE] = "Режим консоли",
+    [UI_MENU_CONSOLE_MODE_DESC] = "Стационарный или портативный режим, как если бы консоль стояла в док-станции или нет. "
+                                  "Переключение во время игры сообщает игре о подключении или отключении док-станции.",
+    [UI_MENU_CONSOLE_DOCKED] = "Стационарный", [UI_MENU_CONSOLE_HANDHELD] = "Портативный",
+    [UI_MENU_PLAYER1_DEVICE] = "Ввод игрока 1", [UI_MENU_PLAYER2_DEVICE] = "Ввод игрока 2",
+    [UI_MENU_PLAYER_DEVICE_DESC] = "Устройство этого игрока: геймпад любой марки или клавиатура с мышью. Каждое устройство "
+                                   "управляет только одним игроком. «Авто» берёт следующий свободный геймпад.",
+    [UI_MENU_PLAYER1_TYPE] = "Контроллер игрока 1", [UI_MENU_PLAYER2_TYPE] = "Контроллер игрока 2",
+    [UI_MENU_PLAYER_TYPE_DESC] = "Контроллер Switch, который видит игра для этого игрока.",
+    [UI_MENU_DEVICE_AUTO] = "Авто", [UI_MENU_DEVICE_KEYBOARD] = "Клавиатура и мышь", [UI_MENU_DEVICE_NONE] = "Нет",
+    [UI_MENU_DEVICE_MISSING] = "Геймпад не подключён",
+    [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Пара Joy-Con",
+    [UI_MENU_PLAYER2_OFF_NOTE] = "не подключён",
 
+    [UI_BINDS_UNBIND] = "Оставить пустым",
     [UI_BINDS_HELP] = "Выберите ячейку и нажмите A или Enter, затем клавишу, кнопку мыши или кнопку контроллера. "
                       "Delete или X очищает ячейку. Занятая клавиша переходит сюда; кнопка контроллера меняется "
                       "местами с той, которую заменяет.",
@@ -433,6 +484,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_BIND_LSTICK_DOWN] = "Назад",
     [UI_BIND_RSTICK_LEFT] = "Камера влево", [UI_BIND_RSTICK_UP] = "Камера вверх",
     [UI_BIND_RSTICK_RIGHT] = "Камера вправо", [UI_BIND_RSTICK_DOWN] = "Камера вниз",
+    [UI_BIND_MENU] = "Открыть меню",
+    [UI_BIND_DESC_MENU] = "Открывает и закрывает это меню. Esc на клавиатуре; на контроллере кнопки нет, пока вы её не "
+                          "назначите. Удержание этой кнопки полсекунды нажимает Минус (карта).",
     [UI_BIND_DESC_A] = "Взаимодействие, подобрать, поговорить.", [UI_BIND_DESC_B] = "Бег, отмена, назад.",
     [UI_BIND_DESC_X] = "Прыжок.", [UI_BIND_DESC_Y] = "Атака.", [UI_BIND_DESC_LCLICK] = "Присесть.",
     [UI_BIND_DESC_RCLICK] = "Вид от первого лица.", [UI_BIND_DESC_L] = "Способности.",

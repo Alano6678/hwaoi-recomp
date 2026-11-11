@@ -20,7 +20,7 @@
     {KEY_SPACE, B_X}, {KEY_LSHIFT, B_B}, {KEY_E, B_A}, {KEY_Q, B_L}, {KEY_R, B_R}, \
     {KEY_LCTRL, B_STICK_L}, {KEY_C, B_STICK_R}, \
     {KEY_1, B_LEFT}, {KEY_2, B_UP}, {KEY_3, B_RIGHT}, {KEY_4, B_DOWN}, \
-    {KEY_TAB, B_PLUS}, {KEY_M, B_MINUS}
+    {KEY_TAB, B_PLUS}, {KEY_M, B_MINUS}, {KEY_ESCAPE, B_MENU}
 
 // By position: south is Switch B, east A, west Y, north X (Nintendo layout); the Xbox layout swaps A with B and X with Y
 // (south A, as the Xbox labels; cross A on a PlayStation pad). The triggers are ZL and ZR.
@@ -31,17 +31,27 @@
     {PAD_ZR, B_ZR}
 #define NINTENDO_PADS DEFAULT_PADS(B_B, B_A, B_Y, B_X)
 #define XBOX_PADS DEFAULT_PADS(B_A, B_B, B_X, B_Y)
-enum { DEFAULT_KEY_COUNT = 26, DEFAULT_PAD_COUNT = 16 };
+// Open menu (B_MENU) is Esc only: no gamepad button by default; the remapping rows can give it one (input.c).
+enum { DEFAULT_KEY_COUNT = 27, DEFAULT_PAD_COUNT = 16 };
 _Static_assert(sizeof (Binding[]){DEFAULT_KEYS} / sizeof (Binding) == DEFAULT_KEY_COUNT, "DEFAULT_KEY_COUNT");
 
 static const InputMap defaults = {{DEFAULT_KEYS}, DEFAULT_KEY_COUNT, {{NINTENDO_PADS}, {XBOX_PADS}},
                                   {DEFAULT_PAD_COUNT, DEFAULT_PAD_COUNT}};
 InputMap input_map = {{DEFAULT_KEYS}, DEFAULT_KEY_COUNT, {{NINTENDO_PADS}, {XBOX_PADS}},
                       {DEFAULT_PAD_COUNT, DEFAULT_PAD_COUNT}};
+InputMap input_map_p2 = {{DEFAULT_KEYS}, DEFAULT_KEY_COUNT, {{NINTENDO_PADS}, {XBOX_PADS}},
+                         {DEFAULT_PAD_COUNT, DEFAULT_PAD_COUNT}};
+
+InputMap *input_map_player(int player) { return player == 1 ? &input_map_p2 : &input_map; }
+
+void input_bind_var(int player, int action, char *out, size_t n) {
+    snprintf(out, n, player == 1 ? "TOTK_P2_BIND_%s" : "TOTK_BIND_%s", input_action_name(action));
+}
 
 static const char *const action_names[ACTION_COUNT] = {
     "A", "B", "X", "Y", "LCLICK", "RCLICK", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN",
-    "LSTICK_LEFT", "LSTICK_UP", "LSTICK_RIGHT", "LSTICK_DOWN", "RSTICK_LEFT", "RSTICK_UP", "RSTICK_RIGHT", "RSTICK_DOWN"};
+    "LSTICK_LEFT", "LSTICK_UP", "LSTICK_RIGHT", "LSTICK_DOWN", "RSTICK_LEFT", "RSTICK_UP", "RSTICK_RIGHT", "RSTICK_DOWN",
+    "MENU"};
 static const char *const pad_names[PAD_COUNT] = {
     NULL, "south", "east", "west", "north", "lstick", "rstick", "l", "r", "start", "back",
     "dpad_left", "dpad_up", "dpad_right", "dpad_down", "zl", "zr", "lpaddle1", "rpaddle1", "lpaddle2", "rpaddle2"};
@@ -57,13 +67,23 @@ static const char *const key_names[KEY_COUNT] = {   // each group starts at its 
     [KEY_NUM0] = "num0", "num1", "num2", "num3", "num4", "num5", "num6", "num7", "num8", "num9",
     [KEY_NUM_ADD] = "num_add", "num_sub", "num_mul", "num_div", "num_decimal",
     [KEY_MINUS] = "minus", "equals", "lbracket", "rbracket", "semicolon", "apostrophe", "comma", "period", "slash",
-    "backslash", "grave"};
+    "backslash", "grave", "escape"};
 
 const char *input_action_name(int action) { return action >= 0 && action < ACTION_COUNT ? action_names[action] : NULL; }
 const char *input_key_name(int key) { return key > KEY_NONE && key < KEY_COUNT ? key_names[key] : NULL; }
 const char *input_pad_name(int pad) { return pad > PAD_NONE && pad < PAD_COUNT ? pad_names[pad] : NULL; }
 
-void input_map_reset(void) { input_map = defaults; }
+void input_map_reset(void) { input_map = defaults; input_map_p2 = defaults; }
+
+int input_map_key_opens_menu(int key) {
+    if (key <= KEY_NONE || key >= KEY_COUNT) return 0;
+    for (int p = 0; p < 2; p++) {
+        const InputMap *m = input_map_player(p);
+        for (int i = 0; i < m->nkeys; i++)
+            if (m->keys[i].key == key && m->keys[i].action == B_MENU) return 1;
+    }
+    return 0;
+}
 
 static int key_id(const char *name) {
     for (int k = KEY_A; k < KEY_COUNT; k++)
@@ -117,7 +137,7 @@ static void pads_put(InputMap *m, int layout, int action, const uint8_t *list, i
         t[m->npads[layout]++] = (PadBinding){list[i], (uint8_t)action};
 }
 
-int input_map_bind(const char *button, const char *list) {
+int input_map_bind_into(InputMap *m, const char *button, const char *list) {
     int action = -1;
     for (int a = 0; a < ACTION_COUNT; a++)
         if (!strcasecmp(action_names[a], button)) action = a;
@@ -130,7 +150,7 @@ int input_map_bind(const char *button, const char *list) {
         tok = trim(tok);
         if (!strcasecmp(tok, "none")) { none = 1; continue; }
         int ok = 0;
-        if (!strncasecmp(tok, "pad:", 4) && action < B_SL_LEFT) {
+        if (!strncasecmp(tok, "pad:", 4) && INPUT_IS_BUTTON(action)) {
             const char *name = trim(tok + 4);
             int p = pad_id(name);
             if (!strcasecmp(name, "default")) pad_def = ok = 1;
@@ -154,24 +174,27 @@ int input_map_bind(const char *button, const char *list) {
     uint8_t list_k[INPUT_BINDING_MAX];
     int n = key_def ? input_map_keys_of(&defaults, action, list_k, INPUT_BINDING_MAX) : 0;
     for (int i = 0; i < nk && n < INPUT_BINDING_MAX; i++) list_k[n++] = keys[i];
-    keys_put(&input_map, action, list_k, n);
+    keys_put(m, action, list_k, n);
     for (int l = 0; l < PAD_LAYOUT_COUNT; l++) {   // a bind line names physical buttons: the same in every layout
         uint8_t list_p[INPUT_PAD_BINDING_MAX];
         int c = pad_def ? input_map_pads_of(&defaults, action, l, list_p, INPUT_PAD_BINDING_MAX) : 0;
         for (int i = 0; i < np && c < INPUT_PAD_BINDING_MAX; i++) list_p[c++] = pads[i];
-        pads_put(&input_map, l, action, list_p, c);
+        pads_put(m, l, action, list_p, c);
     }
     return 1;
 }
 
+int input_map_bind(const char *button, const char *list) { return input_map_bind_into(&input_map, button, list); }
+
 void input_map_configure(void) {
     input_map_reset();
-    for (int a = 0; a < ACTION_COUNT; a++) {
-        char var[32];
-        snprintf(var, sizeof var, "TOTK_BIND_%s", action_names[a]);
-        const char *v = cfg_get(var);
-        if (v && *v && input_map_bind(action_names[a], v)) rt_log("input: %s = %s", var + 5, v);
-    }
+    for (int p = 0; p < 2; p++)
+        for (int a = 0; a < ACTION_COUNT; a++) {
+            char var[40];
+            input_bind_var(p, a, var, sizeof var);
+            const char *v = cfg_get(var);
+            if (v && *v && input_map_bind_into(input_map_player(p), action_names[a], v)) rt_log("input: %s = %s", var + 5, v);
+        }
 }
 
 int input_map_set_key(InputMap *m, int action, int slot, int key) {
@@ -205,7 +228,8 @@ static int same_set(const uint8_t *a, int na, const uint8_t *b, int nb);
 
 // Every action has its default gamepad buttons in layout.
 static int pads_at_defaults(const InputMap *m, int layout) {
-    for (int a = 0; a < B_SL_LEFT; a++) {
+    for (int a = 0; a < ACTION_COUNT; a++) {
+        if (!INPUT_IS_BUTTON(a)) continue;
         uint8_t p[INPUT_PAD_BINDING_MAX], dp[INPUT_PAD_BINDING_MAX];
         int np = input_map_pads_of(m, a, layout, p, INPUT_PAD_BINDING_MAX);
         if (!same_set(p, np, dp, input_map_pads_of(&defaults, a, layout, dp, INPUT_PAD_BINDING_MAX))) return 0;
@@ -272,7 +296,7 @@ void input_map_line(const InputMap *m, int action, char *out, size_t n) {
     if (key_def) PUT("key:default");
     else
         for (int i = 0; i < nk; i++) PUT("%skey:%s", len ? ", " : "", key_names[k[i]]);
-    if (pad_def && action < B_SL_LEFT) PUT("%spad:default", len ? ", " : "");
+    if (pad_def && INPUT_IS_BUTTON(action)) PUT("%spad:default", len ? ", " : "");
     else if (!pad_def) {
         uint8_t p[INPUT_PAD_BINDING_MAX];
         int np = input_map_pads_of(m, action, PAD_LAYOUT_NINTENDO, p, INPUT_PAD_BINDING_MAX);
@@ -288,31 +312,39 @@ int input_pad_layout_pick(const char *setting, int east_labelled_a) {
     return east_labelled_a ? PAD_LAYOUT_NINTENDO : PAD_LAYOUT_XBOX;
 }
 
-uint64_t input_map_pad_buttons(const uint8_t down[PAD_COUNT], int layout) {
-    const PadBinding *t = input_map.pads[layout];
+uint64_t input_map_pad_buttons_m(const InputMap *m, const uint8_t down[PAD_COUNT], int layout) {
+    const PadBinding *t = m->pads[layout];
     uint64_t b = 0;
-    for (int i = 0; i < input_map.npads[layout]; i++)
+    for (int i = 0; i < m->npads[layout]; i++)
         if (down[t[i].pad]) b |= 1ull << t[i].action;
     return b;
 }
-
-uint64_t input_map_buttons(const uint8_t down[KEY_COUNT]) {
-    uint64_t b = 0;
-    for (int i = 0; i < input_map.nkeys; i++)
-        if (input_map.keys[i].action < B_SL_LEFT && down[input_map.keys[i].key]) b |= 1ull << input_map.keys[i].action;
-    return b;
+uint64_t input_map_pad_buttons(const uint8_t down[PAD_COUNT], int layout) {
+    return input_map_pad_buttons_m(&input_map, down, layout);
 }
 
+uint64_t input_map_buttons_m(const InputMap *m, const uint8_t down[KEY_COUNT]) {
+    uint64_t b = 0;
+    for (int i = 0; i < m->nkeys; i++)
+        if (m->keys[i].action < B_SL_LEFT && down[m->keys[i].key]) b |= 1ull << m->keys[i].action;
+    return b;
+}
+uint64_t input_map_buttons(const uint8_t down[KEY_COUNT]) { return input_map_buttons_m(&input_map, down); }
+
 void input_map_stick(const uint8_t down[KEY_COUNT], int stick, int32_t out[2]) {
+    input_map_stick_m(&input_map, down, stick, out);
+}
+
+void input_map_stick_m(const InputMap *m, const uint8_t down[KEY_COUNT], int stick, int32_t out[2]) {
     int first = stick ? B_SR_LEFT : B_SL_LEFT, dir[4] = {0, 0, 0, 0};   // left, up, right, down
-    for (int i = 0; i < input_map.nkeys; i++) {
-        int a = input_map.keys[i].action - first;
-        if (a >= 0 && a < 4 && down[input_map.keys[i].key]) dir[a] = 1;
+    for (int i = 0; i < m->nkeys; i++) {
+        int a = m->keys[i].action - first;
+        if (a >= 0 && a < 4 && down[m->keys[i].key]) dir[a] = 1;
     }
     int dx = dir[2] - dir[0], dy = dir[1] - dir[3];
-    int32_t m = dx && dy ? DIAGONAL : STICK_MAX;
-    out[0] = dx * m;
-    out[1] = dy * m;
+    int32_t mag = dx && dy ? DIAGONAL : STICK_MAX;
+    out[0] = dx * mag;
+    out[1] = dy * mag;
 }
 
 void input_mouse_stick(int32_t dx, int32_t dy, double dt_s, float sens, int32_t out[2]) {
