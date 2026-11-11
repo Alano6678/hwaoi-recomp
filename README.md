@@ -17,7 +17,11 @@ The game's ARM64 code is translated to C ahead of time and compiled with a C/C++
 
 Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
 
-Current source packs viewport and fixed-state command records and bounds the reusable upload-batch cache. A paired opening-scene log comparison at 1080p / 60 FPS measured retained command-copy peaks of **1128 → 1013 MiB** (about 10% lower), a **137 MiB** lower process private-commit peak, and **59.9 FPS** in both runs. These measurements cover the stationary opening scene; 16 GiB RAM systems and extended combat still need validation.
+Current source uses compact host command records, smaller Vulkan allocation pools and bounded background reclamation of completed CPU command copies. An opening-field census stored the equivalent of **186 MiB** of dense records in **128 MiB** (about 31.3% less). Large copy-retirement events fell from approximately **193 ms** on the recording thread to **3–5 ms**. These changes reduce memory overhead and periodic stalls; a paired opening-field test did not establish a sustained FPS gain.
+
+Unused single-stage NVN2 program source is now retained with lossless compression and a checksum, then expanded on first use. An opening-field test before the recent performance PRs saved approximately **166 MiB** of host allocations; the compressed payload is released after expansion. That same-executable comparison measured **76.9 FPS** with compression both enabled and disabled. Registration-time compute prefetch also uses checked expansion. These figures cover this scene and do not establish combat performance.
+
+An opt-in Windows demand-commit heap experiment also left approximately **1.4 GiB** of guest heap backing uncommitted in the tested opening, while preserving the guest-visible heap capacity. It remains disabled by default. These measurements cover the opening field; 16 GiB RAM systems and extended combat still need validation.
 
 > [!WARNING]
 > **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
@@ -32,7 +36,7 @@ Current source packs viewport and fixed-state command records and bounds the reu
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
 | 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
 | 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
-| 🔧 | Memory use | Command records use less space and completed upload batches retain at most eight spare objects. A bounded read-only vertex-cache experiment is available but remains disabled by default: its low-memory path is still too slow. |
+| 🔧 | Memory use | Compact command records, smaller allocation pools and bounded background CPU-copy reclamation are enabled. Demand-committed guest heap backing and the read-only vertex cache remain optional experiments. |
 | 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets; movement still has a separate frame-dependent speed error. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
@@ -74,6 +78,12 @@ After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It 
 
 Press **Esc** for host settings, **F10** to cycle the performance overlay, and **F11** for fullscreen. Resolution changes require a restart. Actual FPS depends on the scene, hardware and selected resolution.
 
+For Windows source-build testing, `HWAOI_LAZY_HEAP=1` enables the demand-commit heap experiment. It changes when host backing is allocated, while keeping the game's logical heap size unchanged; additional pages are committed when needed. It is not yet a validated 16 GiB system preset.
+
+Lossless program-source compression is enabled in current HWAoI source builds. `HWAOI_SOURCE_COMPRESS=0` disables it for comparison or troubleshooting; a restart is required.
+
+Asynchronous replay can be tested with `HWAOI_REPLAY_ASYNC=1`. A same-executable pair in the stationary opening field, with 1080p and a 120 FPS target, measured median rates of **75.5 FPS synchronously and 86.3 FPS asynchronously** on the test PC with power-saving enabled. It remains disabled by default pending broader scene and synchronization checks; the gameplay-speed caveat above still applies.
+
 ## Testing and reports
 
 Validation includes module/hash refusal checks, independent instruction/semantic tests and Vulkan pixel-readback probes. Generation and a successful build alone do not establish playthrough coverage.
@@ -84,6 +94,6 @@ For a useful [issue report](https://github.com/Alano6678/hwaoi-recomp/issues), i
 
 Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with its revision pinned in [config/upstream.json](config/upstream.json). Menu adaptations also credit [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp); the full inherited attributions remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Thanks to [LibertyPrime27](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized) for identifying the NVN/GFX stage-ID mismatch in GPU QUADS admission and for their ongoing performance and package-support work. Further integration is being coordinated in [issue #2](https://github.com/Alano6678/hwaoi-recomp/issues/2).
+Thanks to [LibertyPrime27](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized) for the NVN/GFX stage-ID fix, batched GPU QUADS conversion, barrier optimization, buffer-texture lighting, background shader loading, update/DLC support, and co-op/control improvements. Their contributions were merged through [#9](https://github.com/Alano6678/hwaoi-recomp/pull/9), [#10](https://github.com/Alano6678/hwaoi-recomp/pull/10), and [#11](https://github.com/Alano6678/hwaoi-recomp/pull/11).
 
 GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE) and [LICENSE-MIT](LICENSE-MIT).
