@@ -139,7 +139,10 @@ def package(args):
         "Encrypted XCI/NSP files and other builds are not supported. No game, keys or firmware is included.\n"
         "Keep the source NUP and compiled output at their original paths. Output and logs remain local.\n"
         "The compiled game needs an AVX2 CPU, Vulkan graphics and sufficient RAM/VRAM (32 GiB RAM recommended).\n"
-        "1080p/60 FPS is the current baseline. Non-60 FPS modes accelerate gameplay; higher resolutions are unstable.\n"
+        "1080p/60 FPS is the baseline. The 90/120 FPS settings SPEED UP the game (1.5x/2x), because gameplay advances a\n"
+        "fixed step per frame. For smoother motion at normal speed, keep 60 FPS and use frame generation (for example\n"
+        "Lossless Scaling 2x). Higher resolutions are unstable.\n"
+        "The game's icon is taken from your own NUP while compiling; no artwork ships with this ZIP.\n"
         "Progress and tested limits: source/README.md. Licenses/source: source/ and licenses/.\n"
         "The locally compiled output contains game-derived files; do not upload or redistribute it.\n",
         encoding="utf-8")
