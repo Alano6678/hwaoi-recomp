@@ -53,6 +53,29 @@ static int nfw;
 // Opt-in attribution of ordered CPU readbacks versus ordinary early submits.
 // These observations never change a buffer, a draw or a synchronization point.
 static uint64_t readback_calls, readback_bytes, readback_ns, readback_max_ns, readback_16, automatic_parts;
+// Full barriers recorded (each drains the GPU and ends a render pass) and the guest's own OP_BARRIER among them.
+static uint64_t barriers_recorded, guest_barriers;
+// The guest's NVNbarrierBits masks (the 8 defined bits) and the guest barriers with no draw, dispatch or other
+// recorded GPU work since the previous guest barrier of the replay.
+static uint64_t barrier_masks[256], barriers_idle, barriers_elided;
+static uint64_t barrier_last_recorded = UINT64_MAX;
+
+// nvnCommandBufferBarrier(bits). Only the ORDER bits make the GPU wait for earlier work: ORDER_PRIMITIVES (0x1),
+// ORDER_FRAGMENTS (0x2), ORDER_FRAGMENTS_TILED (0x4), ORDER_INDIRECT_DATA (0x8). The INVALIDATE bits (texture 0x10,
+// shader 0x20, texture descriptor 0x40, ZCULL 0x80) only drop caches for later reads, and a barrier without bits does
+// nothing. Every guest barrier used to become a full ALL_COMMANDS barrier and a render-pass end: in a fight about
+// 300,000 a second, 75-80% of them texture invalidations alone and 6-8% without bits, and GPU time followed their count.
+// In Vulkan an invalidation alone adds nothing: the GPU writes it could make visible were made available and visible to
+// all later commands by the full barrier of the ORDER barrier that ordered them, and host writes by the submission.
+// So barriers without ORDER bits (and without unknown bits) are not recorded. TOTK_BARRIER_ELIDE=0 records them all.
+int vk_exec_barrier_needed(int bits) {
+    static int elide = -1;
+    if (elide < 0) {
+        const char *e = cfg_get("TOTK_BARRIER_ELIDE");
+        elide = !(e && !strcmp(e, "0"));
+    }
+    return !elide || (bits & 0xf) || (bits & ~0xff);
+}
 static int readback_diagnostics_on(void) {
     static int enabled = -1;
     int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
@@ -75,11 +98,53 @@ static void readback_diagnostics_frame(uint64_t frame) {
     uint64_t batches = __atomic_exchange_n(&vk_exec_frame.indirect_batches, 0, __ATOMIC_RELAXED);
     uint64_t quads_gpu = __atomic_exchange_n(&vk_exec_frame.quads_gpu, 0, __ATOMIC_RELAXED);
     uint64_t quads_cpu = __atomic_exchange_n(&vk_exec_frame.quads_cpu, 0, __ATOMIC_RELAXED);
+    extern uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // vk_exec_draw.c: QUADS conversion batches
+    extern uint64_t vk_exec_ub_updates, vk_exec_quad_stop[OP_COUNT_];   // and what ended each batch's lookahead
+    uint64_t quad_runs = __atomic_exchange_n(&vk_exec_quad_runs, 0, __ATOMIC_RELAXED);
+    uint64_t quad_batched = __atomic_exchange_n(&vk_exec_quad_batched, 0, __ATOMIC_RELAXED);
+    uint64_t barriers = __atomic_exchange_n(&barriers_recorded, 0, __ATOMIC_RELAXED);
+    uint64_t guest = __atomic_exchange_n(&guest_barriers, 0, __ATOMIC_RELAXED);
+    uint64_t ub_updates = __atomic_exchange_n(&vk_exec_ub_updates, 0, __ATOMIC_RELAXED);
+    uint64_t stop[OP_COUNT_ + 1];
+    uint32_t top[3] = {OP_COUNT_, OP_COUNT_, OP_COUNT_};   // stop[OP_COUNT_] = 0: an empty rank
+    stop[OP_COUNT_] = 0;
+    for (uint32_t op = 0; op < OP_COUNT_; op++) {
+        stop[op] = __atomic_exchange_n(&vk_exec_quad_stop[op], 0, __ATOMIC_RELAXED);
+        for (int k = 0; k < 3; k++)
+            if (stop[op] > stop[top[k]]) {
+                for (int j = 2; j > k; j--) top[j] = top[j - 1];
+                top[k] = op;
+                break;
+            }
+    }
+    uint64_t masks[257];
+    uint32_t mtop[4] = {256, 256, 256, 256};   // masks[256] = 0: an empty rank
+    masks[256] = 0;
+    for (uint32_t m = 0; m < 256; m++) {
+        masks[m] = __atomic_exchange_n(&barrier_masks[m], 0, __ATOMIC_RELAXED);
+        for (int k = 0; k < 4; k++)
+            if (masks[m] > masks[mtop[k]]) {
+                for (int j = 3; j > k; j--) mtop[j] = mtop[j - 1];
+                mtop[k] = m;
+                break;
+            }
+    }
+    uint64_t idle = __atomic_exchange_n(&barriers_idle, 0, __ATOMIC_RELAXED);
+    uint64_t elided = __atomic_exchange_n(&barriers_elided, 0, __ATOMIC_RELAXED);
+    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu guest_idle=%llu guest_elided=%llu ub_updates=%llu "
+           "guest_masks=%#x:%llu,%#x:%llu,%#x:%llu,%#x:%llu quad_batch_stops=%s:%llu,%s:%llu,%s:%llu",
+           (unsigned long long)frame, (unsigned long long)barriers, (unsigned long long)guest,
+           (unsigned long long)idle, (unsigned long long)elided, (unsigned long long)ub_updates, mtop[0], (unsigned long long)masks[mtop[0]],
+           mtop[1], (unsigned long long)masks[mtop[1]], mtop[2], (unsigned long long)masks[mtop[2]], mtop[3],
+           (unsigned long long)masks[mtop[3]], nvn_op_name(top[0]), (unsigned long long)stop[top[0]],
+           nvn_op_name(top[1]), (unsigned long long)stop[top[1]], nvn_op_name(top[2]), (unsigned long long)stop[top[2]]);
     rt_log("gpu-readback: frame=%llu window=60 calls=%llu bytes=%llu cpu_ms=%.3f max_ms=%.3f "
-           "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu", (unsigned long long)frame,
+           "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu "
+           "quad_conversion_batches=%llu quad_draws_converted=%llu", (unsigned long long)frame,
            (unsigned long long)calls, (unsigned long long)bytes, elapsed / 1e6, maximum / 1e6,
            (unsigned long long)tiny, (unsigned long long)parts, (unsigned long long)batches,
-           (unsigned long long)quads_gpu, (unsigned long long)quads_cpu);
+           (unsigned long long)quads_gpu, (unsigned long long)quads_cpu, (unsigned long long)quad_runs,
+           (unsigned long long)quad_batched);
 }
 
 uint64_t vk_exec_recording_fence(void) { return x_here ? X.fence : 0; }
@@ -508,15 +573,42 @@ static int tfr_match(const TargetFrames *e, const VkExecTarget *t) {
     return e->image == t->image && e->level == t->level && e->layer == t->base_layer;
 }
 
+// The scene's main render size: the largest level-0 target rendered in two presented frames in a row (the G-buffer and
+// the lighting and post-effect buffers of that size are drawn every frame). A new scene's first frame renders its
+// targets for the first time, so every draw would count as one-shot and wait for its shaders: on a cold shader cache
+// HWAoI's scene-load frames waited for about 60 new shaders one after another, 2.9 + 4.6 s of black screen (1.0.3,
+// cold-cache measurement). Targets of this size are per-frame buffers, so their draws are skipped until their shaders
+// are ready (translated in the background, in parallel) and show a frame or two later. TOTK_PIPE_SCENE=0: off.
+static uint32_t scene_w, scene_h;
+static uint64_t scene_at;   // the presented frame that last confirmed the size
+
+static void scene_size_note(const VkExecTarget *t, uint64_t stamp) {
+    uint64_t area = (uint64_t)t->width * t->height, have = (uint64_t)scene_w * scene_h;
+    if (t->level || area < 64 * 64) return;
+    if (area > have || (t->width == scene_w && t->height == scene_h) || stamp - scene_at > 600) {
+        if (t->width != scene_w || t->height != scene_h)
+            rt_log("vk_exec: scene render size %ux%u (per-frame targets; new-scene draws into them skip while shaders build)",
+                   t->width, t->height);
+        scene_w = t->width, scene_h = t->height, scene_at = stamp;
+    }
+}
+
+static int scene_sized(const VkExecTarget *t) {
+    static int on = -1;
+    if (on < 0) on = strcmp(cfg_value("TOTK_PIPE_SCENE"), "0") != 0;
+    return on && scene_w && !t->level && t->width == scene_w && t->height == scene_h;
+}
+
 static void tfr_note(const VkExecTarget *t, uint64_t stamp) {
     TargetFrames *e = tfr_slot(t);
     if (!tfr_match(e, t)) *e = (TargetFrames){t->image, t->level, t->base_layer, 0, 0};
     if (e->last != stamp) e->prev = e->last, e->last = stamp;
+    if (stamp && e->prev == stamp - 1) scene_size_note(t, stamp);
 }
 
 static int tfr_recent(const VkExecTarget *t, uint64_t stamp) {
     const TargetFrames *e = tfr_slot(t);
-    return tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1;
+    return (tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1) || scene_sized(t);
 }
 
 int vk_exec_targets_recent(VkExec *ex, int any) {
@@ -597,6 +689,7 @@ static void barrier_to(VkExec *ex, const VkImage *want, const VkImageAspectFlags
                            .imageMemoryBarrierCount = n, .pImageMemoryBarriers = ib};
     vkCmdPipelineBarrier2(ex->cb, &di);
     ex->barrier_at = ++ex->recorded;
+    if (readback_diagnostics_on()) __atomic_fetch_add(&barriers_recorded, 1, __ATOMIC_RELAXED);
 }
 
 void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
@@ -983,7 +1076,16 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_COPY_IMAGE_STRIDE: ex->copy_image_stride = ((const p_copy_stride *)a)->stride; break;
         case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
         case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
-        case OP_BARRIER: vk_exec_barrier(ex); break;
+        case OP_BARRIER:
+            if (readback_diagnostics_on()) {
+                __atomic_fetch_add(&guest_barriers, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&barrier_masks[((const p_barrier *)a)->bits & 0xff], 1, __ATOMIC_RELAXED);
+                if (ex->recorded == barrier_last_recorded) __atomic_fetch_add(&barriers_idle, 1, __ATOMIC_RELAXED);
+            }
+            if (vk_exec_barrier_needed(((const p_barrier *)a)->bits)) vk_exec_barrier(ex);
+            else if (readback_diagnostics_on()) __atomic_fetch_add(&barriers_elided, 1, __ATOMIC_RELAXED);
+            barrier_last_recorded = ex->recorded;
+            break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_FENCE_SYNC: break;  // represented by the whole-submit frontier, published by the front end
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DRAW_IND: case OP_DISPATCH_IND:

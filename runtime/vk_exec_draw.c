@@ -252,7 +252,8 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n,
                                  .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};   // buffer textures (texel_view)
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
@@ -433,6 +434,8 @@ static VkImageView storage_dummy(int di, int code) {
     return Z.img[di].sview;
 }
 
+static void texel_views_shutdown(VkCtx *c);   // buffer texture views (texel_view_of)
+
 static void dummies_init(void) {
     if (Z.ready) return;
     VkCtx *c = vk_ctx();
@@ -490,6 +493,7 @@ void vk_exec_draw_shutdown(void) {
     cur = NULL, cur_fence = 0;
     vk_usnap_shutdown();
     vk_vertex_cache_shutdown();
+    texel_views_shutdown(c);
     if (Z.ready) {
         vkDestroyBufferView(c->device, Z.zview, NULL);
         vmaDestroyBuffer(c->vma, Z.zbuf, Z.zalloc);
@@ -966,6 +970,44 @@ static int program_stage_lookup(const prog_t *p, unsigned stage, NVNshaderData *
     return found;
 }
 
+// A compute shader is translated synchronously at its first dispatch (a skipped dispatch changes results), and the
+// largest (30000 instructions) take seconds each: a new scene's first frame froze for all of them in turn. Compute
+// stages (about 140) start translating when the game registers the program, at boot, behind every translation a draw
+// or dispatch asks for (TOTK_XLATE_PREFETCH=0: at first use only). Graphics stages are not: the game registers about
+// 15000 of them, a minute and a half of translation that kept the compute ones waiting. The answers are guessed: a
+// buffer texture in every slot (what this game's shaders read) and the program's local size. A dispatch takes the
+// result when it agrees on everything the translation read (gfx_shader.c alt_get); a wrong guess costs only that
+// background work. Called on a guest thread.
+void vk_exec_program_registered(const prog_t *p) {
+    static int on = -1;
+    static volatile int64_t queued;
+    if (on < 0) on = strcmp(cfg_value("TOTK_XLATE_PREFETCH"), "0") != 0;
+    if (!on || !p || !vk_pipeline_async_on()) return;
+    for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
+        uint32_t st, len;
+        if (!program_stage_info(&p->sd[i], &st, &len) || st != NVN_STAGE_CS) continue;
+        const uint8_t *ctl = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
+        if (gfx_shader_is_nvn2(ctl)) {                     // as program_stage_resolve, but a failure only skips it
+            const uint8_t *lc, *lk;
+            uint32_t actual;
+            if (!nvn2_lower(ctl, code, &lc, &lk)) continue;
+            memcpy(&actual, lc + 0x714, 4), memcpy(&len, lc + 0x704, 4);
+            if (actual != st || !len) continue;
+            ctl = lc, code = lk;
+        }
+        GfxShaderAnswers a;
+        memset(&a, 0, sizeof a);
+        for (int k = 0; k < 3; k++) {                      // as answers_for
+            uint32_t l;
+            memcpy(&l, ctl + 0x748 + 4 * k, 4);
+            a.local[k] = (uint16_t)(l ? l : 1);
+        }
+        memset(a.tex_type, GFX_TEX_BUFFER, sizeof a.tex_type);
+        if (gfx_shader_prefetch(GFX_STAGE_CS, ctl, code, len, &a) && plat_inc64(&queued) % 16 == 1)
+            rt_log("vk_exec: %lld compute shaders queued for translation at program registration", (long long)queued);
+    }
+}
+
 static void program_bind_refresh(VkExec *ex) {
     int changed = nvn_program_refresh(&ex->programs, program_stage_lookup, nvn_new_serial);
     if (changed < 0) rt_fatal("vk: invalid per-stage program binding");
@@ -1114,7 +1156,13 @@ static uint8_t type_of_handle(const VkExec *ex, uint64_t h) {   // texture lock 
     view_t v;
     int hv;
     const VkTexImage *img = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), &v, &hv) : NULL;
-    return img ? (uint8_t)gfx_type_of(img, &v, hv) : 0;
+    if (img) return (uint8_t)gfx_type_of(img, &v, hv);
+    // A buffer texture has no image: answering 0 translated its texel fetches as 2D reads of a dummy image.
+    uint64_t addr;
+    int format;
+    uint32_t elements;
+    return h && vk_texture_slot_buffer_locked(&ex->tex_pool, (int)(h & 0xfffff), &addr, &format, &elements)
+               ? GFX_TEX_BUFFER : 0;
 }
 
 // The answers of stage st for the slots in mask; the types of other slots stay zero.
@@ -1254,6 +1302,110 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     vk_mem_count(VK_MCLS_SCRATCH, use, n);
     *out = (VkDescriptorBufferInfo){b, o, n};
     return 1;
+}
+
+// ---- Buffer textures (NVN_TEXTURE_TARGET_BUFFER): texel buffer views over the descriptor's storage
+// HWAoI keeps its light lists, light parameters and cluster indices in buffer textures (RGBA32F, R32UI, R32F arrays up
+// to a million elements). Before these were bound every read returned zero and caves lit only by local lights came out
+// black. The storage resolves like a storage buffer (bind_range), so texels a compute pass wrote on the GPU are seen;
+// views are cached per (buffer, offset, range, format) in a direct-mapped table, a replaced one retired after the GPU.
+
+static uint32_t texel_bytes(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: return 1;
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16_SFLOAT: return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4;
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+    default: return 0;
+    }
+}
+
+// The device's texel buffer limits and whether f may back a uniform (storage: storage) texel buffer, cached.
+static int texel_format_ok(VkFormat f, int storage, VkDeviceSize *align, uint32_t *max_elements) {
+    static VkDeviceSize a;
+    static uint32_t mx;
+    static uint8_t have[256], ok[2][256];
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    if (!mx) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(c->phys, &p);
+        a = p.limits.minTexelBufferOffsetAlignment ? p.limits.minTexelBufferOffsetAlignment : 1;
+        mx = p.limits.maxTexelBufferElements;
+    }
+    *align = a, *max_elements = mx;
+    if ((unsigned)f >= 256) return 0;
+    if (!have[f]) {
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(c->phys, f, &p);
+        ok[0][f] = !!(p.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT);
+        ok[1][f] = !!(p.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT);
+        have[f] = 1;
+    }
+    return ok[storage][f];
+}
+
+#define TBV_SLOTS 2048
+static struct { VkBuffer buf; VkDeviceSize off, range; VkFormat fmt; VkBufferView view; } TBV[TBV_SLOTS];
+static uint64_t tbv_made, tbv_failed;
+
+static void texel_views_shutdown(VkCtx *c) {   // the device is idle
+    for (int i = 0; i < TBV_SLOTS; i++)
+        if (TBV[i].view) vkDestroyBufferView(c->device, TBV[i].view, NULL);
+    memset(TBV, 0, sizeof TBV);
+}
+
+static VkBufferView texel_view_of(VkBuffer buf, VkDeviceSize off, VkDeviceSize range, VkFormat fmt) {
+    uint64_t h = ((uint64_t)(uintptr_t)buf * 0x9e3779b97f4a7c15ull) ^ (off * 0xff51afd7ed558ccdull) ^
+                 (range * 0xc4ceb9fe1a85ec53ull) ^ (uint64_t)fmt;
+    typeof(TBV[0]) *e = &TBV[(h ^ h >> 29) % TBV_SLOTS];
+    if (e->view && e->buf == buf && e->off == off && e->range == range && e->fmt == fmt) return e->view;
+    VkBufferViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buf, .format = fmt,
+                                 .offset = off, .range = range};
+    VkBufferView v;
+    if (vkCreateBufferView(vk_ctx()->device, &ci, NULL, &v) != VK_SUCCESS) {
+        if (!tbv_failed++) rt_log("vk: a buffer texture view (format %d, %llu bytes) could not be created; zero bound",
+                                  (int)fmt, (unsigned long long)range);
+        return VK_NULL_HANDLE;
+    }
+    if (e->view) vk_defer_buffer_view(e->view);   // command buffers recorded so far may still use it
+    *e = (typeof(*e)){buf, off, range, fmt, v};
+    if (!tbv_made++) rt_log("vk: buffer textures are bound as texel buffer views");
+    return v;
+}
+
+// The texel buffer view for handle h of a buffer texture slot, or VK_NULL_HANDLE (the caller binds the zero view).
+static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage) {
+    uint64_t addr;
+    int nvn_format;
+    uint32_t elements;
+    vk_texture_lock();
+    int found = h && vk_texture_slot_buffer_locked(&ex->tex_pool, (int)(h & 0xfffff), &addr, &nvn_format, &elements);
+    vk_texture_unlock();
+    if (!found) return VK_NULL_HANDLE;
+    TexVkFormat tf;
+    if (!tex_vk_format(nvn_format, &tf) || tf.expand_rgb || tf.astc_bw) return VK_NULL_HANDLE;
+    VkDeviceSize align;
+    uint32_t max_elements, bytes = texel_bytes(tf.vk);
+    if (!bytes || !texel_format_ok(tf.vk, storage, &align, &max_elements)) return VK_NULL_HANDLE;
+    if (elements > max_elements) elements = max_elements;
+    VkDescriptorBufferInfo bi;
+    if (!bind_range(ex, addr, (uint64_t)elements * bytes, align, (uint64_t)max_elements * bytes,
+                    storage ? VK_MUSE_SSBO : VK_MUSE_UBO, storage, storage, &bi) || bi.buffer == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+    VkDeviceSize range = bi.range / bytes * bytes;
+    if (!range) return VK_NULL_HANDLE;
+    if (storage) note_written(ex, addr, bi.range);
+    return texel_view_of(bi.buffer, bi.offset, range, tf.vk);
 }
 
 static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
@@ -2503,10 +2655,15 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             int img = b->kind == GFX_RES_IMG;
             if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
                 kind = 2;
-                for (uint32_t k = 0; k < cnt; k++) {   // buffer textures are not replayed yet
+                for (uint32_t k = 0; k < cnt; k++) {   // buffer textures: a view of their storage, else the zero view
+                    int slot = r->slot + (int)k;
+                    uint64_t h = img ? (slot >= 0 && slot < 32 ? ex->img[st][slot] : 0)
+                                     : (slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0);
+                    VkBufferView view = texel_view(ex, h, img);
+                    if (view == VK_NULL_HANDLE) view = Z.zview;
                     o[k].w[0] = 0, o[k].w[1] = 0, o[k].w[2] = 0;
-                    o[k].view = Z.zview;
-                    if (need_w) bv[nd + k] = Z.zview;
+                    o[k].view = view;
+                    if (need_w) bv[nd + k] = view;
                 }
             } else {
                 kind = 1;
@@ -3285,12 +3442,29 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 }
 
 // Non-indexed indirect arguments may be GPU-written. Native Vulkan topologies
-// consume the actual backing buffer. QUADS require an ordered 16-byte readback,
-// then the established direct-draw index expansion; never reinterpret QUADS as
-// a triangle-list draw or read the stale guest VA. This synchronous fallback is
-// deliberately bounded and logged; it is correctness work, not a speedup.
-static int gpu_quads_graphics(const VkExec *ex) {
-    if (!ex || !ex->prog) return 0;
+// consume the actual backing buffer. QUADS are converted on the GPU (vk_quad_indirect_prepare) for programs of a
+// vertex and a fragment stage; anything else takes an ordered 16-byte readback, then the established direct-draw index
+// expansion; never reinterpret QUADS as a triangle-list draw or read the stale guest VA. The readback submits and
+// waits for the GPU once per draw: a fight's ~150 such draws a frame cost ~30 ms (gpu_quads_graphics below).
+// Why gpu_quads_draw declined a draw (QF_*): the readback fallback costs a full GPU round trip per draw, so each
+// reason is counted and its first occurrences are logged with the stage involved (quads_fallback_log).
+enum { QF_DISABLED = 1, QF_NO_PROGRAM, QF_LOOKUP, QF_STAGE, QF_NOT_NVN2, QF_NO_VERTEX, QF_RESOLVE, QF_PREPARE, QF_N };
+static const char *const qf_name[QF_N] = {"", "disabled", "no program", "stage lookup failed", "non-VS/FS stage",
+                                          "shader not NVN2", "no vertex stage", "arguments not resolvable",
+                                          "conversion setup failed"};
+static volatile uint64_t qf_count[QF_N];
+
+static void quads_fallback_log(int why, int stage, uint64_t ind) {
+    static volatile uint32_t logged;
+    uint64_t n = __atomic_add_fetch(&qf_count[why], 1, __ATOMIC_RELAXED);
+    if (__atomic_add_fetch(&logged, 1, __ATOMIC_RELAXED) <= 16 || !(n & (n - 1)))   // first 16, then at powers of two
+        rt_log("vk: QUADS indirect draw at %#llx falls back to an ordered readback: %s (stage %d); %llu so far for this "
+               "reason", (unsigned long long)ind, qf_name[why], stage, (unsigned long long)n);
+}
+
+static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
+    *why_stage = -1;
+    if (!ex || !ex->prog) return *why = QF_NO_PROGRAM, 0;
     int vertex = 0;
     // Program bindings use NVN stage IDs (VS=0, FS=1, GS=2), not the
     // translator's GFX IDs (FS=4). Mixing them rejected every VS+FS program
@@ -3300,14 +3474,110 @@ static int gpu_quads_graphics(const VkExec *ex) {
         if (!source) continue;
         NVNshaderData shader = {0};
         int found = program_stage_lookup(source, (unsigned)stage, &shader);
-        if (found < 0) return 0;
+        if (found < 0) return *why = QF_LOOKUP, *why_stage = stage, 0;
         if (!found) continue;
         // bound_stage exposes legacy-shaped lowered controls. Admission needs
         // the original immutable NVN2 control, not that derived representation.
-        if ((stage != NVN_STAGE_VS && stage != NVN_STAGE_FS) || !gfx_shader_is_nvn2(shader.control)) return 0;
+        if (stage != NVN_STAGE_VS && stage != NVN_STAGE_FS) return *why = QF_STAGE, *why_stage = stage, 0;
+        if (!gfx_shader_is_nvn2(shader.control)) return *why = QF_NOT_NVN2, *why_stage = stage, 0;
         if (stage == NVN_STAGE_VS) vertex = 1;
     }
+    if (!vertex) *why = QF_NO_VERTEX;
     return vertex;
+}
+
+// ---- batched QUADS conversion
+// Every conversion ends the render pass behind a full barrier, which drains the GPU: measured at ~0.14 ms per draw on
+// an RTX 3080, up to ~190 draws a frame in a fight. A QUADS draw therefore also converts the QUADS indirect draws that
+// follow it in the same command list when only pure state commands separate them: nothing in between can write their
+// argument records, so converting them early reads the same bytes. The later draws then use their converted commands
+// without another pass end. QUAD_RUN bounds a batch (one quad block's slots).
+#define QUAD_RUN 64u
+#define QUAD_SCAN_OPS 4096u
+static struct { const p_draw_ind *op[QUAD_RUN]; VkQuadIndirect conv[QUAD_RUN]; uint32_t n; uint64_t fence; } QB;
+uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // conversion batches and the draws they converted (diagnostics)
+uint64_t vk_exec_ub_updates, vk_exec_quad_stop[OP_COUNT_];   // UpdateUniformBuffer replays; the op ending each lookahead
+
+// The QUADS indirect draws after h that a conversion at h may cover, in order (at most cap).
+static uint32_t quads_lookahead(const p_draw_ind *first, const p_draw_ind **out, uint32_t cap) {
+    const op_hdr *h = (const op_hdr *)(const void *)first - 1, *o = nvn_op_next(h);
+    uint32_t n = 0;
+    for (uint32_t scanned = 0; n < cap && scanned < QUAD_SCAN_OPS; scanned++) {
+        if (o->size < sizeof *o || (o->size & 7) || o->op >= OP_COUNT_) break;
+        switch (o->op) {
+        case OP_JUMP: o = (const op_hdr *)(uintptr_t)((const p_jump *)nvn_op_payload(o))->target; continue;
+        case OP_DRAW_IND: {
+            const p_draw_ind *x = nvn_op_payload(o);
+            if (x->prim != NVN_DRAW_PRIMITIVE_QUADS || !x->ind || (x->ind & 3) ||
+                x->ind > UINT64_MAX - sizeof(VkDrawIndirectCommand)) return n;
+            out[n++] = x;
+            break;
+        }
+        // Pure state: no GPU memory writes, no render target or pass change.
+        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART: case OP_COPY_STRIDE:
+        case OP_COPY_IMAGE_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_BIND_PROGRAM: case OP_BIND_STATE:
+        case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO:
+        case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_FENCE_SYNC:
+            break;
+        case OP_BARRIER:   // a barrier without ORDER bits records nothing (vk_exec_barrier_needed): no write, no pass end
+            if (!vk_exec_barrier_needed(((const p_barrier *)nvn_op_payload(o))->bits)) break;
+            __atomic_fetch_add(&vk_exec_quad_stop[o->op], 1, __ATOMIC_RELAXED);
+            return n;
+        default:   // copies, clears, updates, barriers, counters, targets, other draws, calls, the end
+            __atomic_fetch_add(&vk_exec_quad_stop[o->op], 1, __ATOMIC_RELAXED);
+            return n;
+        }
+        o = nvn_op_next(o);
+    }
+    return n;
+}
+
+// Converts d and the QUADS draws quads_lookahead finds; d's command in *out. 0: d was not converted.
+static int quads_convert(VkExec *ex, const p_draw_ind *d, VkQuadIndirect *out) {
+    const p_draw_ind *draws[QUAD_RUN];
+    draws[0] = d;
+    uint32_t n = 1 + quads_lookahead(d, draws + 1, QUAD_RUN - 1);
+    VkMemSpan sources[QUAD_RUN];
+    uint64_t addresses[QUAD_RUN];
+    const p_draw_ind *kept[QUAD_RUN];
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        VkMemSpan s;
+        if (!vk_mem_resolve(draws[i]->ind, sizeof(VkDrawIndirectCommand), &s) || !s.buffer ||
+            s.avail < sizeof(VkDrawIndirectCommand) || (s.offset & 3)) {
+            if (!i) return quads_fallback_log(QF_RESOLVE, -1, d->ind), 0;
+            continue;   // converted on its own when the replay reaches it
+        }
+        VK_MEM_USE(s);   // the conversion reads the record now
+        sources[m] = s, addresses[m] = draws[i]->ind, kept[m++] = draws[i];
+    }
+    VkQuadIndirect conv[QUAD_RUN];
+    uint8_t ok[QUAD_RUN];
+    if (!vk_quad_indirect_prepare_batch(ex, sources, addresses, m, conv, ok) || kept[0] != d || !ok[0])
+        return quads_fallback_log(QF_PREPARE, -1, d->ind), 0;
+    QB.fence = ex->fence, QB.n = 0;
+    for (uint32_t i = 0; i < m; i++) {
+        VK_MEM_BOUND(sources[i]);
+        vk_mem_count(sources[i].cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
+        if (i && ok[i]) QB.op[QB.n] = kept[i], QB.conv[QB.n++] = conv[i];
+    }
+    __atomic_fetch_add(&vk_exec_quad_runs, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&vk_exec_quad_batched, m, __ATOMIC_RELAXED);
+    *out = conv[0];
+    return 1;
+}
+
+// d's command converted ahead by an earlier draw of this submission, consumed once.
+static int quads_converted(const VkExec *ex, const p_draw_ind *d, VkQuadIndirect *out) {
+    if (QB.fence != ex->fence) return QB.n = 0, 0;
+    for (uint32_t i = 0; i < QB.n; i++)
+        if (QB.op[i] == d) {
+            *out = QB.conv[i];
+            QB.op[i] = NULL;
+            return 1;
+        }
+    return 0;
 }
 
 static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
@@ -3316,18 +3586,16 @@ static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
         const char *value = cfg_get("TOTK_GPU_QUADS");
         enabled = value && !strcmp(value, "ab") ? 2 : value ? !strcmp(value, "1") : RT_TARGET_HWAOI;
     }
-    if (!enabled || (enabled == 2 && !rt_ab()) || !gpu_quads_graphics(ex)) return 0;
-    VkMemSpan source;
-    if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &source) || !source.buffer ||
-        source.avail < sizeof(VkDrawIndirectCommand) || (source.offset & 3)) return 0;
-    VK_MEM_USE(source);
+    int why = 0, stage = -1;
+    if (!enabled || (enabled == 2 && !rt_ab())) return quads_fallback_log(QF_DISABLED, -1, d->ind), 0;
+    if (!gpu_quads_graphics(ex, &why, &stage)) return quads_fallback_log(why, stage, d->ind), 0;
     VkQuadIndirect converted;
-    if (!vk_quad_indirect_prepare(ex, &source, d->ind, &converted)) return 0;
-    VK_MEM_BOUND(source);
-    vk_mem_count(source.cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
-    vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
-    bind_gen++;
-    ex->dirty |= VK_EXEC_DIRTY_ALL;
+    if (!quads_converted(ex, d, &converted)) {
+        if (!quads_convert(ex, d, &converted)) return 0;
+        vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
+        bind_gen++;
+        ex->dirty |= VK_EXEC_DIRTY_ALL;
+    }
     c0_binst = 0; // NVN2 graphics uses the draw's BaseInstance, as for native indexed indirect
     __atomic_fetch_add(&vk_exec_frame.quads_gpu, 1, __ATOMIC_RELAXED);
     if (!prepare_draw(ex, d->prim, INT32_MAX, 0)) return 1;
@@ -3460,6 +3728,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
 
 static void op_update_ub(VkExec *ex, const p_update_ub *u) {
     if (!u->size) return;
+    __atomic_fetch_add(&vk_exec_ub_updates, 1, __ATOMIC_RELAXED);
     VkMemSpan sp;
     if (!vk_mem_resolve(u->dst, u->size, &sp)) return warn_once(W_UB, "UpdateUniformBuffer to %#llx is not backed: dropped", (unsigned long long)u->dst);
     cb_res(ex);

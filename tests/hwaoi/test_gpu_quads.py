@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CC = Path("F:/llvm-mingw/bin/clang.exe")
-DEPS = Path("F:/TotKDependencies/runtime/deps")
+DEPS = Path(os.environ.get("HWAOI_TEST_DEPS") or "F:/TotKDependencies/runtime/deps")   # Vulkan/VMA headers, libvulkan-1
 
 
 def source(recorded=False):
@@ -23,7 +23,7 @@ def source(recorded=False):
 #undef vkCmdUpdateBuffer
 '''
     if not recorded:
-        module = module.replace('#include "quad_expand_spv.h"', '#include "quad_expand_spv.h"\n' + direct)
+        module = module.replace('#include "quad_prepare_spv.h"', '#include "quad_prepare_spv.h"\n' + direct)
     support = r'''
 #include <stdio.h>
 #include <stdarg.h>
@@ -52,6 +52,11 @@ VkResult vmaCreateBuffer(VmaAllocator allocator,const VkBufferCreateInfo *bi,con
  VK(vkAllocateMemory(context.device,&mi,NULL,&a->memory));VK(vkBindBufferMemory(context.device,*b,a->memory,0));
  if(ai->flags&VMA_ALLOCATION_CREATE_MAPPED_BIT)VK(vkMapMemory(context.device,a->memory,0,bi->size,0,&a->map));
  if(info){memset(info,0,sizeof *info);info->pMappedData=a->map;}*allocation=(VmaAllocation)a;allocated++;return VK_SUCCESS;
+}
+VkResult vmaFlushAllocation(VmaAllocator allocator,VmaAllocation allocation,VkDeviceSize offset,VkDeviceSize size){
+ (void)allocator;(void)offset;(void)size;Allocation *a=(Allocation *)allocation;
+ VkMappedMemoryRange r={.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,.memory=a->memory,.offset=0,.size=VK_WHOLE_SIZE};
+ return vkFlushMappedMemoryRanges(context.device,1,&r);
 }
 void vmaDestroyBuffer(VmaAllocator allocator,VkBuffer b,VmaAllocation allocation){
  (void)allocator;Allocation *a=(Allocation *)allocation;if(a->map)vkUnmapMemory(context.device,a->memory);
@@ -176,11 +181,12 @@ int main(int argc,char **argv){
   for(unsigned i=0;i<2;i++){
    uint32_t *h=(uint32_t *)(blocks[i]->mapped+slots[i]*Q.stride),count=args[i][0]&~3u;
    int active=count && args[i][1];CHECK(h[0]==(active?(count/4)*6:0) && h[1]==(active?args[i][1]:0));
-   CHECK(h[2]==0 && h[3]==0 && h[4]==(active?args[i][3]:0) && !h[8] && h[13]==0x51554144u);
+   CHECK(h[2]==0 && h[3]==(active?args[i][2]:0) && h[4]==(active?args[i][3]:0) && !h[8] && h[13]==0x51554144u);
    CHECK(!memcmp(h+9,args[i],16));checks+=10;
    if(active){
     const uint32_t pattern[6]={0,1,2,0,2,3};uint32_t *actual=(uint32_t *)((uint8_t *)read_map+i*QUAD_INDEX_BYTES);
-    for(uint32_t j=0;j<(count/4)*6;j++){CHECK(actual[j]==args[i][2]+(j/6)*4+pattern[j%6]);checks++;}
+    // Fixed indices plus vertexOffset (h[3]) give the vertex the direct path's baked indices gave.
+    for(uint32_t j=0;j<(count/4)*6;j++){CHECK(actual[j]==(j/6)*4+pattern[j%6] && actual[j]+h[3]==args[i][2]+(j/6)*4+pattern[j%6]);checks++;}
    }
   }
   for(unsigned i=0;i<ncallbacks;i++)callbacks[i].fn(callbacks[i].arg);ncallbacks=0;
