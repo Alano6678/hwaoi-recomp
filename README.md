@@ -8,14 +8,37 @@
 
 The game's ARM64 code is translated to C ahead of time and compiled with a C/C++ runtime. An NVN 2 implementation handles graphics, translating Ampere shaders to SPIR-V for Vulkan. This project builds on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp).
 
+## Project lead — [Alano6678 / AlanoFX](https://github.com/Alano6678)
+
+HWAoI adaptation, runtime and renderer development, Windows compiler distribution, memory optimization, testing, and project maintenance.
+
+## Major contributor — [LibertyPrime27](https://github.com/LibertyPrime27)
+
+Combat performance and QUADS batching, buffer-texture lighting, first-load stutter reduction, update and DLC support, two-player controls, and compiler/settings improvements. Their work is included through [#9](https://github.com/Alano6678/hwaoi-recomp/pull/9), [#10](https://github.com/Alano6678/hwaoi-recomp/pull/10), and [#11](https://github.com/Alano6678/hwaoi-recomp/pull/11).
+
 > [!NOTE]
 > Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads or game-derived executables are distributed here. Recompilation happens locally.
 
 ## Current status
 
-**Early development build — updated November 11, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
+**Early development build — updated November 12, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
 
-Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
+Native **1080p / 60 FPS** is the current testing baseline. The integrated build reaches the opening field, renders correctly and responds to movement on the RTX 4060 / Core i5-14600KF test PC; a stationary opening sample measured **59.9 FPS** at the 60 FPS target. A complete playthrough and the latest crowded-combat performance have not been verified locally.
+
+## Recent progress
+
+| Area | What has changed | Validation and remaining work |
+| --- | --- | --- |
+| Combat rendering | Indirect QUADS are converted on the GPU, adjacent conversions are batched, and invalidate-only barriers avoid unnecessary GPU stalls. | GPU tests pass. LibertyPrime27 reports approximately 57 FPS in fights that previously ran at 13–18 FPS on their PC; this is their measurement. |
+| Local lighting | Buffer textures and graphics texel-buffer fetches now expose the game's light lists and parameters. | The contributor verified the previously dark cave. Broader scene coverage remains open. |
+| Loading | Background pipeline builds, prioritized shader translation, early compute translation and remembered RomFS verification reduce repeated work. | The contributor reports a cold-scene stall reduction from about 7.5 seconds to 0.9 seconds. Compute prefetch is integrated with our compressed source cache. |
+| Host memory | Compact command records, smaller Vulkan pools, bounded background reclamation and lossless program-source compression. | Integrated opening run retains approximately **163 MiB less shader source**. 16 GiB PCs and long battles still require validation. |
+| Updates and DLC | Separate update/DLC NUP inputs, verified extraction and runtime add-on mounts. | Parser, refusal and mount tests pass; installed game content still needs matching dumps. |
+| Controls and co-op | Per-player devices and bindings, controller hotplug, rumble/motion routing, bindable host menu and unbound actions. | Integrated in source. Full two-player mission coverage remains unverified. |
+| Windows compiler | Reuses verified resources and unchanged native objects; supports compile/update/resume and a locally extracted game icon. | Game data and artwork stay in the user's output folder. |
+| Regression coverage | **183 tests passed, 3 skipped** in the latest integration run. | Synchronous and asynchronous GPU geometry each passed 6,416 checks; presentation checked 24,868,359 pixels with zero Vulkan validation errors. |
+
+## Memory progress
 
 Current source uses compact host command records, smaller Vulkan allocation pools and bounded background reclamation of completed CPU command copies. An opening-field census stored the equivalent of **186 MiB** of dense records in **128 MiB** (about 31.3% less). Large copy-retirement events fell from approximately **193 ms** on the recording thread to **3–5 ms**. These changes reduce memory overhead and periodic stalls; a paired opening-field test did not establish a sustained FPS gain.
 
@@ -27,6 +50,14 @@ An opt-in Windows demand-commit heap experiment also left approximately **1.4 Gi
 > **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
 >
 > **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
+
+## Current priorities
+
+1. **FPS++ timing:** keep walking, running, animation, gameplay timers and save behavior consistent at 30, 60, 90 and 120 FPS. A higher frame cap alone does not complete this work.
+2. **Resolution and UI:** preserve the interface's relative size and layout at 720p, 1080p, 1440p and 4K while rendering the scene at the selected resolution.
+3. **Sustained performance:** reduce crowded-combat cost and first-use stalls without dropping required draws or changing game logic.
+
+## Feature status
 
 | | Part | Progress |
 | --- | --- | --- |
