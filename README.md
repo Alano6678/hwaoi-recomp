@@ -8,7 +8,7 @@
 
 The game's ARM64 code is translated to C ahead of time and compiled with a C/C++ runtime. An NVN 2 implementation handles graphics, translating Ampere shaders to SPIR-V for Vulkan. This project builds on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp).
 
-## Project lead — [Alano6678 / AlanoFX](https://github.com/Alano6678)
+## Project lead — [Alano6678](https://github.com/Alano6678)
 
 HWAoI adaptation, runtime and renderer development, Windows compiler distribution, memory optimization, testing, and project maintenance.
 
