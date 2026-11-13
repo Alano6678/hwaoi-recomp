@@ -83,7 +83,12 @@ static void positive(void) {
         OpusParameters p=parameters(rates[rate_i]);
         int state_size=opus_multistream_decoder_get_size(p.streams,p.coupled);
         uint32_t bytes=work_size(&p,1);
-        CHECK(bytes == sizeof(HardwareOpus)+2u*state_size+(p.rate*120/1000)*p.channels*2u);
+        /* The reservation counts at most the classic decoder state (runtime/hwopus.c opus_reserved_state): a libopus
+         * 1.5+ state with deep PLC/DRED/OSCE is several times larger and must not reach the game's fixed budget. */
+        int classic=1024+p.coupled*27648+(p.streams-p.coupled)*18432;
+        int reserved=state_size<classic?state_size:classic;
+        CHECK(state_size > 0 && reserved <= classic);
+        CHECK(bytes == sizeof(HardwareOpus)+2u*reserved+(p.rate*120/1000)*p.channels*2u);
         CHECK(bytes == work_size(&p,0));
         int error=0, frames=p.rate/50;
         OpusMSEncoder *encoder=opus_multistream_encoder_create(p.rate,p.channels,p.streams,p.coupled,
