@@ -16,6 +16,10 @@ HWAoI adaptation, runtime and renderer development, Windows compiler distributio
 
 Combat performance and QUADS batching, buffer-texture lighting, first-load stutter reduction, update and DLC support, two-player controls, and compiler/settings improvements. Their work is included through [#9](https://github.com/Alano6678/hwaoi-recomp/pull/9), [#10](https://github.com/Alano6678/hwaoi-recomp/pull/10), and [#11](https://github.com/Alano6678/hwaoi-recomp/pull/11).
 
+## Linux and audio contributor — [fgabe](https://github.com/fgabe)
+
+Linux x86-64 build scripts and documentation, modern libopus compatibility, and PipeWire/SDL audio queue fixes. Their work was contributed through [#15](https://github.com/Alano6678/hwaoi-recomp/pull/15).
+
 > [!NOTE]
 > Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads or game-derived executables are distributed here. Recompilation happens locally.
 
@@ -34,6 +38,7 @@ Native **1080p / 60 FPS** is the current testing baseline. The integrated build 
 | Loading | Background pipeline builds, prioritized shader translation, early compute translation and remembered RomFS verification reduce repeated work. | The contributor reports a cold-scene stall reduction from about 7.5 seconds to 0.9 seconds. Compute prefetch is integrated with our compressed source cache. |
 | Host memory | Compact command records, smaller Vulkan pools, bounded background reclamation and lossless program-source compression. | Integrated opening run retains approximately **163 MiB less shader source**. 16 GiB PCs and long battles still require validation. |
 | Updates and DLC | Separate update/DLC NUP inputs, verified extraction and runtime add-on mounts. | Parser, refusal and mount tests pass; installed game content still needs matching dumps. |
+| Linux build | Linux x86-64 translator/build/play scripts and modern audio support are now in main. | PR #15 compiled and linked on Arch; this exact branch still needs broader Linux boot/play testing and no Linux binary release is promised yet. |
 | Controls and co-op | Per-player devices and bindings, controller hotplug, rumble/motion routing, bindable host menu and unbound actions. | Integrated in source. Full two-player mission coverage remains unverified. |
 | Windows compiler | Reuses verified resources and unchanged native objects; supports compile/update/resume and a locally extracted game icon. | Game data and artwork stay in the user's output folder. |
 | Regression coverage | **183 tests passed, 3 skipped** in the latest integration run. | Synchronous and asynchronous GPU geometry each passed 6,416 checks; presentation checked 24,868,359 pixels with zero Vulkan validation errors. |
