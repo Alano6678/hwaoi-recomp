@@ -4,6 +4,10 @@ Uses the imported Ryujinx sources and the same selected patches as
 tools/build_xlate.py. Vendor files are never modified. Managed self-contained
 publishing avoids NativeAOT's MSVC requirement; the entire publish directory is
 needed, not only totk_xlate.exe. Output stays under ignored work/.
+
+On Linux the same steps publish for linux-x64 (apphost totk_xlate) with the dotnet on
+PATH, or $HWAOI_TOOLS/DotNet/dotnet when HWAOI_TOOLS is set; the NuGet cache is
+work/toolchain/NuGet.
 """
 from __future__ import annotations
 
@@ -22,7 +26,10 @@ import build_xlate as upstream
 from xlate_smoke import fragment_code, mov32i, SCHED, EXIT
 
 ROOT = Path(__file__).resolve().parents[1]
-MODE = "managed-self-contained-win-x64"
+WINDOWS = os.name == "nt"
+RID = "win-x64" if WINDOWS else "linux-x64"
+MODE = f"managed-self-contained-{RID}"
+APPHOST = "totk_xlate.exe" if WINDOWS else "totk_xlate"
 VERSION = 2
 
 
@@ -187,11 +194,13 @@ def smoke_ir_banks(executable, folder, env, spirv_val):
 
 
 def build(args):
-    require(os.name == "nt", "this build entry currently targets Windows x64")
+    require(WINDOWS or sys.platform == "linux", "this build entry targets Windows x64 and Linux x64")
     dotnet = args.dotnet.resolve(strict=True)
     output = target_path(args.out, ROOT / "work/build/hwaoi196608")
     require(output.name.startswith("xlate"), "translator deployment folder must start with xlate")
-    cache = dotnet.parent.parent / "NuGet"   # beside the .NET folder (HWAOI_TOOLS, default F:/)
+    # Windows: beside the .NET folder (HWAOI_TOOLS, default F:/). Linux: the system dotnet's folder is not writable.
+    cache = dotnet.parent.parent / "NuGet" if WINDOWS else ROOT / "work/toolchain/NuGet"
+    fallback = dotnet.parent / "nuget" if WINDOWS else cache / "empty-feed"
     for folder in (cache / "packages", cache / "http", cache / "plugins", cache / "cli-home", cache / "empty-feed"):
         folder.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -201,7 +210,9 @@ def build(args):
                 "DOTNET_NOLOGO": "1", "DOTNET_MULTILEVEL_LOOKUP": "0", "DOTNET_ROOT": str(dotnet.parent)})
     sdk = subprocess.run([str(dotnet), "--version"], env=env, check=True, capture_output=True,
                          text=True, encoding="utf-8", timeout=30).stdout.strip()
-    provenance = check_vendor()
+    # --no-vendor-reference: no pinned DKB clone to compare with; the manifest records that the check did not run.
+    provenance = ({"reference_commit": None, "files": len(upstream.tree_hashes(upstream.VENDOR)),
+                   "tree_identity": None} if args.no_vendor_reference else check_vendor())
     inputs = {"schema": VERSION, "mode": MODE, "sdk_version": sdk,
               "upstream_source_identity": upstream.identity(defined_float_minmax=args.defined_float_minmax),
               "builder_sha256": digest(Path(__file__)), "smoke_source_sha256": digest(ROOT / "tools/xlate_smoke.py"),
@@ -247,16 +258,16 @@ def build(args):
     publish = workspace / "publish"
     properties = ["-p:PublishAot=false", "-p:SelfContained=true", "-p:UseAppHost=true",
                   "-p:InvariantGlobalization=true", "-p:GeneratePackageOnBuild=false",
-                  "-p:NuGetAudit=false", f"-p:RyuSrc={source}", f"-p:RestoreFallbackFolders={(dotnet.parent / 'nuget').as_posix()}"]
+                  "-p:NuGetAudit=false", f"-p:RyuSrc={source}", f"-p:RestoreFallbackFolders={fallback.as_posix()}"]
     # Offline first: use already cached, version-matched NuGet packages. --online
     # explicitly permits nuget.org if a dependency/runtime pack is absent.
     restore_sources = "https://api.nuget.org/v3/index.json" if args.online else str(cache / "empty-feed")
     started = time.monotonic()
-    run_logged([dotnet, "restore", project / "totk_xlate.csproj", "-r", "win-x64", *properties,
+    run_logged([dotnet, "restore", project / "totk_xlate.csproj", "-r", RID, *properties,
                 f"-p:RestoreSources={restore_sources}"], workspace, env, workspace / "restore.log")
-    run_logged([dotnet, "publish", project / "totk_xlate.csproj", "-c", "Release", "-r", "win-x64",
+    run_logged([dotnet, "publish", project / "totk_xlate.csproj", "-c", "Release", "-r", RID,
                 "--no-restore", *properties, "-o", publish], workspace, env, workspace / "publish.log")
-    executable = publish / "totk_xlate.exe"
+    executable = publish / APPHOST
     require(executable.is_file() and (publish / "totk_xlate.runtimeconfig.json").is_file(), "managed apphost missing")
     proof = smoke(executable, workspace / "smoke", env, args.spirv_val)
     executable.with_suffix(".id").write_text(identity + "\n", encoding="ascii")
@@ -264,10 +275,10 @@ def build(args):
     shutil.copytree(publish, output)
     manifest = {"status": "pass", "identity": identity, "inputs": inputs, "mode": MODE,
                 "dotnet": str(dotnet), "sdk_version": sdk, "workspace": str(workspace),
-                "deployment": str(output), "executable": str(output / "totk_xlate.exe"),
+                "deployment": str(output), "executable": str(output / APPHOST),
                 "deployment_files": hashes(output), "smoke": proof,
                 "seconds": round(time.monotonic() - started, 3),
-                "runtime_configuration": {"HWAOI_XLATE": str(output / "totk_xlate.exe")},
+                "runtime_configuration": {"HWAOI_XLATE": str(output / APPHOST)},
                 "limits": ["Managed self-contained build, not NativeAOT", "No game shader or GPU test performed",
                            "The complete deployment folder is required"]}
     write_json(workspace / "build-report.json", manifest)
@@ -278,10 +289,14 @@ def build(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--dotnet", type=Path, default=Path(os.environ.get("HWAOI_TOOLS", "F:") + "/DotNet/dotnet.exe"))
+    tools = os.environ.get("HWAOI_TOOLS", "F:" if WINDOWS else "")
+    dotnet = Path(tools + "/DotNet/dotnet" + (".exe" if WINDOWS else "")) if tools else Path(shutil.which("dotnet") or "dotnet")
+    parser.add_argument("--dotnet", type=Path, default=dotnet)
     parser.add_argument("--out", type=Path, default=ROOT / "work/build/hwaoi196608/xlate-managed")
     parser.add_argument("--online", action="store_true", help="allow missing package restore from nuget.org")
     parser.add_argument("--defined-float-minmax", action="store_true")
+    parser.add_argument("--no-vendor-reference", action="store_true",
+                        help="skip comparing tools/vendor/ryujinx with the pinned DKB clone in work/references")
     parser.add_argument("--spirv-val", type=Path, help="optional existing spirv-val.exe for the synthetic output")
     args = parser.parse_args()
     try:

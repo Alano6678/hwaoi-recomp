@@ -55,6 +55,9 @@ class AudioOutTests(unittest.TestCase):
     def test_buffer_offsets_snapshot_and_input_byte_consumption(self):
         self.run_case("snapshot")
 
+    def test_buffers_return_within_the_device_lead(self):
+        self.run_case("lead")
+
     def test_invalid_buffer_ranges_alignment_and_duplicates_rejected(self):
         self.run_case("invalid")
 

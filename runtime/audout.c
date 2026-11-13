@@ -1,7 +1,11 @@
 // Original host implementation; protocol facts from switchbrew/libnx audout.c/h
 // and the target SDK OpenAudioOut wrapper. No system firmware code is used.
-// PCM16 snapshots stay owned until SDL consumes their input bytes (not a claim
-// about DAC latency). Explicit AUDIO=none uses a real-time sample clock instead.
+// PCM16 snapshots are copied into the SDL stream on append. A buffer goes back to
+// the guest once SDL holds a lead of `lead` bytes (two device periods plus one
+// guest buffer) without it: HWAoI keeps only four 5-ms buffers in flight, and
+// releasing them only when the device pulled their bytes left less queued than
+// one SDL/PipeWire period (1024 frames), so every period ended in silence.
+// Explicit AUDIO=none uses a real-time sample clock instead.
 // Only the default device is exposed; unsupported formats/modes fail visibly.
 #include <math.h>
 #include <stdlib.h>
@@ -15,18 +19,21 @@
 #define OUT_MAX_BYTES (16u * 1024u * 1024u)
 typedef struct { uint64_t next, address, capacity, size, offset; } OutWire;
 _Static_assert(sizeof(OutWire) == 40, "AudioOutBuffer");
-typedef struct { uint64_t tag, bytes, used; uint8_t *data; } OutBuffer;
+typedef struct { uint64_t tag, bytes, used, end; uint8_t *data; } OutBuffer;  // end: stream offset past its bytes
 typedef struct {
     PlatMutex lock;
     PlatThread *thread;
     SDL_AudioStream *stream;
     volatile int32_t running;
-    uint32_t event, state, rate, channels;
+    uint32_t event, state, rate, channels, lead;
     uint64_t played, last_ns, fraction, submitted, consumed;
     float volume;
     OutBuffer pending[OUT_MAX_BUFFERS];
     uint64_t released[OUT_MAX_BUFFERS];
     unsigned npending, nreleased;
+    // TRACE=audio: per-second appends, smallest/largest buffer, lowest SDL queue and ticks it ran dry.
+    uint64_t tr_ns, tr_appends, tr_min, tr_max, tr_dry, tr_ticks;
+    int tr_low;
 } AudioOut;
 
 static void out_need(int ok, const char *what) {
@@ -67,16 +74,36 @@ static void out_consume(AudioOut *o, uint64_t bytes, int played) {
 static void out_tick(AudioOut *o, uint64_t now) {
     uint64_t elapsed = now >= o->last_ns ? now - o->last_ns : 0;
     o->last_ns = now;
-    if (o->state || !o->npending) { o->fraction = 0; return; }
     if (o->stream) {
+        // Device-side accounting runs with or without pending buffers: early-released bytes stay in SDL's queue.
         int queued = SDL_GetAudioStreamQueued(o->stream);
         out_need(queued >= 0 && (uint64_t)queued <= o->submitted - o->consumed, "SDL queue accounting");
         uint64_t at = o->submitted - (uint64_t)queued;
         // SDL input is whole PCM frames. Do not accumulate partial-frame loss.
         at -= at % (2 * o->channels);
-        out_consume(o, at - o->consumed, 1);
+        o->played += (at - o->consumed) / (2 * o->channels);
         o->consumed = at;
-    } else {
+        if (rt_trace & RT_TRACE_AUDIO) {
+            o->tr_ticks++;
+            if (!queued && !o->state) o->tr_dry++;
+            if (o->tr_low < 0 || queued < o->tr_low) o->tr_low = queued;
+            if (now - o->tr_ns >= 1000000000ull) {
+                rt_log("audout trace: %llu appends (%llu..%llu frames), SDL queue low %d frames, dry %llu of %llu ticks, "
+                       "%u pending, lead %u frames", (unsigned long long)o->tr_appends, (unsigned long long)o->tr_min,
+                       (unsigned long long)o->tr_max, o->tr_low / (int)(2 * o->channels),
+                       (unsigned long long)o->tr_dry, (unsigned long long)o->tr_ticks, o->npending,
+                       o->lead / (2 * o->channels));
+                o->tr_ns = now; o->tr_appends = o->tr_max = o->tr_dry = o->tr_ticks = 0; o->tr_min = ~0ull; o->tr_low = -1;
+            }
+        }
+        if (o->state) return;
+        // Every pending buffer's bytes are already queued in SDL. Hand each back once the device position is within
+        // the lead of its end, so the guest refills while SDL still holds two periods.
+        while (o->npending && o->pending[0].end <= at + o->lead) out_release_head(o);
+        return;
+    }
+    if (o->state || !o->npending) { o->fraction = 0; return; }
+    {
         // Saturate a long suspension to the bounded queue duration; do not wrap.
         if (elapsed > 100000000000ull) elapsed = 100000000000ull;
         uint64_t scaled = elapsed * o->rate + o->fraction;
@@ -134,7 +161,13 @@ static void out_append(AudioOut *o, const IpcRequest *rq) {
     if (o->stream && w.size)
         out_need(SDL_PutAudioStreamData(o->stream, copy, (int)w.size), "SDL sample submission failed");
     o->submitted += w.size;
-    o->pending[o->npending++] = (OutBuffer){tag, w.size, 0, copy};
+    if (rt_trace & RT_TRACE_AUDIO) {
+        uint64_t f = w.size / (2 * o->channels);
+        o->tr_appends++;
+        if (f < o->tr_min) o->tr_min = f;
+        if (f > o->tr_max) o->tr_max = f;
+    }
+    o->pending[o->npending++] = (OutBuffer){tag, w.size, 0, o->submitted, copy};
 }
 static void out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     AudioOut *o = s->state;
@@ -177,7 +210,8 @@ static void out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     case 10: IPC_OUT(rs, o->played); break;
     case 11: {
         uint8_t flushed = o->state && o->npending;
-        if (flushed) {
+        // Early-released bytes may still sit in SDL's queue with nothing pending; a stopped flush drops them too.
+        if (o->state && (flushed || o->submitted != o->consumed)) {
             if (o->stream) out_need(SDL_ClearAudioStream(o->stream), "SDL flush failed");
             while (o->npending) out_release_head(o);
             o->submitted = o->consumed = o->fraction = 0;
@@ -226,13 +260,23 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
         out_need(o != NULL, "state allocation");
         o->state = 1; o->rate = rate; o->channels = channels; o->volume = 1;
         o->last_ns = kern_now_ns(); o->event = kern_event_new();
+        o->tr_ns = o->last_ns; o->tr_min = ~0ull; o->tr_low = -1;
         plat_mutex_init(&o->lock);
         const char *mode = cfg_get("TOTK_AUDIO");
         if (!((mode && !strcmp(mode, "none")) || cfg_get("TOTK_AUDIO_OFF"))) {
             out_need(SDL_InitSubSystem(SDL_INIT_AUDIO), "SDL audio initialization failed (use HWAOI_AUDIO=none for explicit silent mode)");
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)channels, (int)rate};
+            // A 10-ms device period instead of SDL's 1024-frame default keeps the lead short. The
+            // SDL_AUDIO_DEVICE_SAMPLE_FRAMES environment variable still overrides it.
+            if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)) SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");
             o->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
             out_need(o->stream != NULL, "SDL output device failed (use HWAOI_AUDIO=none for explicit silent mode)");
+            SDL_AudioSpec device;
+            int period = 0;
+            if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(o->stream), &device, &period) || period <= 0)
+                period = 1024;
+            // Two device periods plus one 5-ms guest buffer.
+            o->lead = (uint32_t)(2 * period + (int)rate / 200) * 2u * channels;
         }
         o->running = 1;
         o->thread = plat_thread_new(out_worker, o, "audout");
@@ -240,8 +284,9 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
         struct { uint32_t rate, channels, format, state; } info = {rate, channels, 2, 1};
         IPC_OUT(rs, info);
         rs->move[rs->nmove++] = ipc_session_new("IAudioOut", out_handler, o, out_close);
-        rt_log("audout: opened %u Hz PCM16 x%u, aruid %#llx, %s", rate, channels,
-               (unsigned long long)aruid, o->stream ? "SDL output" : "explicit silent sample clock");
+        rt_log("audout: opened %u Hz PCM16 x%u, aruid %#llx, %s, lead %u frames", rate, channels,
+               (unsigned long long)aruid, o->stream ? "SDL output" : "explicit silent sample clock",
+               o->lead / (2u * channels));
         return;
     }
     default: ipc_unimplemented(s, rq);

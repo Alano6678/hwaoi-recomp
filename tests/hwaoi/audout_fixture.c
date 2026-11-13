@@ -32,6 +32,8 @@ static unsigned nranges;
 static unsigned sessions, events, threads, streams, event_signals;
 static uint64_t clock_ns = UINT64_C(1000000000);
 static const char *audio_mode = "none";
+static int device_period = 480;   /* SDL device sample frames the mock reports */
+static char period_hint[16];
 static jmp_buf fatal_jump;
 static int catch_fatal;
 static char fatal_text[256];
@@ -162,6 +164,18 @@ bool SDLCALL SDL_PauseAudioStreamDevice(SDL_AudioStream *s) { TASSERT(s); s->pau
 bool SDLCALL SDL_ResumeAudioStreamDevice(SDL_AudioStream *s) { TASSERT(s); s->paused = 0; return true; }
 bool SDLCALL SDL_ClearAudioStream(SDL_AudioStream *s) { TASSERT(s); s->queued = 0; return true; }
 bool SDLCALL SDL_SetAudioStreamGain(SDL_AudioStream *s, float gain) { TASSERT(s); s->gain = gain; return true; }
+const char *SDLCALL SDL_GetHint(const char *name) {
+    TASSERT(!strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)); return period_hint[0] ? period_hint : NULL;
+}
+bool SDLCALL SDL_SetHint(const char *name, const char *value) {
+    TASSERT(!strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) && strlen(value) < sizeof period_hint);
+    strcpy(period_hint, value); return true;
+}
+SDL_AudioDeviceID SDLCALL SDL_GetAudioStreamDevice(SDL_AudioStream *s) { TASSERT(s); return 77; }
+bool SDLCALL SDL_GetAudioDeviceFormat(SDL_AudioDeviceID id, SDL_AudioSpec *spec, int *frames) {
+    TASSERT(id == 77 && spec && frames); *spec = (SDL_AudioSpec){SDL_AUDIO_F32, 2, 48000}; *frames = device_period;
+    return device_period > 0;
+}
 
 static IpcSession manager = {.name = "audout:u", .handler = audout_manager_handler};
 static IpcSession *session(uint32_t h) {
@@ -299,13 +313,40 @@ static void test_snapshot(void) {
     TASSERT(!memcmp(o->pending[0].data, p + 16, 8));
     TASSERT(!memcmp(o->stream->first_write, p + 16, 8));
     memset(p, 0, 4096); TASSERT(o->pending[0].data[0] == 0x80);
-    (void)command(s, 1); TASSERT(!o->stream->paused);
+    TASSERT(!strcmp(period_hint, "480") && o->lead == (2 * 480 + 240) * 4);
+    advance(o, 1); TASSERT(o->npending == 1);   /* stopped: no early release */
+    (void)command(s, 1); TASSERT(!o->stream->paused && o->npending == 1); advance(o, 0);
+    /* Inside the lead from the start: handed back at once, played only as SDL drains it. */
+    TASSERT(o->npending == 0 && o->nreleased == 1 && o->played == 0);
     o->stream->queued = 7; advance(o, 1); TASSERT(o->played == 0 && o->consumed == 0);
     o->stream->queued = 5; advance(o, 1); TASSERT(o->played == 0 && o->consumed == 0);
     o->stream->queued = 4; advance(o, 1); TASSERT(o->played == 1 && o->consumed == 4);
     o->stream->queued = 1; advance(o, 1); TASSERT(o->played == 1 && o->consumed == 4);
     o->stream->queued = 0; advance(o, 1);
     TASSERT(o->played == 2 && o->consumed == 8 && o->npending == 0 && o->nreleased == 1);
+    kern_handle_close(h); _aligned_free(p); clean();
+}
+/* HWAoI's pattern: four 240-frame stereo buffers in flight against a device period larger than all of them. Each is
+ * handed back once the device position is within the lead of its end, before SDL pulls it. */
+static void test_lead(void) {
+    audio_mode = "sdl"; device_period = 1024; strcpy(period_hint, "1024");   /* an explicit override is kept */
+    uint32_t h = open_out(3, 48000, 2); IpcSession *s = session(h); AudioOut *o = s->state;
+    TASSERT(!strcmp(period_hint, "1024") && o->lead == (2 * 1024 + 240) * 4);
+    unsigned char *p = samples(4096);
+    for (uint64_t tag = 1; tag <= 4; tag++) append(s, tag, p, 4096, 960, 0);
+    (void)command(s, 1); advance(o, 0);
+    TASSERT(o->npending == 0 && o->nreleased == 4 && o->played == 0 && o->stream->queued == 3840);
+    for (uint64_t tag = 5; tag <= 12; tag++) append(s, tag, p, 4096, 960, 0);   /* ends 4800 .. 11520 */
+    advance(o, 1);   /* lead 9152: ends up to 8640 go back */
+    TASSERT(o->npending == 3 && o->nreleased == 9 && o->pending[0].tag == 10);
+    o->stream->queued -= 4096; advance(o, 1);   /* the device pulls one 1024-frame period */
+    TASSERT(o->played == 1024 && o->npending == 0 && o->nreleased == 12);
+    (void)command(s, 2); append(s, 13, p, 4096, 960, 0); advance(o, 1);
+    TASSERT(o->npending == 1);   /* stopped: held */
+    device_period = 0; kern_handle_close(h);
+    h = open_out(3, 48000, 6); o = session(h)->state;
+    TASSERT(o->lead == (2 * 1024 + 240) * 12);   /* unknown period: SDL's 1024-frame default */
+    device_period = 480; period_hint[0] = 0;
     kern_handle_close(h); _aligned_free(p); clean();
 }
 static void test_invalid(void) {
@@ -390,11 +431,20 @@ static void test_controls(void) {
     unsigned char *p = samples(4096); append(s, 77, p, 4096, 8, 0);
     uint64_t tag = 77; IpcRequest q = {.cmd = 6, .data = (uint8_t *)&tag, .data_size = 8};
     TASSERT(u8(call(s, q)) == 1); tag = 88; TASSERT(u8(call(s, q)) == 0);
-    (void)command(s, 1); TASSERT(u8(command(s, 11)) == 0 && o->npending == 1);
+    /* Running: Flush is refused; the buffer is inside the lead and goes back early. */
+    (void)command(s, 1); TASSERT(u8(command(s, 11)) == 0 && o->npending == 0 && o->nreleased == 1);
+    uint64_t back; TASSERT(released(s, &back, 8, 0) == 1 && back == 77);
     (void)command(s, 2); TASSERT(o->stream->paused);
+    append(s, 78, p, 4096, 8, 0); TASSERT(o->stream->queued == 16 && o->npending == 1);
+    /* Stopped: Flush drops the pending buffer and the early-released bytes still queued in SDL. */
     TASSERT(u8(command(s, 11)) == 1 && o->npending == 0 && o->nreleased == 1 && o->played == 0);
     TASSERT(o->stream->queued == 0 && o->submitted == 0 && o->consumed == 0);
     TASSERT(u8(command(s, 11)) == 0);
+    TASSERT(released(s, &back, 8, 0) == 1 && back == 78);
+    append(s, 79, p, 4096, 8, 0); TASSERT(released(s, &back, 8, 0) == 0);
+    (void)command(s, 1); advance(o, 0); TASSERT(o->nreleased == 1); (void)command(s, 2);
+    /* Nothing pending, early-released bytes queued: a stopped Flush still clears SDL and reports no buffer. */
+    TASSERT(o->stream->queued == 8 && u8(command(s, 11)) == 0 && o->stream->queued == 0 && o->submitted == 0);
     float value = 0.25f; q = (IpcRequest){.cmd = 12, .data = (uint8_t *)&value, .data_size = 4};
     (void)call(s, q); TASSERT(o->stream->gain == 0.25f);
     IpcResponse r = command(s, 13); TASSERT(r.data_size == 4); memcpy(&value, r.data, 4); TASSERT(value == 0.25f);
@@ -414,6 +464,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "fractional")) test_fractional();
     else if (!strcmp(argv[1], "pause")) test_pause();
     else if (!strcmp(argv[1], "snapshot")) test_snapshot();
+    else if (!strcmp(argv[1], "lead")) test_lead();
     else if (!strcmp(argv[1], "invalid")) test_invalid();
     else if (!strcmp(argv[1], "capacity")) test_capacity();
     else if (!strcmp(argv[1], "fifo")) test_fifo();

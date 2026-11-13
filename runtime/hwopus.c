@@ -55,13 +55,25 @@ static OpusParameters opus_parameters(const IpcRequest *rq, int extended) {
               "invalid multistream channel/stream counts");
     return p;
 }
+// The decoder state the reservation counts. The decoder itself lives in host memory (hwopus_manager_handler), so the
+// reservation is only the number the game sets transfer memory aside for, and the game's sound system has a fixed
+// budget for it. A libopus built with deep PLC, DRED or OSCE (1.5 and later, as Linux distributions ship it) has a
+// state several times the classic one (1.6.1: 163596 bytes for a coupled stream against about 27 KiB), and with that
+// in the reservation the game's sound setup gives up before it creates its allocator: the first sound bank then fails
+// with "can't create resource". The reservation therefore counts at most the classic state: 18 KiB per mono stream,
+// 27 KiB per coupled one and 1 KiB of multistream header, rounded up from libopus 1.3's sizes.
+static int opus_reserved_state(const OpusParameters *p, int host) {
+    int classic = 1024 + p->coupled * 27648 + (p->streams - p->coupled) * 18432;
+    return host < classic ? host : classic;
+}
 static uint32_t opus_work_size(const OpusParameters *p, int *state_size) {
-    int n = opus_multistream_decoder_get_size(p->streams, p->coupled);
-    opus_need(n > 0, "libopus rejected decoder state size");
+    int host = opus_multistream_decoder_get_size(p->streams, p->coupled);
+    opus_need(host > 0, "libopus rejected decoder state size");
+    *state_size = host;
+    int n = opus_reserved_state(p, host);
     uint64_t size = sizeof(HardwareOpus) + 2ull * (unsigned)n +
                     (uint64_t)(p->rate * 120 / 1000) * (unsigned)p->channels * sizeof(int16_t);
     opus_need(size <= INT_MAX - 4095u, "decoder reservation overflow");
-    *state_size = n;
     return (uint32_t)size;
 }
 static void opus_close(void *state) {
@@ -138,7 +150,12 @@ void hwopus_manager_handler(IpcSession *session, const IpcRequest *rq, IpcRespon
     OpusParameters p = opus_parameters(rq, rq->cmd == 6 || rq->cmd == 9);
     int state_size;
     uint32_t work_size = opus_work_size(&p, &state_size);
-    if (!opening) { IPC_OUT(rs, work_size); return; }
+    if (!opening) {
+        rt_log("hwopus: work size %u for %d Hz x%d, %d streams/%d coupled (libopus state %d)", work_size, p.rate,
+               p.channels, p.streams, p.coupled, state_size);
+        IPC_OUT(rs, work_size);
+        return;
+    }
     uint64_t supplied = rq->cmd == 6 ? IPC_ARG(rq, uint32_t, 0) : IPC_ARG(rq, uint64_t, 0);
     IpcTransferMemory *tmem = kern_handle_get(rq->copy[0], KERN_TMEM);
     opus_need(tmem && !tmem->perm && tmem->addr && !(tmem->addr & 4095) &&
