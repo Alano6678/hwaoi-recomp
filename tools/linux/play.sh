@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 # Starts the Linux build made by tools/linux/build.sh for normal play, with the settings tools/hwaoi.py
 # launch_interactive passes on Windows, minus its diagnostic screenshots. Saves go to work/saves/hwaoi196608, the log
 # to work/logs/play-<time>.log. Variables already set in the environment (HWAOI_FPS_LIMIT, SDL_VIDEODRIVER, ...) win.

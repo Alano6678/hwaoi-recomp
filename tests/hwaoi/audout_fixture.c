@@ -33,6 +33,7 @@ static unsigned sessions, events, threads, streams, event_signals;
 static uint64_t clock_ns = UINT64_C(1000000000);
 static const char *audio_mode = "none";
 static int device_period = 480;   /* SDL device sample frames the mock reports */
+static int device_rate = 48000;
 static char period_hint[16];
 static jmp_buf fatal_jump;
 static int catch_fatal;
@@ -173,7 +174,7 @@ bool SDLCALL SDL_SetHint(const char *name, const char *value) {
 }
 SDL_AudioDeviceID SDLCALL SDL_GetAudioStreamDevice(SDL_AudioStream *s) { TASSERT(s); return 77; }
 bool SDLCALL SDL_GetAudioDeviceFormat(SDL_AudioDeviceID id, SDL_AudioSpec *spec, int *frames) {
-    TASSERT(id == 77 && spec && frames); *spec = (SDL_AudioSpec){SDL_AUDIO_F32, 2, 48000}; *frames = device_period;
+    TASSERT(id == 77 && spec && frames); *spec = (SDL_AudioSpec){SDL_AUDIO_F32, 2, device_rate}; *frames = device_period;
     return device_period > 0;
 }
 
@@ -346,8 +347,14 @@ static void test_lead(void) {
     device_period = 0; kern_handle_close(h);
     h = open_out(3, 48000, 6); o = session(h)->state;
     TASSERT(o->lead == (2 * 1024 + 240) * 12);   /* unknown period: SDL's 1024-frame default */
-    device_period = 480; period_hint[0] = 0;
+    device_period = 480; device_rate = 48000; period_hint[0] = 0;
     kern_handle_close(h); _aligned_free(p); clean();
+}
+static void test_device_rate_conversion(void) {
+    audio_mode = "sdl"; device_period = 480; device_rate = 96000; period_hint[0] = 0;
+    uint32_t h = open_out(3, 48000, 2); AudioOut *o = session(h)->state;
+    TASSERT(o->lead == (2 * 240 + 240) * 4);
+    kern_handle_close(h); device_rate = 48000; device_period = 480; period_hint[0] = 0; clean();
 }
 static void test_invalid(void) {
     uint32_t h = open_out(3, 48000, 2); IpcSession *s = session(h); AudioOut *o = s->state;
@@ -465,6 +472,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "pause")) test_pause();
     else if (!strcmp(argv[1], "snapshot")) test_snapshot();
     else if (!strcmp(argv[1], "lead")) test_lead();
+    else if (!strcmp(argv[1], "device-rate")) test_device_rate_conversion();
     else if (!strcmp(argv[1], "invalid")) test_invalid();
     else if (!strcmp(argv[1], "capacity")) test_capacity();
     else if (!strcmp(argv[1], "fifo")) test_fifo();

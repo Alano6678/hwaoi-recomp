@@ -273,10 +273,16 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
             out_need(o->stream != NULL, "SDL output device failed (use HWAOI_AUDIO=none for explicit silent mode)");
             SDL_AudioSpec device;
             int period = 0;
-            if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(o->stream), &device, &period) || period <= 0)
+            if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(o->stream), &device, &period) || period <= 0 || device.freq <= 0) {
                 period = 1024;
-            // Two device periods plus one 5-ms guest buffer.
-            o->lead = (uint32_t)(2 * period + (int)rate / 200) * 2u * channels;
+                device.freq = (int)rate;
+            }
+            // SDL reports frames at the DEVICE rate; queued bytes are measured
+            // at the guest stream's rate. Round up before adding two periods.
+            uint64_t guest_period = ((uint64_t)period * rate + (unsigned)device.freq - 1) / (unsigned)device.freq;
+            uint64_t lead = (2 * guest_period + rate / 200) * 2u * channels;
+            out_need(lead <= OUT_MAX_BYTES, "unsupported audio device period");
+            o->lead = (uint32_t)lead;
         }
         o->running = 1;
         o->thread = plat_thread_new(out_worker, o, "audout");

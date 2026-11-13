@@ -58,6 +58,9 @@ class AudioOutTests(unittest.TestCase):
     def test_buffers_return_within_the_device_lead(self):
         self.run_case("lead")
 
+    def test_device_rate_is_converted_to_guest_stream_rate(self):
+        self.run_case("device-rate")
+
     def test_invalid_buffer_ranges_alignment_and_duplicates_rejected(self):
         self.run_case("invalid")
 
