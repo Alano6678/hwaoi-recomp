@@ -667,7 +667,7 @@ static void tab_game(float scale) {
 
 static void tab_sound(float scale) {
     opt_begin("##sound", scale);
-    opt_slider("TOTK_VOLUME", UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+    opt_slider("TOTK_VOLUME", UI_MENU_VOLUME, 0, 200, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
     opt_end();
 }
 
