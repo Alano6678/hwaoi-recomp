@@ -130,7 +130,13 @@ void rec_begin(VkCommandBuffer cb) {
         // Default on for every GPU. AMD drivers once lost the device with the recorder (issues #5 and #40); after
         // vk_mem_note_recording kept objects alive until their submission completed and the recorder began ending
         // its own parts (rec_end_cb), RDNA 1 and 2 cards ran with it on and off without a loss or a white scene.
-        mode = rt_knob("VK_RECORDER", "1");
+        // Discrete RDNA 3 still loses the device with it: an RX 7800 XT (driver 26.10.1, LLPC) lost it within seconds
+        // of the window taking focus on every run with the recorder on, and ran with it off. The default is off
+        // there only; RDNA 4 (RX 9070) runs with it and gains from it. TOTK_VK_RECORDER=1 still forces it on.
+        mode = rt_knob("VK_RECORDER", vk_caps.amd_rdna3 ? "0" : "1");
+        const char *forced = cfg_get("TOTK_VK_RECORDER");
+        if (!mode && vk_caps.amd_rdna3 && !(forced && *forced))
+            rt_log("vk_rec: recorder thread off by default on AMD RDNA 3; TOTK_VK_RECORDER=1 forces it");
         if (mode) {
             plat_event_init(&wake_ev, 0, 0);
             rec_prio = plat_thread_priority_get();
