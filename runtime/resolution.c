@@ -241,6 +241,10 @@ void res_init(void) {
                 rt_fatal("resolution: enlarged native scene requires a larger application pool; remove the APP_POOL override");
             memcpy(page + 0x98, &texture_pool, sizeof texture_pool);
             memcpy(page + 0xa0, &texture_parent, sizeof texture_parent);
+            uint64_t canvas = pack(1920, 1080);   // set hwaoi_ui_canvas: the screen cameras frame the game's 2D canvas
+            memcpy(page + 0xa8, &canvas, sizeof canvas);
+            float canvas_scale = (float)size[0] / 1920.0f;   // canvas units to output pixels (2D primitive corners)
+            memcpy(page + 0xb8, &canvas_scale, sizeof canvas_scale);
             if (application_extra)
                 rt_log("resolution: experimental texture pool %llu MiB, matching parent %llu MiB plus bookkeeping",
                        (unsigned long long)(texture_pool >> 20), (unsigned long long)(texture_parent >> 20));
