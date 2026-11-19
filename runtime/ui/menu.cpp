@@ -647,6 +647,13 @@ static void tab_screen(float scale) {
     opt_choice("TOTK_ASPECT", UI_MENU_ASPECT, aspect, 2, UI_MENU_ASPECT_DESC);
     opt_slider("TOTK_FOV", UI_MENU_FOV, 70, 140, UI_MENU_FOV_DESC, 5, "%.0f %%");
     rows_color();
+    if (RT_TARGET_HWAOI) {   // HDR10 output (vk_hdr.c)
+        opt_group(UI_MENU_HDR_GROUP);
+        opt_toggle("TOTK_HDR", UI_MENU_HDR, UI_MENU_HDR_DESC);
+        opt_slider("TOTK_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f nits");
+        opt_slider("TOTK_HDR_GAME_NITS", UI_MENU_HDR_GAME, 80, 500, UI_MENU_HDR_GAME_DESC, 5, "%.0f nits");
+        opt_slider("TOTK_HDR_UI_NITS", UI_MENU_HDR_UI, 80, 500, UI_MENU_HDR_UI_DESC, 5, "%.0f nits");
+    }
     opt_end();
 }
 

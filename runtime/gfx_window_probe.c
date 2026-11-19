@@ -144,6 +144,7 @@ static int present_and_check(Source *s, int first, int i, int *w_out, int *h_out
 }
 
 int probe_window(void) {
+    vk_hdr_off();   // the checks read 8-bit swapchain pixels
     if (!menu_font_check()) return fail("the menu's font check takes a damaged font or refuses a good one");
     gfx_window_start();
     VkCtx *c = vk_ctx();
@@ -356,6 +357,7 @@ static void present_test_setting(const char *name, const char *value) {
 }
 
 int probe_present_color(void) {
+    vk_hdr_off();   // the checks read 8-bit swapchain pixels
     // A deterministic test process only; no game loading or persistent settings writes.
     static const char *keys[] = {"TOTK_COLOR_BRIGHTNESS", "TOTK_COLOR_CONTRAST", "TOTK_COLOR_SATURATION",
                                  "TOTK_COLOR_GAMMA", "TOTK_UPSCALER", "TOTK_ASPECT", "TOTK_FULLSCREEN", "TOTK_PERF_OVERLAY"};

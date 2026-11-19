@@ -93,6 +93,14 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_SATURATION_DESC] = "Colour strength against grey; 100 % leaves it.",
     [UI_MENU_COLOR_GAMMA] = "Gamma",
     [UI_MENU_COLOR_GAMMA_DESC] = "Below 1 brightens dark and middle tones, above 1 darkens them; 1 leaves them.",
+    [UI_MENU_HDR_GROUP] = "HDR",
+    [UI_MENU_HDR] = "HDR output",
+    [UI_MENU_HDR_DESC] = "Sends the picture to an HDR10 display. Currently it encodes the SDR picture (no extra highlight "
+                         "range) and needs an HDR-enabled display (Wayland on KDE with HDR on); otherwise the picture "
+                         "stays SDR.",
+    [UI_MENU_HDR_PEAK] = "HDR peak brightness", [UI_MENU_HDR_PEAK_DESC] = "The display's peak brightness in nits.",
+    [UI_MENU_HDR_GAME] = "HDR picture brightness", [UI_MENU_HDR_GAME_DESC] = "Brightness of white in the game picture, in nits.",
+    [UI_MENU_HDR_UI] = "HDR interface brightness", [UI_MENU_HDR_UI_DESC] = "Brightness of white in the HUD and menus, in nits.",
 
     [UI_MENU_FPS_LIMIT] = "Target frame rate",
 #if RT_TARGET_HWAOI
@@ -386,6 +394,13 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_SATURATION_DESC] = "Сила цвета относительно серого; 100 % — без изменений.",
     [UI_MENU_COLOR_GAMMA] = "Гамма",
     [UI_MENU_COLOR_GAMMA_DESC] = "Ниже 1 осветляет тёмные и средние тона, выше 1 затемняет их; 1 — без изменений.",
+    [UI_MENU_HDR_GROUP] = "HDR",
+    [UI_MENU_HDR] = "Вывод HDR",
+    [UI_MENU_HDR_DESC] = "Отправляет картинку на HDR10-дисплей. Пока кодируется SDR-картинка (без дополнительного "
+                         "диапазона светов); нужен дисплей с включённым HDR (Wayland в KDE), иначе картинка остаётся SDR.",
+    [UI_MENU_HDR_PEAK] = "Пиковая яркость HDR", [UI_MENU_HDR_PEAK_DESC] = "Пиковая яркость дисплея в нитах.",
+    [UI_MENU_HDR_GAME] = "Яркость картинки HDR", [UI_MENU_HDR_GAME_DESC] = "Яркость белого в картинке игры, в нитах.",
+    [UI_MENU_HDR_UI] = "Яркость интерфейса HDR", [UI_MENU_HDR_UI_DESC] = "Яркость белого в HUD и меню, в нитах.",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
 #if RT_TARGET_HWAOI
