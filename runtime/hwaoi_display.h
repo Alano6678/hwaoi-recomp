@@ -35,7 +35,7 @@ static inline int hwaoi_display_dimensions(const char *output, const char *scene
 static inline int hwaoi_display_pool_plan(const unsigned scene[2], const char *override,
                                           uint64_t *child, uint64_t *parent, uint64_t *application_extra) {
     int large = scene[0] == 3840 && scene[1] == 2160;
-    uint64_t bytes = large ? UINT64_C(5632) << 20 : HWAOI_TEXTURE_POOL_BASE;
+    uint64_t bytes = large ? UINT64_C(6144) << 20 : HWAOI_TEXTURE_POOL_BASE;   // 5632 MiB held the title but failed loading a stage
     if (override) {
         if (!strcmp(override, "1")) bytes = UINT64_C(6) << 30;
         else if (!strcmp(override, "0")) bytes = HWAOI_TEXTURE_POOL_BASE;
