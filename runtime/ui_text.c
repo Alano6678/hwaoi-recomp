@@ -55,7 +55,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
 #if RT_TARGET_HWAOI
     [UI_MENU_OUTPUT_RES_DESC] = "Native size of both the 3D scene and game output. Restart to apply. Higher resolutions "
                                 "are unstable and use more GPU time and memory. Non-1080p UI/movie scaling is "
-                                "still being adapted. Window size is separate.",
+                                "still being adapted. 3840 x 2160 output may fail to load; FSR quality (below) is the recommended way to reach 4K. "
+                                "Window size is separate.",
 #else
     [UI_MENU_OUTPUT_RES_DESC] = "The size the game draws its picture and interface in. Above 1920 x 1080 the game needs "
                                 "more video memory and GPU time. A wider size (21:9) widens the camera's view and moves "
@@ -70,14 +71,38 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_UPSCALER_DESC] = "How the picture is scaled when the window is larger than the game resolution. FSR keeps "
                               "edges and detail sharper than bilinear.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_SCALE_OFF] = "Off (bilinear)", [UI_MENU_SCALE_FSR1] = "FSR 1 (spatial)",
+    [UI_MENU_UPSCALER_FSR4] = "FSR 4 (temporal)",
+    [UI_MENU_UPSCALER_FSR4_DESC] = "Off: bilinear scaling to the window. FSR 1: spatial AMD FSR scaling of the finished "
+                                   "picture. FSR 4: temporal anti-aliasing and upscaling of the 3D scene from motion "
+                                   "vectors (the window scaling stays FSR 1). Needs the FSR library next to the game "
+                                   "(Windows downloads it from AMD on first use). Switching to or from FSR 4 applies after restart.",
+    [UI_MENU_NEEDS_FSR4] = "Only used with FSR 4 (temporal).",
+    [UI_MENU_SCENE_SHARP] = "Game's own sharpening (FSR 4)",
+    [UI_MENU_SCENE_SHARP_DESC] = "Whether the game's own sharpening stays on while FSR 4 runs. Automatic turns it off "
+                                 "(FSR 4 sharpens instead); Game's own keeps it; a number sets its strength.",
+    [UI_MENU_SCENE_SHARP_AUTO] = "Automatic (off)", [UI_MENU_SCENE_SHARP_GAME] = "Game's own",
+    [UI_MENU_FFX_MISSING] = "Needs amd_fidelityfx_upscaler_vk.so next to the game (tools/build_fsr4_vk.sh).",
+    [UI_MENU_FFX_DOWNLOAD] = "Downloads AMD's FSR DLLs (about 36 MB) when selected; restart afterwards.",
+    [UI_MENU_FSR_VERSION] = "FSR version",
+    [UI_MENU_FSR_VERSION_DESC] = "Auto uses the newest FSR 4 the GPU supports. FSR 3.1 is AMD's non-ML upscaler, for GPUs without FSR 4 or to compare. Applies after restart.",
+    [UI_MENU_FSR_V_AUTO] = "Auto (FSR 4)", [UI_MENU_FSR_V_31] = "FSR 3.1",
+    [UI_MENU_FSR_QUALITY] = "FSR 4 quality",
+    [UI_MENU_FSR_QUALITY_DESC] = "The 3D scene is drawn smaller and upscaled to the output size by FSR. Native: same "
+                                 "size (anti-aliasing only). Quality, Balanced and Performance draw less and run faster. "
+                                 "The recommended way to reach 4K: keep the output at 1920 x 1080 or 2560 x 1440 and "
+                                 "raise the window size, or pick 3840 x 2160 output with Quality. Used with the temporal "
+                                 "upscaler.",
+    [UI_MENU_FSR_Q_NATIVE] = "Native", [UI_MENU_FSR_Q_QUALITY] = "Quality", [UI_MENU_FSR_Q_BALANCED] = "Balanced",
+    [UI_MENU_FSR_Q_PERFORMANCE] = "Performance",
     [UI_MENU_ASPECT] = "Picture shape",
     [UI_MENU_ASPECT_DESC] = "When the window's shape differs from the game resolution's (a 16:9 picture on a 21:9 "
                             "screen): keep the picture's shape with black bars, or stretch it over the window.",
     [UI_MENU_ASPECT_FIT] = "Black bars", [UI_MENU_ASPECT_STRETCH] = "Stretch",
     [UI_MENU_FOV] = "Field of view",
     [UI_MENU_FOV_DESC] = "How much of the world the camera shows, in percent of the game's own. Game version 1.4.3 only.",
-    [UI_MENU_SHARPNESS] = "FSR sharpness",
-    [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
+    [UI_MENU_SHARPNESS] = "Sharpness",
+    [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling, also used by FSR 4; 0 turns it off.",
     [UI_MENU_COLOR] = "Colour",
     [UI_MENU_COLOR_PRESET] = "Colour profile",
     [UI_MENU_COLOR_PRESET_DESC] = "Sets the four values below. Vivid: more contrast and saturation, shadows opened a "
@@ -362,14 +387,36 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_UPSCALER_DESC] = "Как картинка растягивается, когда окно больше разрешения игры. FSR сохраняет края и "
                               "детали чётче билинейного.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное",
+    [UI_MENU_SCALE_OFF] = "Выкл. (билинейное)", [UI_MENU_SCALE_FSR1] = "FSR 1 (пространств.)",
+    [UI_MENU_UPSCALER_FSR4] = "FSR 4 (временный)",
+    [UI_MENU_UPSCALER_FSR4_DESC] = "Выкл.: билинейное масштабирование под окно. FSR 1: пространственное масштабирование "
+                                   "готовой картинки. FSR 4: временное сглаживание и апскейл 3D-сцены по векторам "
+                                   "движения. Нужна библиотека FSR рядом с игрой (Windows скачивает её у AMD при первом использовании). Переключение на FSR 4 и "
+                                   "с него — после перезапуска.",
+    [UI_MENU_NEEDS_FSR4] = "Только с FSR 4 (временный).",
+    [UI_MENU_SCENE_SHARP] = "Резкость игры (FSR 4)",
+    [UI_MENU_SCENE_SHARP_DESC] = "Остаётся ли собственная резкость игры при работе FSR 4. Автоматически выключена "
+                                 "(резкость даёт FSR 4); число задаёт силу.",
+    [UI_MENU_SCENE_SHARP_AUTO] = "Авто (выкл.)", [UI_MENU_SCENE_SHARP_GAME] = "Как в игре",
+    [UI_MENU_FFX_MISSING] = "Нужен amd_fidelityfx_upscaler_vk.so рядом с игрой (tools/build_fsr4_vk.sh).",
+    [UI_MENU_FFX_DOWNLOAD] = "Скачивает DLL FSR от AMD (около 36 МБ) при выборе; затем перезапустите.",
+    [UI_MENU_FSR_VERSION] = "Версия FSR",
+    [UI_MENU_FSR_VERSION_DESC] = "Авто: новейший FSR 4, который поддерживает GPU. FSR 3.1 - не ML-апскейлер AMD, для GPU без FSR 4 или для сравнения. После перезапуска.",
+    [UI_MENU_FSR_V_AUTO] = "Авто (FSR 4)", [UI_MENU_FSR_V_31] = "FSR 3.1",
+    [UI_MENU_FSR_QUALITY] = "Качество FSR 4",
+    [UI_MENU_FSR_QUALITY_DESC] = "3D-сцена рисуется меньше и растягивается FSR до выходного размера. Нативное: тот же "
+                                 "размер (только сглаживание). Остальные режимы быстрее. Рекомендуемый путь к 4K: "
+                                 "выход 3840 x 2160 с режимом Качество. Работает с временным апскейлом.",
+    [UI_MENU_FSR_Q_NATIVE] = "Нативное", [UI_MENU_FSR_Q_QUALITY] = "Качество", [UI_MENU_FSR_Q_BALANCED] = "Баланс",
+    [UI_MENU_FSR_Q_PERFORMANCE] = "Производительность",
     [UI_MENU_ASPECT] = "Форма картинки",
     [UI_MENU_ASPECT_DESC] = "Когда форма окна отличается от разрешения игры (картинка 16:9 на экране 21:9): сохранить "
                             "форму картинки с чёрными полосами или растянуть её на всё окно.",
     [UI_MENU_ASPECT_FIT] = "Чёрные полосы", [UI_MENU_ASPECT_STRETCH] = "Растянуть",
     [UI_MENU_FOV] = "Поле зрения",
     [UI_MENU_FOV_DESC] = "Сколько мира показывает камера, в процентах от игрового. Только для версии игры 1.4.3.",
-    [UI_MENU_SHARPNESS] = "Резкость FSR",
-    [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
+    [UI_MENU_SHARPNESS] = "Резкость",
+    [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR, также для FSR 4; 0 выключает его.",
     [UI_MENU_COLOR] = "Цвет",
     [UI_MENU_COLOR_PRESET] = "Цветовой профиль",
     [UI_MENU_COLOR_PRESET_DESC] = "Задаёт четыре значения ниже. «Яркий»: больше контраста и насыщенности, тени немного "
