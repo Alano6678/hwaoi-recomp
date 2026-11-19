@@ -49,6 +49,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "memx.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "tex.h"
@@ -1706,7 +1707,7 @@ static uint32_t vs_outs(const GfxShader *vs, const GfxShader *fs, GfxShaderIo io
 
 static Pipe *pipe_find(const void *key, size_t size, uint64_t h) {
     for (Pipe *p = pipes[h % PIPE_BUCKETS]; p; p = p->next)
-        if (p->hash == h && p->key_size == size && !memcmp(p->key, key, size)) return p;
+        if (p->hash == h && p->key_size == size && MX_EQ(p->key, key, size)) return p;
     return NULL;
 }
 

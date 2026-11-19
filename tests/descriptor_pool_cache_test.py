@@ -25,6 +25,9 @@ def source():
 #include <stdlib.h>
 #include <string.h>
 #include "vk_exec.h"
+#include "memx.h"
+int vk_memx_mode = 1;   // the inline compares and copies (TOTK_MEMX=1)
+void vk_memx_bad(const char *file, int line, size_t n) { (void)file; (void)line; (void)n; abort(); }
 #define NVN_STAGE_VS 0
 #define NVN_STAGE_FS 1
 #define NVN_STAGE_GS 2

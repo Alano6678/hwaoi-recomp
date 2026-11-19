@@ -13,6 +13,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "memx.h"
 #include "vk.h"
 #include "platform/platform.h"
 
@@ -219,7 +220,7 @@ void rec_stats_log(void) {
 static void *tail_copy(uint8_t **at, const void *arr, size_t bytes) {
     if (!arr || !bytes) return NULL;
     void *d = *at;
-    memcpy(d, arr, bytes);
+    MX_CPY(d, arr, bytes);
     *at += (bytes + 7) & ~(size_t)7;
     return d;
 }

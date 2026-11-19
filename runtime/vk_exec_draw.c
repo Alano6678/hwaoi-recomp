@@ -35,6 +35,7 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "memx.h"
 #include "nvn_program_source.h"
 #include "platform/platform.h"
 
@@ -937,7 +938,7 @@ static VkImageView rgba8_compare_view(VkExec *ex, const VkTexImage *img, const v
 // the 2048-slot direct-mapped table this replaced missed 3% of them on conflicts.
 #define SHADER_SETS 2048
 #define SHADER_WAYS 4
-typedef struct { uint64_t serial; int stage; int used; GfxShaderAnswers a; const GfxShader *s; } ShaderEnt;
+typedef struct { uint64_t serial, h; int stage; int used; GfxShaderAnswers a; const GfxShader *s; } ShaderEnt;   // h: hash of a
 static ShaderEnt shader_tab[SHADER_SETS][SHADER_WAYS];
 
 // Registration keeps immutable compact NVN2 inputs. Binding classification is
@@ -1224,12 +1225,13 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     uint64_t serial = source->serial;
     answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
     ShaderEnt *set = NULL;
+    uint64_t h = 0;
     if (serial) {
-        uint64_t h = (serial * 0x9E3779B97F4A7C15ull ^ (uint64_t)st) ^ nvn_hm_hash(&a, sizeof a);   // a is zero-padded
+        h = (serial * 0x9E3779B97F4A7C15ull ^ (uint64_t)st) ^ nvn_hm_hash(&a, sizeof a);   // a is zero-padded
         set = shader_tab[(h ^ h >> 29) & (SHADER_SETS - 1)];
         for (int w = 0; w < SHADER_WAYS && set[w].used; w++) {
             ShaderEnt *e = &set[w];
-            if (e->serial != serial || e->stage != st || memcmp(&e->a, &a, sizeof a)) continue;
+            if (e->serial != serial || e->stage != st || (vk_memx_mode == 1 && e->h != h) || MX_NE(&e->a, &a, sizeof a)) continue;
             if (w) {   // to the front
                 ShaderEnt hit = *e;
                 memmove(&set[1], &set[0], w * sizeof *set);
@@ -1250,7 +1252,7 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
                       (unsigned long long)serial);
     else if (set) {   // in front, the least recently used way drops out
         memmove(&set[1], &set[0], (SHADER_WAYS - 1) * sizeof *set);
-        set[0] = (ShaderEnt){.serial = serial, .stage = st, .used = 1, .a = a, .s = s};
+        set[0] = (ShaderEnt){.serial = serial, .h = h, .stage = st, .used = 1, .a = a, .s = s};
     }
     return s;
 }
@@ -1474,14 +1476,14 @@ static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
         for (unsigned i = 0; i < NVN2_ROOT_TABLES; i++)
             memcpy(in.roots[i], ex->push[1][i], 4u * c0_lay->roots[i]);
     }
-    if (B.c0_valid[k] && !memcmp(&in, &B.c0_in[k], sizeof in))
+    if (B.c0_valid[k] && MX_EQ(&in, &B.c0_in[k], sizeof in))
         return (VkDescriptorBufferInfo){B.c0_buf[k], B.c0_off[k], VK_C0_BYTES};
     B.c0_in[k] = in;
     uint8_t tmp[VK_C0_BYTES];
     vk_c0_fill(tmp, st, ex->ssbo[st], ex->ubo[st], c0_dim, c0_binst);
-    if (!B.c0_valid[k] || memcmp(tmp, B.c0[k], VK_C0_BYTES)) {
-        memcpy(scratch(ex, VK_C0_BYTES, &B.c0_buf[k], &B.c0_off[k]), tmp, VK_C0_BYTES);
-        memcpy(B.c0[k], tmp, VK_C0_BYTES);
+    if (!B.c0_valid[k] || MX_NE(tmp, B.c0[k], VK_C0_BYTES)) {
+        MX_CPY(scratch(ex, VK_C0_BYTES, &B.c0_buf[k], &B.c0_off[k]), tmp, VK_C0_BYTES);
+        MX_CPY(B.c0[k], tmp, VK_C0_BYTES);
         B.c0_valid[k] = 1;
     }
     return (VkDescriptorBufferInfo){B.c0_buf[k], B.c0_off[k], VK_C0_BYTES};
@@ -1666,7 +1668,7 @@ static int upd_read(const VkExec *ex, uint64_t a, void *out, size_t n) {
         const typeof(UPD.u[0]) *e = &UPD.u[i % UPD_N];
         if (a >= e->hi || a + n <= e->lo) continue;
         if (a < e->lo || a + n > e->hi) return 0;   // partly covered: memory
-        memcpy(out, e->data + (a - e->lo), n);
+        MX_CPY(out, e->data + (a - e->lo), n);
         return 1;
     }
     return 0;
@@ -2639,15 +2641,15 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         if (b->kind == VK_PIPE_SUPPORT) {
             float in[3];
             support_in(ex, in);
-            if (!B.sup_valid || memcmp(in, B.sup_in, sizeof in)) {   // support_fill reads only these
+            if (!B.sup_valid || MX_NE(in, B.sup_in, sizeof in)) {   // support_fill reads only these
                 uint8_t tmp[SUPPORT_BYTES];
                 support_fill(tmp, in[0], in[1], in[2]);
-                memcpy(B.sup_in, in, sizeof in);
-                if (!B.sup_valid || memcmp(tmp, B.support, SUPPORT_BYTES)) {   // a new buffer only when the contents changed
+                MX_CPY(B.sup_in, in, sizeof in);
+                if (!B.sup_valid || MX_NE(tmp, B.support, SUPPORT_BYTES)) {   // a new buffer only when the contents changed
                     VkBuffer sb;
                     VkDeviceSize so;
-                    memcpy(scratch(ex, SUPPORT_BYTES, &sb, &so), tmp, SUPPORT_BYTES);
-                    memcpy(B.support, tmp, SUPPORT_BYTES);
+                    MX_CPY(scratch(ex, SUPPORT_BYTES, &sb, &so), tmp, SUPPORT_BYTES);
+                    MX_CPY(B.support, tmp, SUPPORT_BYTES);
                     B.sup_buf = sb, B.sup_off = so, B.sup_valid = 1;
                 }
             }
@@ -2727,7 +2729,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
         if (s ? info->push1 : info->push) {
             uint32_t n = gfx && push_skip_on() ? dbytes : 0;
-            if (n && B.ds_pushed[s] && DS.pn[s] == n && !memcmp(DS.psig[s], ds, n)) {
+            if (n && B.ds_pushed[s] && DS.pn[s] == n && MX_EQ(DS.psig[s], ds, n)) {
                 BS.push_skip++;
                 continue;
             }
@@ -2737,7 +2739,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             RS.cmds++;
             if (gfx) {
                 B.ds_bound[s] = VK_NULL_HANDLE, B.ds_pushed[s] = n != 0;
-                if (n) DS.pn[s] = n, memcpy(DS.psig[s], ds, n);
+                if (n) DS.pn[s] = n, MX_CPY(DS.psig[s], ds, n);
             }
         } else if (!gfx || s > 1) {
             VkDescriptorSet set = alloc_set(ex, s ? info->set_layout1 : info->set_layout);
@@ -2746,11 +2748,11 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         } else {
             VkDescriptorSetLayout sl = s ? info->set_layout1 : info->set_layout;
             VkDescriptorSet set = B.ds_last[s];
-            if (!set || B.ds_last_layout[s] != sl || DS.n[s] != dbytes || memcmp(DS.sig[s], ds, dbytes)) {
+            if (!set || B.ds_last_layout[s] != sl || DS.n[s] != dbytes || MX_NE(DS.sig[s], ds, dbytes)) {
                 set = alloc_set(ex, sl);
                 write_set(info, s, set, ds, w, i0, i1);
                 B.ds_last[s] = set, B.ds_last_layout[s] = sl, DS.n[s] = dbytes;
-                memcpy(DS.sig[s], ds, dbytes);
+                MX_CPY(DS.sig[s], ds, dbytes);
                 BS.set_new++;
                 RS.cmds++;
             } else {
@@ -2983,20 +2985,20 @@ static void memo_key(const VkExec *ex, uint32_t gen, MemoKey *k) {
         memcpy(k->tex[2], ex->tex[NVN_STAGE_GS], sizeof k->tex[2]);
         memcpy(k->img[2], ex->img[NVN_STAGE_GS], sizeof k->img[2]);
     }
-    memcpy(&k->pipe, &ex->pipe, sizeof k->pipe);
+    MX_CPY(&k->pipe, &ex->pipe, sizeof k->pipe);
 }
 
 static int memo_match(VkExec *ex, uint32_t gen, MemoKey *k) {
     descriptor_state(ex);
     if (!SM.valid) return 0;
     if (k->prog != ex->prog || k->serial != ex->prog->serial || k->gen != gen || k->geometry_input != geometry_input ||
-        memcmp(&k->pipe, &ex->pipe, sizeof k->pipe))
+        MX_NE(&k->pipe, &ex->pipe, sizeof k->pipe))
         return 0;
     if (geometry_input && (memcmp(k->tex[2], ex->tex[NVN_STAGE_GS], sizeof k->tex[2]) ||
                            memcmp(k->img[2], ex->img[NVN_STAGE_GS], sizeof k->img[2]))) return 0;
     if (k->tex_serial == ex->tex_serial) return 1;
-    if (memcmp(k->tex[0], ex->tex[NVN_STAGE_VS], sizeof k->tex[0]) || memcmp(k->tex[1], ex->tex[NVN_STAGE_FS], sizeof k->tex[1]) ||
-        memcmp(k->img[0], ex->img[NVN_STAGE_VS], sizeof k->img[0]) || memcmp(k->img[1], ex->img[NVN_STAGE_FS], sizeof k->img[1]))
+    if (MX_NE(k->tex[0], ex->tex[NVN_STAGE_VS], sizeof k->tex[0]) || MX_NE(k->tex[1], ex->tex[NVN_STAGE_FS], sizeof k->tex[1]) ||
+        MX_NE(k->img[0], ex->img[NVN_STAGE_VS], sizeof k->img[0]) || MX_NE(k->img[1], ex->img[NVN_STAGE_FS], sizeof k->img[1]))
         return 0;
     k->tex_serial = ex->tex_serial;
     return 1;
@@ -3011,6 +3013,26 @@ static int shader_memo_on(void) {
 }
 
 static struct { int on, valid; VkPipeState s; const VkPipeInfo *info; } PM = {-1};
+
+// ---- inline compares and copies (memx.h, TOTK_MEMX)
+int vk_memx_mode = -1;
+
+void vk_memx_init(void) {
+    if (vk_memx_mode >= 0) return;
+    const char *e = cfg_value("TOTK_MEMX");
+    int m = !strcmp(e, "check") ? 2 : strcmp(e, "0") && strcmp(e, "off") ? 1 : 0;
+    rt_log("vk: inline compares and copies (TOTK_MEMX) %s", m == 2 ? "check" : m ? "on" : "off");
+    __atomic_store_n(&vk_memx_mode, m, __ATOMIC_RELAXED);
+}
+
+void vk_memx_bad(const char *file, int line, size_t n) {
+    static int logged;
+    static long total;
+    long t = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+    if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 20 || t % 100000 == 0)
+        rt_log("vk: TOTK_MEMX check: the inline compare of %zu bytes at %s:%d differs from memcmp (%ld so far)", n, file,
+               line, t);
+}
 
 static int pipe_memo_on(void) {
     if (PM.on < 0) PM.on = cfg_bool("TOTK_PIPE_MEMO");
@@ -3187,7 +3209,8 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) return 0;
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
-    VkPipeState s = ex->pipe;
+    VkPipeState s;
+    MX_CPY(&s, &ex->pipe, sizeof s);
     s.vs = vs, s.fs = fs, s.gs = gs;
     s.feedback = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
     s.prim = (uint8_t)prim;
@@ -3218,7 +3241,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     VkPipeline p;
     const char *why = NULL;
     uint64_t w0 = 0;
-    if (pipe_memo_on() && PM.valid && !memcmp(&PM.s, &s, sizeof s)) {
+    if (pipe_memo_on() && PM.valid && MX_EQ(&PM.s, &s, sizeof s)) {
         info = PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
@@ -3236,7 +3259,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
             p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
         }
         PM.valid = !pending && p && info;
-        if (PM.valid) PM.s = s, PM.info = info;
+        if (PM.valid) MX_CPY(&PM.s, &s, sizeof s), PM.info = info;
     }
     uint64_t waited = w0 ? kern_now_ns() - w0 : 0;
     static int wait_logs;
@@ -3267,10 +3290,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         ex->dirty |= VK_EXEC_DIRTY_ALL;
     }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
+    if (!B.st_valid || MX_NE(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
         ex->recorded++;
-        B.st = s, B.st_valid = 1;
+        MX_CPY(&B.st, &s, sizeof s), B.st_valid = 1;
     }
     record_fixed(ex);
     repeat_stats(ex, info);
@@ -3303,7 +3326,7 @@ static void note_work(const VkExec *ex, int kind, uint64_t work) {
 static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {
     VkBuffer b;
     VkDeviceSize o;
-    memcpy(scratch(ex, bytes, &b, &o), data, bytes);
+    MX_CPY(scratch(ex, bytes, &b, &o), data, bytes);
     vkCmdBindIndexBuffer(ex->cb, b, o, type);
     ex->recorded++;
 }
@@ -3751,7 +3774,7 @@ static void op_update_ub(VkExec *ex, const p_update_ub *u) {
     vk_exec_barrier(ex);   // earlier draws finished with the old contents
     VkBuffer b;
     VkDeviceSize o;
-    memcpy(scratch(ex, u->size, &b, &o), u->data, u->size);
+    MX_CPY(scratch(ex, u->size, &b, &o), u->data, u->size);
     VK_MEM_PICK(sp);
     VkBufferCopy cp = {o, sp.offset, u->size};
     vkCmdCopyBuffer(ex->cb, b, sp.buffer, 1, &cp);
@@ -3931,14 +3954,14 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
         const p_bind_vattr *b = payload;
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memset(ex->pipe.vattr, 0, sizeof ex->pipe.vattr);   // MNG: the new list replaces the old one
-        memcpy(&ex->pipe.vattr[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
+        MX_CPY(&ex->pipe.vattr[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
         break;
     }
     case OP_BIND_VSTREAM: {
         const p_bind_vstream *b = payload;
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memset(ex->pipe.vstream, 0, sizeof ex->pipe.vstream);
-        memcpy(&ex->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
+        MX_CPY(&ex->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
         break;
     }
     case OP_BIND_VBUF: {
