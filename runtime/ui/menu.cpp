@@ -646,6 +646,10 @@ static void tab_screen(float scale) {
     static const UiTextId aspect[] = {UI_MENU_ASPECT_FIT, UI_MENU_ASPECT_STRETCH};
     opt_choice("TOTK_ASPECT", UI_MENU_ASPECT, aspect, 2, UI_MENU_ASPECT_DESC);
     opt_slider("TOTK_FOV", UI_MENU_FOV, 70, 140, UI_MENU_FOV_DESC, 5, "%.0f %%");
+    if (RT_TARGET_HWAOI) {   // SMAA on the present (vk_smaa.c)
+        static const UiTextId aa[] = {UI_MENU_AA_OFF, UI_MENU_AA_SMAA};
+        opt_choice("TOTK_ANTIALIASING", UI_MENU_AA, aa, 2, UI_MENU_AA_DESC);
+    }
     rows_color();
     opt_end();
 }

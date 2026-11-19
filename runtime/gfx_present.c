@@ -678,7 +678,17 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkImage dst = g_sc_img[idx];
     sync_barrier(cb, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    const int rect[4] = {cx, cy, cw, ch};
+    const int rect0[4] = {cx, cy, cw, ch};
+    const int *rect = rect0;
+    // SMAA (TOTK_ANTIALIASING, vk_smaa.c) on the game-resolution picture; its result takes the game image's place below
+    VkImage smaa = VK_NULL_HANDLE;
+    VkFormat smaa_fmt = fmt;
+    const int srect[4] = {0, 0, cw, ch};
+    if (general && vk_smaa_record(cb, src, fmt, rect, 0, &smaa, &smaa_fmt)) {
+        src = smaa;
+        fmt = smaa_fmt;
+        rect = srect;
+    }
     int to[4];   // where the picture goes in the swapchain image: {x, y, w, h}
     gfx_fit_rect(cw, ch, (int)g_sc_ext.width, (int)g_sc_ext.height, to);
     if (to[2] != (int)g_sc_ext.width || to[3] != (int)g_sc_ext.height) {   // black bars beside or above and below it
@@ -696,7 +706,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkFormat pfmt = graded ? VK_FORMAT_R16G16B16A16_SFLOAT : fmt;
     const int *prect = graded ? grect : rect;
     // FSR (TOTK_UPSCALER) when the picture's rectangle is larger than the crop; else the bilinear blit
-    int fsr = general && vk_fsr_record(cb, slot, psrc, pfmt, graded ? cw : w, graded ? ch : h, prect, dst, to);
+    int fsr = general && vk_fsr_record(cb, slot, psrc, pfmt, graded || smaa ? cw : w, graded || smaa ? ch : h, prect, dst, to);
     g_scaler = fsr ? 2 : cw != to[2] || ch != to[3];
     if (!fsr) {
         if (general)   // a GENERAL source (vk_texture.c images): earlier submissions' writes become visible to the blit here
@@ -827,6 +837,7 @@ void gfx_window_release_vk(void) {
         memset(g_ts_on, 0, sizeof g_ts_on);
         menu_vk_release();
         vk_fsr_release();
+        vk_smaa_release();
         vk_color_release();
         free_capture();
         free_thumbs();
