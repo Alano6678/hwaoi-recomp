@@ -267,6 +267,39 @@ static void wake_sync_waiters(void) {
     }
 }
 
+// ---- a short poll before a sleep
+// Most guest waits and waits for a virtual core end within microseconds. The thread polls for TOTK_KSPIN_US (default
+// 20) with G released before it sleeps on its condition variable: a wake in that time costs no OS wake-up and the
+// waker's signal finds nobody asleep. Off with fewer than 6 usable logical processors, where the poll would take a CPU
+// that a running thread needs; TOTK_KSPIN_US=0 turns it off. Ported from totk-pc-recomp 2d92565.
+static int64_t g_kspin_ns = -1;
+
+static uint64_t kspin_ns(void) {
+    int64_t v = __atomic_load_n(&g_kspin_ns, __ATOMIC_RELAXED);
+    if (v < 0) {
+        long long us = cfg_int("TOTK_KSPIN_US");
+        uint32_t cpus = plat_cpu_usable();
+        v = us <= 0 || cpus < 6 ? 0 : us * 1000;
+        __atomic_store_n(&g_kspin_ns, v, __ATOMIC_RELAXED);
+        rt_log("kernel: waits poll %lld us before they sleep (TOTK_KSPIN_US, %u logical processors)",
+               (long long)(v / 1000), cpus);
+    }
+    return (uint64_t)v;
+}
+
+// Holding G: releases it and polls *p until it reaches at_least or ns pass, then takes G again. 1 if it was reached.
+static int kspin(const int *p, int at_least, uint64_t ns) {
+    uint64_t end = kern_now_ns() + ns;
+    int ok = 0;
+    unlock();
+    for (unsigned i = 1; !(ok = __atomic_load_n(p, __ATOMIC_ACQUIRE) >= at_least); i++) {
+        plat_pause();
+        if (!(i & 31) && kern_now_ns() >= end) break;
+    }
+    lock();
+    return ok;
+}
+
 // SleepConditionVariableSRW counts milliseconds: round up (late is legal, early is not) and re-check the deadline
 // against the performance counter, because the wait may also end early.
 static uint32_t block_inner(RtThread *t, int kind, int64_t ns) {
@@ -284,6 +317,8 @@ static uint32_t block_inner(RtThread *t, int kind, int64_t ns) {
     uint64_t now = kern_now_ns();
     int forever = ns < 0 || (uint64_t)ns > UINT64_MAX - now;
     uint64_t deadline = forever ? 0 : now + (uint64_t)ns;
+    uint64_t poll = kspin_ns();
+    if (poll) kspin(&t->woke, 1, forever || poll < (uint64_t)ns ? poll : (uint64_t)ns);
     while (!t->woke) {
         if (forever) {
             plat_cond_wait(&t->cv, &G);
@@ -1120,6 +1155,9 @@ static void core_take(RtThread *t) {
         while (__atomic_load_n(&t->cur_core, __ATOMIC_RELAXED) < 0 && kern_now_ns() < end) plat_pause();
         lock();
         if (t->cur_core >= 0) g_ap_spin_ok++;
+    } else if (t->cur_core < 0) {   // a holder may block or yield any moment (kspin_ns)
+        uint64_t poll = kspin_ns();
+        if (poll) kspin(&t->cur_core, 0, poll);
     }
     int sampled = 0;
     // Optional ownership evidence for a stalled host port. This only wakes the

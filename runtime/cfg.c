@@ -40,6 +40,7 @@ static const char *const known[] = {
     "FLIGHT_THUMBS", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
     "EXPERIMENTAL_RATE", "RATE_DIAG", "RATE_UNLOCK", "FS_DIAG", "GPU_INDEX", "GPU_NAME", "GPU_WRITE_DIAG", "HIGHFPS_FIX", "INPUT", "INPUT_FEED", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
     "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LOCALE", "LOD_GUARD", "MEMORY", "MENU_LANG", "MENU_TEST",
+    "KSPIN_US", "REC_SPIN_US",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "NX2_READ_NOWAIT",
     "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES",
     "P2_BIND_A", "P2_BIND_B", "P2_BIND_X", "P2_BIND_Y", "P2_BIND_LCLICK", "P2_BIND_RCLICK", "P2_BIND_L", "P2_BIND_R", "P2_BIND_ZL", "P2_BIND_ZR", "P2_BIND_PLUS", "P2_BIND_MINUS", "P2_BIND_LEFT", "P2_BIND_UP", "P2_BIND_RIGHT", "P2_BIND_DOWN", "P2_BIND_LSTICK_LEFT", "P2_BIND_LSTICK_UP", "P2_BIND_LSTICK_RIGHT", "P2_BIND_LSTICK_DOWN", "P2_BIND_RSTICK_LEFT", "P2_BIND_RSTICK_UP", "P2_BIND_RSTICK_RIGHT", "P2_BIND_RSTICK_DOWN", "P2_BIND_MENU",
@@ -78,6 +79,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
     {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"}, {"BIND_MENU", "input"},
     {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"FREE_CORES", "performance"},
+    {"KSPIN_US", "performance"}, {"REC_SPIN_US", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"},
     {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"PIPE_PREBUILD", "performance"},
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
@@ -150,6 +152,8 @@ static const CfgMeta metas[] = {
 #endif
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
+    {"KSPIN_US", "20", "0..1000", RESTART},   // kernel waits poll before they sleep; off below 6 logical CPUs
+    {"REC_SPIN_US", "0", "0..1000", RESTART}, // recorder idle poll by the clock; 0: 4096 pauses
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
     {"PIPE_SCENE", "1", "0|1", RESTART},       // new-scene draws may wait for background shaders

@@ -79,6 +79,8 @@ struct PlatThread {HANDLE handle;PlatThreadFn fn;void *argument;};
 static HANDLE consumer_gate;
 unsigned rt_trace;
 const char *cfg_get(const char *key){(void)key;return NULL;}
+int cfg_int(const char *key){(void)key;return 0;}
+uint32_t plat_cpu_usable(void){return 1;}
 int rt_knob(const char *name,const char *def){(void)name;(void)def;return 1;}
 int rt_ab(void){return 1;}
 void vk_crumb(VkCommandBuffer cb,int kind,uint64_t value){(void)cb;(void)kind;(void)value;}

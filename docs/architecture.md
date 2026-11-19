@@ -74,6 +74,9 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
 - Spin waits. Loops that only another thread can end (857 in 1.4.3, 864 in 1.2.1, found by `tools/spin_waits.py`, the
   nxnative search) send their back-edges through `rt_spin_gate`, which pauses the core once per pass and hands it to a
   waiter after 50 us of polling (`TOTK_SPIN`, `TOTK_SPIN_HANDOFF_US`).
+- Short poll before a sleep. A kernel wait or a wait for a virtual core polls 20 us with the global lock released
+  before it sleeps on its condition variable (`TOTK_KSPIN_US`, 0 off; off below 6 usable logical processors). The
+  recorder's idle poll can be timed instead of 4096 pauses (`TOTK_REC_SPIN_US`, default 0). From totk-pc-recomp 2d92565.
 - `TOTK_FREE_CORES=1` turns the gate off, for experiments.
 
 ### 4. Graphics

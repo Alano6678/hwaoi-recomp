@@ -26,6 +26,7 @@ static VkCommandBuffer rec_cb;         // the part being recorded (set while the
 static int rec_live;                   // producer: rec_begin started the recorder for rec_cb
 static PlatThread *rec_thread;
 static int rec_prio;                   // the submitting thread's priority, which the recorder takes
+static uint64_t rec_spin_ns;           // TOTK_REC_SPIN_US (rec_main); 0: 4096 pauses
 
 // Producer statistics, logged by rec_stats_log.
 static struct { uint64_t packets, words, drains, fallbacks, drain_ns, full_waits, parts, parts_on; } RS_;
@@ -55,7 +56,19 @@ static void rec_main(void *arg) {
     for (;;) {
         uint64_t h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
         if (t == h) {
-            for (int i = 0; i < 4096 && t == h; i++) _mm_pause(), h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
+            // Poll for the next packets before sleeping. TOTK_REC_SPIN_US times the poll, because a pause takes
+            // 8-150 cycles depending on the CPU: 4096 of them are ~140 us on a Coffee Lake i7 and a few us on Zen 4.
+            // 0 (or fewer than 6 logical processors) keeps 4096 pauses. Ported from totk-pc-recomp 2d92565.
+            if (rec_spin_ns) {
+                uint64_t t0 = now_ns();
+                for (unsigned i = 1; t == h; i++) {
+                    _mm_pause();
+                    h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
+                    if (!(i & 31) && now_ns() - t0 >= rec_spin_ns) break;
+                }
+            } else {
+                for (int i = 0; i < 4096 && t == h; i++) _mm_pause(), h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
+            }
             if (t == h) {
                 __atomic_store_n(&sleeping, 1, __ATOMIC_SEQ_CST);
                 h = __atomic_load_n(&head, __ATOMIC_SEQ_CST);
@@ -134,6 +147,8 @@ void rec_begin(VkCommandBuffer cb) {
         if (mode) {
             plat_event_init(&wake_ev, 0, 0);
             rec_prio = plat_thread_priority_get();
+            int spin_us = cfg_int("TOTK_REC_SPIN_US");
+            rec_spin_ns = spin_us > 0 && plat_cpu_usable() >= 6 ? (uint64_t)spin_us * 1000 : 0;
             rec_thread = plat_thread_new(rec_main, NULL, "vk recorder");
             if (!rec_thread) {
                 rt_log("vk_rec: no recorder thread: the replay makes its Vulkan calls itself");
@@ -141,6 +156,9 @@ void rec_begin(VkCommandBuffer cb) {
             } else {
                 rt_log("vk_rec: the replay's Vulkan commands are made by a recorder thread%s",
                        mode == 2 ? " in the B blocks (TOTK_AB)" : "");
+                if (rec_spin_ns)
+                    rt_log("vk_rec: the recorder polls %llu us before it sleeps (TOTK_REC_SPIN_US)",
+                           (unsigned long long)(rec_spin_ns / 1000));
             }
         }
     }
