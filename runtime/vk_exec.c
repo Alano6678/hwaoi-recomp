@@ -26,6 +26,7 @@
 #include "platform/platform.h"
 #include "tex.h"
 #include "vk.h"
+#include "vk_temporal.h"
 #include "vk_exec.h"
 
 #define WEAK __attribute__((weak))
@@ -159,6 +160,7 @@ void vk_exec_frame_written(const tex_t *t) {
 }
 
 void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
+    vk_temporal_present();
     readback_diagnostics_frame(frame);
     if (!(rt_trace & RT_TRACE_GFX)) return;
     VkExecFrame *f = &vk_exec_frame;
@@ -697,6 +699,7 @@ void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
 void vk_exec_pass_begin(VkExec *ex) {
     if (ex->in_pass) return;
     resolve_rt(ex);
+    vk_temporal_pass(ex);   // the G-buffer and the lighting target arm the temporal path
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
     VkImageAspectFlags wasp[9];
