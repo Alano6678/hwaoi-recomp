@@ -157,7 +157,7 @@ static const CfgMeta metas[] = {
     {"PLAYER2_DEVICE", "auto", NULL, LIVE}, {"PLAYER2_TYPE", "pro", "pro|dual", LIVE},
     {"BINDS_PLAYER", "1", "1|2", LIVE},   // the player whose bindings the Controls tab remap rows edit
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
-    {"MENU_LANG", "", "en|ru", LIVE},
+    {"MENU_LANG", "", "en|ru|zh-Hans", LIVE},
     // Advanced: scheduling
     {"LAZY_HEAP", "auto", "auto|0|1", RESTART}, // Windows-only demand-commit heap; auto: only when commit is short (memory.c)
     {"LAZY_HEAP_KIB", "2048", "64|256|2048", RESTART},
