@@ -32,6 +32,7 @@ def source():
 #include "gfx.h"
 #include "nvn_program_bind.h"
 #include "nvn_hmap.h"
+#include "memx.h"
 #define NVN_PROG_MAGIC MAGIC('P','R','O','G')
 #define NVN_STAGE_VS 0
 #define NVN_STAGE_FS 1
@@ -39,6 +40,8 @@ def source():
 #define NVN_STAGE_CS 5
 #define W_SHADER 0
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
+int vk_memx_mode=1;
+void vk_memx_bad(const char *file,int line,size_t n){(void)file;(void)line;(void)n;abort();}
 typedef struct {NvnProgramBindings programs;const prog_t *prog;} VkExec;
 typedef struct {uint32_t id,stage,length;} Control;
 static Control controls[4][6];
@@ -175,7 +178,7 @@ class ShaderSourceMemo(unittest.TestCase):
             path.write_text(source(), encoding="utf-8")
             build = subprocess.run([str(CC), "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
                                     "-I", str(ROOT / "runtime"), str(path), "-o", str(exe)],
-                                   capture_output=True, text=True, timeout=60)
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

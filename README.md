@@ -54,7 +54,7 @@ An opt-in Windows demand-commit heap experiment also left approximately **1.4 Gi
 > [!WARNING]
 > **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
 >
-> **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
+> **1440p and 4K are experimental.** The game canvas now follows the selected native preset. Higher presets can use more memory, and UI, movie playback and gameplay still need broader verification.
 
 ## Current priorities
 
@@ -74,7 +74,8 @@ An opt-in Windows demand-commit heap experiment also left approximately **1.4 Gi
 | 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
 | 🔧 | Memory use | Compact command records, smaller allocation pools and bounded background CPU-copy reclamation are enabled. Demand-committed guest heap backing and the read-only vertex cache remain optional experiments. |
 | 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets; movement still has a separate frame-dependent speed error. |
-| 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
+| 🧪 | Native resolution presets | 720p through 4K presets adjust the game canvas. The texture pool grows above 1080p to accommodate larger render targets. |
+| 🧪 | Optional graphics settings | SMAA, HDR10 output mapped from SDR, and AMD FSR temporal scaling can be enabled separately. Availability depends on the display, GPU, driver and FSR runtime. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
 
 ✅ working in the tested scope · 🔧 adaptation in progress · 🧪 experimental
@@ -131,5 +132,7 @@ For a useful [issue report](https://github.com/Alano6678/hwaoi-recomp/issues), i
 Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with its revision pinned in [config/upstream.json](config/upstream.json). Menu adaptations also credit [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp); the full inherited attributions remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Thanks to [LibertyPrime27](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized) for the NVN/GFX stage-ID fix, batched GPU QUADS conversion, barrier optimization, buffer-texture lighting, background shader loading, update/DLC support, and co-op/control improvements. Their contributions were merged through [#9](https://github.com/Alano6678/hwaoi-recomp/pull/9), [#10](https://github.com/Alano6678/hwaoi-recomp/pull/10), and [#11](https://github.com/Alano6678/hwaoi-recomp/pull/11).
+
+Thanks to [ripps818](https://github.com/ripps818) for the resolution and canvas fixes, SMAA, HDR10 output, FSR, and Linux improvements ([#22](https://github.com/Alano6678/hwaoi-recomp/pull/22) through [#26](https://github.com/Alano6678/hwaoi-recomp/pull/26)), and [PrimeWalkerVN](https://github.com/PrimeWalkerVN) for the recorder compatibility fix on affected AMD GPUs ([#20](https://github.com/Alano6678/hwaoi-recomp/pull/20)).
 
 GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE) and [LICENSE-MIT](LICENSE-MIT).

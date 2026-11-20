@@ -29,6 +29,12 @@ def source():
 struct PlatThread {HANDLE handle;PlatThreadFn fn;void *argument;};
 static HANDLE consumer_gate;
 unsigned rt_trace;
+VkCaps vk_caps;
+const char *cfg_get(const char *key){(void)key;return NULL;}
+int cfg_int(const char *key){(void)key;return 0;}
+uint32_t plat_cpu_usable(void){return 1;}
+int vk_memx_mode=1;
+void vk_memx_bad(const char *file,int line,size_t n){(void)file;(void)line;(void)n;abort();}
 int rt_knob(const char *name,const char *def){(void)name;(void)def;return 1;}
 int rt_ab(void){return 1;}
 void rt_log(const char *format,...){(void)format;}

@@ -1538,13 +1538,16 @@ static VkDescriptorBufferInfo hwaoi_scene_sharpness_copy(VkExec *ex, const VkDes
 static int hwaoi_scene_sharpness_override(VkExec *ex, int stage, int slot,
                                          const VkDescriptorBufferInfo *source, VkDescriptorBufferInfo *out) {
     if (!RT_TARGET_HWAOI || stage != NVN_STAGE_CS || slot != 3 || !ex || !ex->prog) return 0;
-    static int percent = -2;
-    if (percent == -2 && !cfg_get("TOTK_SCENE_SHARPNESS") && vk_temporal_running()) {
-        percent = 0;   // FSR sharpens instead (HWAOI_SHARPNESS); an explicit SCENE_SHARPNESS still wins
-        rt_log("scene sharpness: the game's RCAS strength 0 while the temporal AA runs");
+    static int configured_percent = -2;
+    static int use_temporal_default;
+    if (configured_percent == -2) {
+        const char *setting = cfg_get("TOTK_SCENE_SHARPNESS");
+        use_temporal_default = setting == NULL;
+        if (!hwaoi_scene_sharpness_parse(setting, &configured_percent))
+            rt_fatal("scene sharpness: SCENE_SHARPNESS must be game or an integer from 0 to 100");
     }
-    if (percent == -2 && !hwaoi_scene_sharpness_parse(cfg_get("TOTK_SCENE_SHARPNESS"), &percent))
-        rt_fatal("scene sharpness: SCENE_SHARPNESS must be game or an integer from 0 to 100");
+    // Apply FSR sharpening while temporal processing is active, including after late initialization.
+    int percent = use_temporal_default && vk_temporal_running() ? 0 : configured_percent;
     if (percent < 0) return 0;   // game: preserve the original descriptor and every byte
     const uint8_t *control, *code;
     uint32_t length;
@@ -1563,7 +1566,13 @@ static int hwaoi_scene_sharpness_override(VkExec *ex, int stage, int slot,
     *out = hwaoi_scene_sharpness_copy(ex, source, params);
     RS.volatile_ = 1;   // this submission owns the private uniform and its GPU copy commands
     static int logged;
-    if (!logged++) rt_log("scene sharpness: explicit 3D RCAS strength %d%%; verified kernel, original algorithm and remaining uniforms preserved", percent);
+    if (!logged) {
+        logged = 1;
+        if (use_temporal_default)
+            rt_log("scene sharpness: the game's RCAS strength 0 while temporal processing is active");
+        else
+            rt_log("scene sharpness: explicit 3D RCAS strength %d%%; verified kernel, original algorithm and remaining uniforms preserved", percent);
+    }
     return 1;
 }
 

@@ -40,9 +40,9 @@ static inline int hwaoi_display_fsr_scene(const unsigned out[2], const char *qua
     return 1;
 }
 
-// The measured 4K scene exhausts the original pool. Keep the smaller presets'
-// original capacity; reserve matching application memory for the enlarged pool.
-// The diagnostic override can force either plan without changing game files.
+// Keep the original pool through 1080p and grow it for larger presets.
+// Reserve matching application memory for any increase in pool capacity.
+// The diagnostic override can set the capacity without changing game files.
 static inline int hwaoi_display_pool_plan(const unsigned scene[2], const char *override,
                                           uint64_t *child, uint64_t *parent, uint64_t *application_extra) {
     // The render targets scale with the scene's pixel count: 838 MiB more per extra 1080p worth of pixels (3840x2160 is

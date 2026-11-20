@@ -44,6 +44,7 @@ static int bad_control,bad_code,alias_destination;
 static uint64_t origin=HWAOI_SCENE_RCAS_ORIGIN;
 static uint32_t code_length=sizeof code;
 static const char *setting;
+int vk_temporal_running(void) {return 0;}
 static VkBuffer srcbuf=(VkBuffer)(uintptr_t)11,dstbuf=(VkBuffer)(uintptr_t)22;
 static uint32_t observed_params[2];
 void rt_fatal(const char *fmt,...) {

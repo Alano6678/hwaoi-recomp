@@ -199,7 +199,8 @@ static uint64_t res_heap_extra_kib(void){foreign_heap_reads++;return 42;}
 ''' + policy + r'''
 int main(int argc,char **argv){
  assert(argc==2);if(!strcmp(argv[1],"bad")){resolution="3840x2161";res_heap_extra_bytes();return 1;}
- assert(!res_heap_extra_bytes());resolution="3840x2160";assert(res_heap_extra_bytes()==0x3d200000ull);
+ assert(!res_heap_extra_bytes());resolution="2560x1440";assert(res_heap_extra_bytes()==0x28c00000ull);
+ resolution="3840x2160";assert(res_heap_extra_bytes()==0x9d200000ull);
  scene_override="1920x1080";assert(!res_heap_extra_bytes());scene_override=NULL;
  native="0";assert(!res_heap_extra_bytes());native=NULL;profile=0;assert(!res_heap_extra_bytes());
  assert(!foreign_heap_reads);

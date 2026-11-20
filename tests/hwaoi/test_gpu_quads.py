@@ -78,6 +78,7 @@ void rec_push(PFN_vkCmdPushDescriptorSetKHR fn,VkCommandBuffer cb,VkPipelineBind
 struct PlatThread {HANDLE handle;PlatThreadFn fn;void *argument;};
 static HANDLE consumer_gate;
 unsigned rt_trace;
+VkCaps vk_caps;
 const char *cfg_get(const char *key){(void)key;return NULL;}
 int cfg_int(const char *key){(void)key;return 0;}
 uint32_t plat_cpu_usable(void){return 1;}
