@@ -79,6 +79,8 @@ static void verify(void);
 uint64_t kern_now_ns(void) { return clock_ns; }
 static void lock(void) {}
 static void unlock(void) {}
+static uint64_t kspin_ns(void) { return 0; }   // the poll before a sleep is off in these fixtures
+static int kspin(const int *p, int at_least, uint64_t ns) { (void)p; (void)at_least; (void)ns; return 0; }
 static void *h_get(uint32_t handle, int type) {
     CHECK(type == O_THREAD);
     for (unsigned i = 0; i < NTHREAD; i++) if (threads[i].handle == handle) return &threads[i];

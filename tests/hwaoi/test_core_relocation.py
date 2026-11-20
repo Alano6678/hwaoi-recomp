@@ -72,6 +72,8 @@ static int checks;
 static uint64_t kern_now_ns(void) { return ++now; }
 static void lock(void) { CHECK(!lock_depth); lock_depth++; }
 static void unlock(void) { CHECK(lock_depth == 1); lock_depth--; }
+static uint64_t kspin_ns(void) { return 0; }   // the poll before a sleep is off in these fixtures
+static int kspin(const int *p, int at_least, uint64_t ns) { (void)p; (void)at_least; (void)ns; return 0; }
 static int eff_prio(const RtThread *t) { return t->effective; }
 static void priority_diag_site(unsigned site) { (void)site; }
 static int cores_enabled(void) { return 1; }

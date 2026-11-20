@@ -658,6 +658,36 @@ static void portable_paths(RtConfig *c) {
     c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
 }
 
+// --play-experimental defaults, each applied only when the player has not set it (environment or totk.ini wins).
+// Already the default without any setting: GPU=vulkan, INPUT=auto, PIPE_PREBUILD=1, PIPE_SYNC=0, POOL_DIAG/CORE_STALL_DIAG off.
+// Left unset on purpose (diagnostic only): HWAOI_TRACE (sched,perf just adds log lines), DKB_SHADER_FAILURE_DUMP (no report dir here).
+static void play_defaults(void) {
+    static const char *const env_on[][2] = {
+        {"HWAOI_PROGRESS", "1"}, {"HWAOI_GSV_LOCAL_FRAME_POLICY", "1"}, {"HWAOI_NATIVE_INFLATE", "1"},
+        {"HWAOI_POOL_BACKPRESSURE", "1"}, {"HWAOI_IR_BANKS", "1"}};
+    for (size_t i = 0; i < sizeof env_on / sizeof *env_on; i++)
+        if (!getenv(env_on[i][0])) plat_setenv(env_on[i][0], env_on[i][1]);
+    if (!cfg_is_set("TOTK_RUMBLE")) plat_setenv("HWAOI_RUMBLE", "0");
+    if (!cfg_is_set("TOTK_PIPE_SKIP")) plat_setenv("HWAOI_PIPE_SKIP", "strict");
+#ifdef __linux__
+    if (!getenv("HWAOI_ZLIB_DLL")) {
+        static const char *const libz[] = {"/usr/lib/libz.so.1", "/usr/lib64/libz.so.1", "/usr/lib/x86_64-linux-gnu/libz.so.1"};
+        for (size_t i = 0; i < sizeof libz / sizeof *libz; i++)
+            if (plat_file_exists(libz[i])) { plat_setenv("HWAOI_ZLIB_DLL", libz[i]); break; }
+    }
+#endif
+    if (!cfg_is_set("TOTK_XLATE")) {
+        char exe[PLAT_PATH_MAX * 2], x[PLAT_PATH_MAX * 3];
+        int n = plat_exe_path(exe, sizeof exe);
+        char *cut = n && n < sizeof exe ? plat_last_sep(exe) : NULL;
+        if (cut) {
+            *cut = 0;
+            snprintf(x, sizeof x, "%s/xlate-managed-irbanks/totk_xlate" PLAT_EXE_SUFFIX, exe);
+            if (plat_file_exists(x)) plat_setenv("HWAOI_XLATE", x);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -729,6 +759,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-render")) { g_hwaoi_render_probe = 1; cfg.boot = 0; rt_boot(); return 0; }
     if (RT_TARGET_HWAOI && !strcmp(mode, "--play-experimental")) {
         rt_log("HWAoI: interactive experimental run; loading and gameplay compatibility remain incomplete");
+        play_defaults();
         cfg.boot = 0;
         rt_boot();
         return 0;

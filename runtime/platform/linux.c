@@ -310,6 +310,9 @@ __asm__(".text\n"
         ".type plat_fiber_entry, @function\n"
         ".p2align 4\n"
         "plat_fiber_entry:\n"
+        // fiber_swap's ret lands here with rsp = top - 8; realign so fn starts with rsp = 8 mod 16 (System V ABI).
+        // Ported from totk-pc-recomp 7544cfd.
+        "    andq $-16, %rsp\n"
         "    movq %r13, %rdi\n"
         "    callq *%r12\n"
         "    ud2\n"
