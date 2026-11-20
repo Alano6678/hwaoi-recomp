@@ -35,6 +35,8 @@ typedef struct VkCtx {
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker,
         has_astc_ldr;                       // textureCompressionASTC_LDR (enabled when reported)
+    int has_swapchain_colorspace,           // VK_EXT_swapchain_colorspace on the instance (TOTK_HDR=1 only)
+        has_hdr_metadata;                   // VK_EXT_hdr_metadata (vk_hdr.c vk_hdr_metadata, TOTK_HDR=1 only)
     // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass that
     // an earlier draw of the pass wrote. TOTK_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
     // old behaviour); VK_FEEDBACK_LAYOUT with VK_EXT_attachment_feedback_loop_layout and dynamicRenderingLocalRead
@@ -114,6 +116,22 @@ void vk_smaa_release(void);   // before the device goes away
 // scales that one instead, crop {0, 0, w, h}); VK_NULL_HANDLE = nothing recorded. src is in GENERAL, fmt its format.
 VkImage vk_color_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, const int crop[4]);
 void vk_color_release(void);   // before the device goes away
+// HDR10 output on the present (vk_hdr.c). vk_hdr_wanted: TOTK_HDR, read once. vk_hdr_surface_format: the HDR10 surface
+// format when wanted and offered (1). vk_hdr_set_active: gfx_present.c says whether the swapchain is HDR10. vk_hdr_encode:
+// like vk_color_record, src's crop as PQ code values (RGBA16F, crop {0, 0, w, h}); srgb: src holds sRGB-encoded values.
+// vk_hdr_ui_target / vk_hdr_ui_compose: the in-game menu's RGBA8 target, then blended onto the swapchain image.
+// vk_hdr_to_srgb8: 10-bit PQ pixels to sRGB bytes.
+int vk_hdr_wanted(void);
+void vk_hdr_off(void);   // probes that read back 8-bit swapchain pixels: SDR whatever the setting
+int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceFormatKHR *out);
+void vk_hdr_metadata(VkSwapchainKHR sc, int new_sc);
+void vk_hdr_set_active(int on);
+int vk_hdr_active(void);
+VkImage vk_hdr_encode(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, int srgb, const int crop[4]);
+VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h);
+void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
+void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
+void vk_hdr_release(void);   // before the device goes away
 void vk_present_flip(void);
 // Every submission to ctx->gfx_queue (and xfer_queue when shared) takes this lock; vk_present_image and the swapchain
 // rebuild do. Recursive.
