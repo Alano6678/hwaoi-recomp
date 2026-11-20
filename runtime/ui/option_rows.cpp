@@ -38,6 +38,7 @@ static UiTextId g_disable_note;
 // The description pane: this frame's hovered and selected rows, the page's first row, and the last one shown.
 struct Desc { char text[UI_DESC_BYTES]; };
 static Desc g_hover, g_focus, g_first, g_shown;
+static bool g_restart_next, g_restart;   // opt_select: the row applies after restart whatever its keys say
 
 // disabled: the note of a row opt_disable_next greyed out, else NULL.
 static void desc_set(Desc &d, UiTextId desc, const char *key, const CfgMeta *m, const char *disabled) {
@@ -47,7 +48,7 @@ static void desc_set(Desc &d, UiTextId desc, const char *key, const CfgMeta *m, 
         snprintf(d.text + n, sizeof d.text - n, "\n\n%s", disabled);
     else if (cfg_from_env(key))
         snprintf(d.text + n, sizeof d.text - n, "\n\n%s %s", menu_text(UI_MENU_SET_BY_ENV), key);
-    else if (m && !m->live)
+    else if ((m && !m->live) || g_restart)
         snprintf(d.text + n, sizeof d.text - n, "\n\n%s", menu_text(UI_MENU_AFTER_RESTART));
 }
 
@@ -113,6 +114,8 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v)
     const CfgMeta *m = cfg_meta(key);
     const char *disabled = g_disable_next ? menu_text(g_disable_note) : NULL;
     g_disable_next = false;
+    g_restart = g_restart_next;
+    g_restart_next = false;
     bool off = disabled || cfg_from_env(key) != 0;
     ImGui::PushID(key);
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -191,7 +194,7 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v)
                 &clip);
     const char *note = disabled        ? disabled
                      : off             ? menu_text(UI_MENU_SET_BY_ENV)
-                     : m && !m->live ? menu_text(UI_MENU_AFTER_RESTART)
+                     : (m && !m->live) || g_restart ? menu_text(UI_MENU_AFTER_RESTART)
                                      : NULL;
     if (note) dl->AddText(font, small, ImVec2(p.x + pad, ny), off ? IM_COL32(200, 150, 90, 255) : kDim, note);
     ImGui::PopID();
@@ -273,6 +276,23 @@ bool opt_choice_list(const char *key, UiTextId label, const char *const *values,
     if (nv == cur) return false;
     apply(key, values[nv]);
     return true;
+}
+
+// A selector over several keys: the caller maps the index to them. skip: a choice stepping passes over (-1 none).
+int opt_select(const char *key, UiTextId label, const UiTextId *names, int n, int cur, UiTextId desc, int def, int skip,
+               bool restart, const char *note) {
+    g_restart_next = restart;
+    RowView v = {cur >= 0 ? menu_text(names[cur]) : "", cur == def, true, note};
+    int step = row(key, label, desc, v);
+    if (!step || n <= 0) return -1;
+    int nv = cur;
+    if (step == 2) {
+        nv = (cur + 1) % n;
+        if (nv == skip) nv = (nv + 1) % n;
+    } else {
+        nv = cur + step < 0 ? 0 : cur + step >= n ? n - 1 : cur + step;
+    }
+    return nv == cur || nv == skip ? -1 : nv;
 }
 
 bool opt_choice(const char *key, UiTextId label, const UiTextId *names, int n, UiTextId desc, const char *note) {

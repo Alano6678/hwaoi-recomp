@@ -38,6 +38,8 @@
 #include "game_target.h"
 #include "host.h"
 #include "hwaoi_display.h"
+#include "vk_ffx.h"
+#include "vk_ffx_fetch.h"
 
 #define BASE_W 1920
 #define BASE_H 1080
@@ -218,6 +220,23 @@ void res_init(void) {
             const char *value = cfg_value("TOTK_OUTPUT_RES");
             if (!hwaoi_display_dimensions(value, cfg_get("TOTK_SCENE_RES"), size, scene))
                 rt_fatal("resolution: HWAoI OUTPUT_RES=%s unsupported; choose 1280x720, 1920x1080, 2560x1440 or 3840x2160", value);
+            // Temporal upscaling: the scene below the output by HWAOI_FSR_QUALITY, scaled back by FSR in place of the
+            // game's FSR 1 EASU (vk_temporal.c). An explicit SCENE_RES wins. The pool plan stays the output's
+            // (res_heap_extra_bytes), which a smaller scene never exceeds.
+            const char *quality = cfg_value("TOTK_FSR_QUALITY");
+            if (!cfg_get("TOTK_SCENE_RES") && !strcmp(cfg_value("TOTK_TEMPORAL"), "fsr") && strcmp(quality, "native")) {
+                if (!hwaoi_display_fsr_scene(size, quality, scene))
+                    rt_fatal("resolution: FSR_QUALITY=%s unsupported; choose native, quality, balanced or performance", quality);
+                if (!vk_ffx_lib_present()) vk_ffx_fetch_blocking();   // Windows: AMD's DLLs from the SDK repository
+                if (!vk_ffx_lib_present()) {
+                    scene[0] = size[0], scene[1] = size[1];
+                    rt_log("resolution: FSR_QUALITY=%s needs the FSR library next to the executable "
+                           "(Linux: tools/build_fsr4_vk.sh; Windows: downloaded automatically); the scene stays at the output size", quality);
+                } else {
+                    rt_log("resolution: FSR_QUALITY=%s: scene %ux%u for FSR to scale to %ux%u", quality, scene[0], scene[1],
+                           size[0], size[1]);
+                }
+            }
             const char *scale = cfg_value("TOTK_RENDER_SCALE");
             if (strcmp(scale, "game") && strcmp(scale, "100"))
                 rt_fatal("resolution: HWAoI native presets require RENDER_SCALE=100 or game");

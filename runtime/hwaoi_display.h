@@ -29,6 +29,17 @@ static inline int hwaoi_display_dimensions(const char *output, const char *scene
     return 1;
 }
 
+// The scene for the temporal upscaler (HWAOI_TEMPORAL=fsr, HWAOI_FSR_QUALITY): the output divided by 1.5 (quality),
+// 1.7 (balanced) or 2 (performance) on each side, rounded to even sizes (1920x1080: 1280x720, 1130x636, 960x540).
+// Smaller than the output, so the presets' texture pool plan covers it.
+static inline int hwaoi_display_fsr_scene(const unsigned out[2], const char *quality, unsigned scene[2]) {
+    unsigned tenths = !quality ? 0 : !strcmp(quality, "quality") ? 15 : !strcmp(quality, "balanced") ? 17
+                    : !strcmp(quality, "performance") ? 20 : 0;
+    if (!tenths) return 0;
+    for (int i = 0; i < 2; i++) scene[i] = 2 * ((out[i] * 10 + tenths) / (2 * tenths));
+    return 1;
+}
+
 // The measured 4K scene exhausts the original pool. Keep the smaller presets'
 // original capacity; reserve matching application memory for the enlarged pool.
 // The diagnostic override can force either plan without changing game files.

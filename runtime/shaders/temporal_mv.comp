@@ -1,0 +1,33 @@
+#version 450
+// Camera motion vectors for the temporal upscaler (vk_temporal.c mv_pass), after totk-pc-recomp's dlaa_mv.comp. Each
+// pixel's depth goes from this frame's clip space to last frame's through one reprojection matrix R (inverse(this VP) *
+// last VP, row-vector convention as HWAoI's camera block: clip = v * VP), built on the CPU in double precision. The
+// vector is last frame's window position minus this frame's, in render pixels, without the jitter. Window y grows
+// downwards from ndc y = +1; HWAoI's depth is ndc z itself (0..1, reversed). Objects moving on their own get only the
+// camera's motion. The depth is also written out as R32F (the scene depth is D32S8, which FSR does not take).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depth_tex;
+layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
+layout(binding = 2, r32f) uniform writeonly image2D depth_out;
+layout(push_constant) uniform P {
+    vec4 r[4];     // the reprojection's rows
+    vec2 size;     // render size in pixels
+    vec2 jitter;   // this frame's jitter, pixels, as the scene was drawn (window x right, y down)
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.size.x) || p.y >= int(pc.size.y)) return;
+    float d = texelFetch(depth_tex, p, 0).r;
+    imageStore(depth_out, p, vec4(d));
+    vec2 win = vec2(p) + 0.5 - pc.jitter;   // where this pixel's surface sits without the jitter
+    vec4 ndc = vec4(win.x / pc.size.x * 2.0 - 1.0, 1.0 - win.y / pc.size.y * 2.0, d, 1.0);
+    vec4 clip = ndc.x * pc.r[0] + ndc.y * pc.r[1] + ndc.z * pc.r[2] + ndc.w * pc.r[3];
+    vec2 mv = vec2(0.0);
+    if (clip.w > 1e-6) {
+        vec2 pn = clip.xy / clip.w;
+        vec2 pwin = vec2((pn.x * 0.5 + 0.5) * pc.size.x, (0.5 - pn.y * 0.5) * pc.size.y);
+        mv = pwin - win;
+    }
+    imageStore(mv_out, p, vec4(mv, 0.0, 0.0));
+}
