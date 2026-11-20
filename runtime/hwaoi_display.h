@@ -34,8 +34,14 @@ static inline int hwaoi_display_dimensions(const char *output, const char *scene
 // The diagnostic override can force either plan without changing game files.
 static inline int hwaoi_display_pool_plan(const unsigned scene[2], const char *override,
                                           uint64_t *child, uint64_t *parent, uint64_t *application_extra) {
-    int large = scene[0] == 3840 && scene[1] == 2160;
-    uint64_t bytes = large ? UINT64_C(6144) << 20 : HWAOI_TEXTURE_POOL_BASE;   // 5632 MiB held the title but failed loading a stage
+    // The render targets scale with the scene's pixel count: 838 MiB more per extra 1080p worth of pixels (3840x2160 is
+    // 3 extra: 7169 MiB; 5632 MiB failed loading a stage and 6144 MiB was full after 15-20 minutes, when a movie's
+    // 2 MiB surface found 1 MiB free in 27 blocks). The pool is address space until used (resident memory does not
+    // grow); the ceiling is the guest heap window (memory.c HEAP_CAP 12 GiB, 9 GiB of it the base application pool).
+    uint64_t px = (uint64_t)scene[0] * scene[1], base_px = UINT64_C(1920) * 1080;
+    uint64_t bytes = HWAOI_TEXTURE_POOL_BASE;
+    if (px > base_px) bytes += ((UINT64_C(838) * (px - base_px)) / base_px) << 20;
+    if (bytes > (UINT64_C(7680) << 20)) bytes = UINT64_C(7680) << 20;
     if (override) {
         if (!strcmp(override, "1")) bytes = UINT64_C(6) << 30;
         else if (!strcmp(override, "0")) bytes = HWAOI_TEXTURE_POOL_BASE;
@@ -44,7 +50,7 @@ static inline int hwaoi_display_pool_plan(const unsigned scene[2], const char *o
             for (const unsigned char *p = (const unsigned char *)override; *p; p++) {
                 if (*p < '0' || *p > '9') return 0;
                 mib = mib * 10 + (*p - '0');
-                if (mib > 6144) return 0;
+                if (mib > 7680) return 0;   // the 12 GiB guest heap window (memory.c HEAP_CAP) minus the 9 GiB base pool
             }
             if (mib < 4655) return 0;
             bytes = (uint64_t)mib << 20;

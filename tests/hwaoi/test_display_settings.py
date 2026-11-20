@@ -147,15 +147,18 @@ int main(void) {
  unsigned output[2],scene[2];uint64_t child,parent,extra;
  assert(hwaoi_display_dimensions("3840x2160",NULL,output,scene));
  assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
- assert(child==0x160000000ull&&parent==0x178b05008ull&&extra==0x3d200000ull);
+ assert(child==0x1c0100000ull&&parent==0x1d8c05008ull&&extra==0x9d200000ull);
  assert(hwaoi_display_dimensions("3840x2160","1920x1080",output,scene));
  assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
  assert(child==0x122f00000ull&&parent==0x13ba05008ull&&!extra);
  assert(!hwaoi_display_dimensions("1920x1080","3840x2160",output,scene));
- for(unsigned i=0;i<3;i++) {
+ for(unsigned i=0;i<2;i++) {
   assert(hwaoi_display_dimensions(names[i],NULL,output,scene));
   assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));assert(!extra&&child==0x122f00000ull);
  }
+ assert(hwaoi_display_dimensions(names[2],NULL,output,scene));   // 1440p: 838 MiB per extra 1080p of pixels
+ assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
+ assert(child==0x14ba00000ull&&parent==0x164505008ull&&extra==0x28c00000ull);
  assert(hwaoi_display_pool_plan(scene,"1",&child,&parent,&extra)&&extra==0x5d200000ull);
  scene[0]=3840;scene[1]=2160;
  assert(hwaoi_display_pool_plan(scene,"0",&child,&parent,&extra)&&!extra);
