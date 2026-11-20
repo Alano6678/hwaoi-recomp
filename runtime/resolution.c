@@ -111,7 +111,7 @@ uint64_t res_heap_extra_bytes(void) {
         if (!hwaoi_display_dimensions(cfg_value("TOTK_OUTPUT_RES"), cfg_get("TOTK_SCENE_RES"), out, scene))
             rt_fatal("resolution: invalid HWAoI native output/diagnostic scene preset");
         if (!hwaoi_display_pool_plan(scene, cfg_get("TOTK_DISPLAY_POOL_TEST"), &child, &parent, &extra))
-            rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..6144");
+            rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..7680");
         return extra;
     }
     return ((res_heap_extra_kib() << 10) + 0x1fffff) & ~0x1fffffull;
@@ -236,11 +236,15 @@ void res_init(void) {
             uint64_t texture_pool, texture_parent, application_extra;
             const char *pool_test = cfg_get("TOTK_DISPLAY_POOL_TEST");
             if (!hwaoi_display_pool_plan(scene, pool_test, &texture_pool, &texture_parent, &application_extra))
-                rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..6144");
+                rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..7680");
             if (application_extra && mem_layout()->pool < (UINT64_C(9) << 30) + application_extra)
                 rt_fatal("resolution: enlarged native scene requires a larger application pool; remove the APP_POOL override");
             memcpy(page + 0x98, &texture_pool, sizeof texture_pool);
             memcpy(page + 0xa0, &texture_parent, sizeof texture_parent);
+            uint64_t canvas = pack(1920, 1080);   // set hwaoi_ui_canvas: the screen cameras frame the game's 2D canvas
+            memcpy(page + 0xa8, &canvas, sizeof canvas);
+            float canvas_scale = (float)size[0] / 1920.0f;   // canvas units to output pixels (2D primitive corners)
+            memcpy(page + 0xb8, &canvas_scale, sizeof canvas_scale);
             if (application_extra)
                 rt_log("resolution: experimental texture pool %llu MiB, matching parent %llu MiB plus bookkeeping",
                        (unsigned long long)(texture_pool >> 20), (unsigned long long)(texture_parent >> 20));

@@ -73,6 +73,61 @@ class DisplaySettingsTests(unittest.TestCase):
                     0x1af1afc, 0x1af1b00):
             self.assertEqual(instructions(off)[0].mnemonic, "nop")
 
+    def test_ui_canvas_sites_load_the_canvas_size(self):
+        # Field decoding from the A64 encodings: ADRP, LDR (immediate, unsigned offset, 64-bit), LDP (SIMD&FP, 32-bit,
+        # signed offset). Each site must take its operand from page +0xa8 in place of the original load.
+        table = self.table()
+        rows = table.for_module("main", 0x7000000000)
+        canvas = {off: row for off, row in table.sites["main"].items() if table.sets[row[0]][0] == "hwaoi_ui_canvas"}
+        self.assertEqual(set(canvas), {0x576ff8, 0xadd844, 0xadd874, 0xaf42e4, 0xaf42e8, 0xaf42ec, 0xaf42f0})
+        def adrp_target(pc, word):
+            self.assertEqual(word & 0x9f000000, 0x90000000)
+            imm = ((word >> 5) & 0x7ffff) << 2 | (word >> 29) & 3
+            imm -= (imm >> 20 & 1) << 21
+            return (pc & ~0xfff) + (imm << 12), word & 31
+        expected = {0x576ff8: ("ldr", 25, (25,), 0xf9400119), 0xadd844: ("ldp", 9, (0, 1), 0x2d400680),
+                    0xadd874: ("ldp", 9, (1, 2), 0x2d400a81)}
+        for off, (kind, base, dest, original) in expected.items():
+            self.assertEqual(canvas[off][2], original)
+            adrp, load = rows[0x7000000000 + off][1]
+            target, reg = adrp_target(0x7000000000 + off, adrp)
+            self.assertEqual((target, reg), (table.page, base))
+            self.assertEqual((load >> 5) & 31, base)
+            if kind == "ldr":
+                self.assertEqual(load & 0xffc00000, 0xf9400000)
+                self.assertEqual(((load >> 10) & 0xfff) * 8, 0xa8)
+                self.assertEqual((load & 31,), dest)
+            else:
+                self.assertEqual(load & 0xffc00000, 0x2d400000)
+                self.assertEqual(((load >> 15) & 0x7f) * 4, 0xa8)
+                self.assertEqual((load & 31, (load >> 10) & 31), dest)
+
+    def test_ui_canvas_primitive_corners_scale_by_page_factor(self):
+        # main+af42dc copies a 2D primitive's four corners (ldp/stp of x8..x11). The patch loads them as two q
+        # registers, multiplies by the f32 at page +0xb8 and stores them; the displaced copies become nops.
+        table = self.table()
+        rows = table.for_module("main", 0x7000000000)
+        words = rows[0x7000000000 + 0xaf42e4][1]
+        self.assertEqual(table.sites["main"][0xaf42e4][2], 0xa9402448)
+        ldp, adrp, ldr, mul0, mul1, stp = words
+        self.assertEqual(ldp & 0xffc00000, 0xad400000)                       # LDP q, q, [x2]
+        self.assertEqual(((ldp >> 5) & 31, ldp & 31, (ldp >> 10) & 31, (ldp >> 15) & 0x7f), (2, 0, 1, 0))
+        self.assertEqual(adrp & 0x9f00001f, 0x90000009)
+        imm = ((adrp >> 5) & 0x7ffff) << 2 | (adrp >> 29) & 3
+        imm -= (imm >> 20 & 1) << 21
+        self.assertEqual(((0x7000000000 + 0xaf42e4) & ~0xfff) + (imm << 12), table.page)
+        self.assertEqual(ldr & 0xffc00000, 0xbd400000)                       # LDR s, [x9, #imm]
+        self.assertEqual(((ldr >> 5) & 31, ldr & 31, ((ldr >> 10) & 0xfff) * 4), (9, 2, 0xb8))
+        for word, reg in ((mul0, 0), (mul1, 1)):                             # FMUL v.4s, v.4s, v2.s[0]
+            self.assertEqual(word & 0xffe0fc00, 0x4f809000)
+            self.assertEqual((word & 31, (word >> 5) & 31, (word >> 16) & 15, (word >> 11) & 1, (word >> 21) & 1),
+                             (reg, reg, 2, 0, 0))
+        self.assertEqual(stp & 0xffc00000, 0xad000000)                       # STP q, q, [x1]
+        self.assertEqual(((stp >> 5) & 31, stp & 31, (stp >> 10) & 31, (stp >> 15) & 0x7f), (1, 0, 1, 0))
+        for off, original in ((0xaf42e8, 0xa9412c4a), (0xaf42ec, 0xa9012c2a), (0xaf42f0, 0xa9002428)):
+            self.assertEqual(table.sites["main"][off][2], original)
+            self.assertEqual(rows[0x7000000000 + off][1], [0xd503201f])
+
     def test_native_presets_and_invalid_forms(self):
         cc = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
         if not cc.is_file():
@@ -92,15 +147,18 @@ int main(void) {
  unsigned output[2],scene[2];uint64_t child,parent,extra;
  assert(hwaoi_display_dimensions("3840x2160",NULL,output,scene));
  assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
- assert(child==0x160000000ull&&parent==0x178b05008ull&&extra==0x3d200000ull);
+ assert(child==0x1c0100000ull&&parent==0x1d8c05008ull&&extra==0x9d200000ull);
  assert(hwaoi_display_dimensions("3840x2160","1920x1080",output,scene));
  assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
  assert(child==0x122f00000ull&&parent==0x13ba05008ull&&!extra);
  assert(!hwaoi_display_dimensions("1920x1080","3840x2160",output,scene));
- for(unsigned i=0;i<3;i++) {
+ for(unsigned i=0;i<2;i++) {
   assert(hwaoi_display_dimensions(names[i],NULL,output,scene));
   assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));assert(!extra&&child==0x122f00000ull);
  }
+ assert(hwaoi_display_dimensions(names[2],NULL,output,scene));   // 1440p: 838 MiB per extra 1080p of pixels
+ assert(hwaoi_display_pool_plan(scene,NULL,&child,&parent,&extra));
+ assert(child==0x14ba00000ull&&parent==0x164505008ull&&extra==0x28c00000ull);
  assert(hwaoi_display_pool_plan(scene,"1",&child,&parent,&extra)&&extra==0x5d200000ull);
  scene[0]=3840;scene[1]=2160;
  assert(hwaoi_display_pool_plan(scene,"0",&child,&parent,&extra)&&!extra);
