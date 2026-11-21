@@ -48,6 +48,7 @@ void ds_haptics_render(DsActuator act[2], const DsTarget tgt[2], float *out, int
 
 static struct {
     SDL_AudioStream *stream;
+    SDL_AudioDeviceID dev;
     DsActuator act[2];
     DsTarget tgt[2];
     volatile uint64_t last_ms;
@@ -102,6 +103,7 @@ static int open_stream(void) {
         SDL_free(devs);
         return 0;
     }
+    H.dev = dev;
     rt_log("haptics: DualSense haptics on \"%s\"", chosen);
     SDL_free(devs);
     return 1;
@@ -118,7 +120,12 @@ int ds_haptics_ready(void) {
         if (H.stream) SDL_DestroyAudioStream(H.stream), H.stream = NULL;
         return 0;
     }
-    if (H.stream) return 1;
+    if (H.stream && SDL_GetAudioDeviceName(H.dev)) return 1;
+    if (H.stream) {   // the controller was unplugged: its audio device is gone
+        rt_log("haptics: the DualSense audio device was removed, using the normal rumble");
+        SDL_DestroyAudioStream(H.stream);
+        H.stream = NULL;
+    }
     uint64_t now = SDL_GetTicks();
     if (now < H.next_try_ms) return 0;
     H.next_try_ms = now + 5000;   // a pad plugged in later is found within 5 s
