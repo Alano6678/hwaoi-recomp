@@ -71,17 +71,24 @@ static void SDLCALL pull(void *ud, SDL_AudioStream *s, int additional, int total
 // skips a DualShock 4's stereo one); otherwise the normal rumble stays.
 static int open_stream(void) {
     if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) return 0;
-    int n = 0, found = 0;
+    int n = 0, found = 0, narrow = 0;
     SDL_AudioDeviceID *devs = SDL_GetAudioPlaybackDevices(&n), dev = 0;
     const char *chosen = "";
     for (int i = 0; devs && i < n; i++) {
         const char *name = SDL_GetAudioDeviceName(devs[i]);
         SDL_AudioSpec sp;
         if (!name || (!strstr(name, "DualSense") && !strstr(name, "Wireless Controller"))) continue;
-        if (!SDL_GetAudioDeviceFormat(devs[i], &sp, NULL) || sp.channels < DS_CHANNELS) continue;
+        if (!SDL_GetAudioDeviceFormat(devs[i], &sp, NULL) || sp.channels < DS_CHANNELS) {
+            narrow++;
+            continue;
+        }
         dev = devs[i], chosen = name, found++;
     }
     if (found != 1) {
+        static int hinted;
+        if (!found && narrow && !hinted++)   // the card is on a profile without the haptic channels (PipeWire "Default")
+            rt_log("haptics: a DualSense audio device is present but has fewer than 4 channels: switch its card profile to "
+                   "Direct (pactl set-card-profile <card> Direct) and set its output volume to 100%%");
         if (found > 1) rt_log("haptics: %d DualSense audio devices, using the normal rumble", found);
         SDL_free(devs);
         return 0;
