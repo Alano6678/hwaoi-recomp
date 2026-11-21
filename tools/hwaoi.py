@@ -275,7 +275,7 @@ def launch_interactive(args, identity):
     # forced: they are the player's settings (the Screen tab and F11 change them live, hwaoi.ini keeps them), and an
     # environment value would lock those rows.
     options = {"HWAOI_GPU": "vulkan",
-               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PROGRESS": "1",
+               "HWAOI_INPUT": args.input_mode, "HWAOI_PROGRESS": "1",
                "HWAOI_EXEFS": str(args.exefs.resolve()),
                "HWAOI_PROFILE_DIR": str(local_output(args.profile_dir, "saves")),
                "HWAOI_GSV_LOCAL_FRAME_POLICY": "1", "HWAOI_NATIVE_INFLATE": "1",

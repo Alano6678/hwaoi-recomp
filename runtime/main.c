@@ -668,7 +668,6 @@ static void play_defaults(void) {
         {"HWAOI_POOL_BACKPRESSURE", "1"}, {"HWAOI_IR_BANKS", "1"}};
     for (size_t i = 0; i < sizeof env_on / sizeof *env_on; i++)
         if (!getenv(env_on[i][0])) plat_setenv(env_on[i][0], env_on[i][1]);
-    if (!cfg_is_set("TOTK_RUMBLE")) plat_setenv("HWAOI_RUMBLE", "0");
     if (!cfg_is_set("TOTK_PIPE_SKIP")) plat_setenv("HWAOI_PIPE_SKIP", "strict");
 #ifdef __linux__
     if (!getenv("HWAOI_ZLIB_DLL")) {

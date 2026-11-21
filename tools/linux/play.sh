@@ -11,7 +11,7 @@ EXE=$GAME/hwaoi
 ZLIB=${HWAOI_ZLIB_DLL:-$(ldconfig -p | awk '/libz\.so\.1 .*x86-64/ {print $NF; exit}')}
 [ -f "$ZLIB" ] || { echo "libz.so.1 not found; set HWAOI_ZLIB_DLL" >&2; exit 1; }
 mkdir -p "$ROOT/work/saves/hwaoi196608" "$ROOT/work/logs"
-export HWAOI_GPU=vulkan HWAOI_INPUT=${HWAOI_INPUT:-auto} HWAOI_RUMBLE=0 HWAOI_PROGRESS=1
+export HWAOI_GPU=vulkan HWAOI_INPUT=${HWAOI_INPUT:-auto} HWAOI_PROGRESS=1
 export HWAOI_EXEFS=${HWAOI_EXEFS:-$ROOT/work/game/exefs} HWAOI_PROFILE_DIR=$ROOT/work/saves/hwaoi196608
 export HWAOI_GSV_LOCAL_FRAME_POLICY=1 HWAOI_NATIVE_INFLATE=${HWAOI_NATIVE_INFLATE:-1} HWAOI_ZLIB_DLL=$ZLIB
 export HWAOI_POOL_BACKPRESSURE=1 HWAOI_POOL_DIAG=0 HWAOI_CORE_STALL_DIAG=0
