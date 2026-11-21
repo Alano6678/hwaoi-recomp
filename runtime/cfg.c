@@ -52,7 +52,7 @@ static const char *const known[] = {
     "PROFILE_BUSY", "PROFILE_IP_ONLY", "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_END", "REEXEC",
     "RENDER_SCALE", "REPLAY_ASYNC", "RUNTIME_MEMORY_DIAG", "MEMORY_TRIM_PROBE", "COPY_PACK", "DUMP_TRIGGER", "NATIVE_1080", "GPU_READBACK_DIAG", "GPU_QUADS", "VERTEX_CACHE", "INDIRECT_BATCH", "SCENE_RES", "DISPLAY_POOL_TEST", "DUMP_METADATA",
     "REPLAY_CHECK", "RESOLVE_CHECK", "ROMFS", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
-    "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
+    "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "DS_HAPTICS", "RUMBLE_TRIGGERS", "SHADER_CACHE",
     "SCENE_SHARPNESS", "SHADER_MEMO", "SHARED_FONTS", "SPIRV_TRIM", "CS_PREBUILD", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SHOTS_LATEST", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SWKBD_ANSWER",
     "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "SMALL_MEMORY_POOLS", "COPY_RECLAIM", "SOURCE_COMPRESS", "LAZY_HEAP", "LAZY_HEAP_KIB", "LAZY_HEAP_AUTO_FREE_MB", "VS_OUTS",
@@ -76,7 +76,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"},
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
     {"VOLUME", "audio"},
-    {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
+    {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"DS_HAPTICS", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
     {"P2_BIND_A", "input"}, {"P2_BIND_B", "input"}, {"P2_BIND_X", "input"}, {"P2_BIND_Y", "input"}, {"P2_BIND_LCLICK", "input"}, {"P2_BIND_RCLICK", "input"}, {"P2_BIND_L", "input"}, {"P2_BIND_R", "input"}, {"P2_BIND_ZL", "input"}, {"P2_BIND_ZR", "input"}, {"P2_BIND_PLUS", "input"}, {"P2_BIND_MINUS", "input"}, {"P2_BIND_LEFT", "input"}, {"P2_BIND_UP", "input"}, {"P2_BIND_RIGHT", "input"}, {"P2_BIND_DOWN", "input"}, {"P2_BIND_LSTICK_LEFT", "input"}, {"P2_BIND_LSTICK_UP", "input"}, {"P2_BIND_LSTICK_RIGHT", "input"}, {"P2_BIND_LSTICK_DOWN", "input"}, {"P2_BIND_RSTICK_LEFT", "input"}, {"P2_BIND_RSTICK_UP", "input"}, {"P2_BIND_RSTICK_RIGHT", "input"}, {"P2_BIND_RSTICK_DOWN", "input"}, {"P2_BIND_MENU", "input"},
     {"BINDS_PLAYER", "input"}, {"PAD_LAYOUT", "input"}, {"PLAYER1_DEVICE", "input"}, {"PLAYER1_TYPE", "input"}, {"PLAYER2_DEVICE", "input"},
     {"PLAYER2_TYPE", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
@@ -150,7 +150,7 @@ static const CfgMeta metas[] = {
     {"ASSUME_FOCUS", "1", "0|1", LIVE},   // read on every focus change (ov_system.c)
     // Sound, Controls, Menu
     {"VOLUME", "100", "0..200", LIVE},
-    {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
+    {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"DS_HAPTICS", "auto", "auto|off", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
     {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
     // Players (input.c assign): auto | keyboard | none | pad:<SDL GUID>:<n>; controller type pro (Pro Controller) | dual (Joy-Con pair)
     {"PLAYER1_DEVICE", "auto", NULL, LIVE}, {"PLAYER1_TYPE", "pro", "pro|dual", LIVE},

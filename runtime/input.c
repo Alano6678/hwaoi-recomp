@@ -847,6 +847,17 @@ int input_rumble_player(int player, uint16_t low, uint16_t high, uint32_t ms) {
     return ok;
 }
 
+// 1 when one of the player's gamepads is a DualSense (haptics, dualsense_haptics.c)
+int input_player_dualsense(int player) {
+    int ds = 0;
+    plat_mutex_lock(&lock);
+    if (state == 1) assign();
+    for (int i = 0; state == 1 && i < npads; i++)
+        if (pad_owner[i] == player && SDL_GetGamepadType(pads[i].g) == SDL_GAMEPAD_TYPE_PS5) ds = 1;
+    plat_mutex_unlock(&lock);
+    return ds;
+}
+
 int input_rumble(uint16_t low, uint16_t high, uint32_t ms) { return input_rumble_player(0, low, high, ms); }
 
 // SDL gamepad sensor axes (SDL_sensor.h, a gamepad held in front of you): x to the right, y up out of the face (lying
