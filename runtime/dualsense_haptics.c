@@ -118,33 +118,80 @@ int ds_haptics_ready(void) {
     return open_stream();
 }
 
-// --probe-haptics: left, right, then both, low then high band, then a sweep.
+// --probe-haptics: plays a test pattern and measures it with the DualSense's own accelerometer (it sits in the middle of the
+// controller, so it picks up the actuators shaking it): per step the standard deviation of each axis in milli-g, against a
+// silent baseline. The controller should lie still on a table.
+static SDL_Gamepad *probe_pad(void) {
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) return NULL;
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    SDL_Gamepad *pad = NULL;
+    for (int i = 0; ids && i < n && !pad; i++)
+        if (SDL_GetGamepadTypeForID(ids[i]) == SDL_GAMEPAD_TYPE_PS5) pad = SDL_OpenGamepad(ids[i]);
+    SDL_free(ids);
+    if (pad && !(SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) && SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true))) {
+        SDL_CloseGamepad(pad);
+        pad = NULL;
+    }
+    return pad;
+}
+
+// Collects accelerometer events for ms; returns the sample count and the per-axis standard deviation (milli-g).
+static int measure(int ms, double sd[3]) {
+    double sum[3] = {0}, sq[3] = {0};
+    int n = 0;
+    uint64_t end = SDL_GetTicks() + (uint64_t)ms;
+    while (SDL_GetTicks() < end) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e))
+            if (e.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE && e.gsensor.sensor == SDL_SENSOR_ACCEL) {
+                for (int k = 0; k < 3; k++) sum[k] += e.gsensor.data[k], sq[k] += (double)e.gsensor.data[k] * e.gsensor.data[k];
+                n++;
+            }
+        SDL_Delay(1);
+    }
+    for (int k = 0; k < 3; k++) {
+        double m = n ? sum[k] / n : 0, v = n ? sq[k] / n - m * m : 0;
+        sd[k] = sqrt(v > 0 ? v : 0) * 1000.0 / 9.80665;
+    }
+    return n;
+}
+
 int ds_haptics_probe(void) {
     if (!open_stream()) {
         printf("probe-haptics: no single DualSense audio device with 4 channels (USB needed)\n");
         return 1;
     }
+    SDL_Gamepad *pad = probe_pad();
+    printf("probe-haptics: accelerometer %s\n", pad ? "on: keep the controller still on a table" : "not available: playing only");
+    double base[3] = {0}, sd[3];
+    if (pad) {
+        SDL_Delay(500);
+        int n = measure(1500, base);
+        printf("probe-haptics: baseline (silent): %d samples (%.0f Hz), sd %.2f %.2f %.2f mg\n", n, n / 1.5, base[0], base[1], base[2]);
+    }
     struct { const char *what; int side; float al, fl, ah, fh; int ms; } steps[] = {
-        {"left, low band 80 Hz", 0, 0.7f, 80, 0, 320, 1200}, {"right, low band 80 Hz", 1, 0.7f, 80, 0, 320, 1200},
-        {"both, high band 250 Hz", 2, 0, 160, 0.7f, 250, 1200}, {"both, low and high mixed", 2, 0.4f, 100, 0.4f, 300, 1500},
+        {"left, low band 80 Hz", 0, 0.7f, 80, 0, 320, 1500}, {"right, low band 80 Hz", 1, 0.7f, 80, 0, 320, 1500},
+        {"both, low band 40 Hz", 2, 0.7f, 40, 0, 320, 1500}, {"both, low band 80 Hz", 2, 0.7f, 80, 0, 320, 1500},
+        {"both, band 120 Hz", 2, 0, 160, 0.7f, 120, 1500}, {"both, band 250 Hz (above the sensor's Nyquist)", 2, 0, 160, 0.7f, 250, 1500},
+        {"both, 80 Hz at 0.2", 2, 0.2f, 80, 0, 320, 1500}, {"both, 80 Hz at 1.0", 2, 1.0f, 80, 0, 320, 1500},
     };
     for (unsigned i = 0; i < sizeof steps / sizeof *steps; i++) {
-        printf("probe-haptics: %s\n", steps[i].what);
-        fflush(stdout);
         ds_haptics_set(0, 0, 160, 0, 320), ds_haptics_set(1, 0, 160, 0, 320);
         if (steps[i].side != 1) ds_haptics_set(0, steps[i].al, steps[i].fl, steps[i].ah, steps[i].fh);
         if (steps[i].side != 0) ds_haptics_set(1, steps[i].al, steps[i].fl, steps[i].ah, steps[i].fh);
-        SDL_Delay(steps[i].ms);
-    }
-    printf("probe-haptics: sweep 40 to 400 Hz\n");
-    fflush(stdout);
-    for (int k = 0; k < 120; k++) {
-        float f = 40 + 360.0f * k / 119;
-        ds_haptics_set(0, 0, 160, 0.6f, f), ds_haptics_set(1, 0, 160, 0.6f, f);
-        SDL_Delay(25);
+        SDL_Delay(300);   // the stream's buffer and the smoothing settle
+        int n = pad ? measure(steps[i].ms, sd) : (SDL_Delay((uint32_t)steps[i].ms), 0);
+        if (pad) printf("probe-haptics: %-44s sd %.2f %.2f %.2f mg (%.1fx baseline), %d samples\n", steps[i].what, sd[0], sd[1], sd[2],
+                        (sd[0] + sd[1] + sd[2]) / (base[0] + base[1] + base[2] + 1e-9), n);
+        else printf("probe-haptics: %s\n", steps[i].what);
+        fflush(stdout);
     }
     ds_haptics_set(0, 0, 160, 0, 320), ds_haptics_set(1, 0, 160, 0, 320);
     SDL_Delay(300);
+    int n = pad ? measure(1000, sd) : 0;
+    if (pad) printf("probe-haptics: silent again: sd %.2f %.2f %.2f mg, %d samples\n", sd[0], sd[1], sd[2], n);
+    if (pad) SDL_CloseGamepad(pad);
     SDL_DestroyAudioStream(H.stream);
     H.stream = NULL;
     printf("probe-haptics: done\n");
