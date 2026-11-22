@@ -804,7 +804,7 @@ static void tab_controls(float scale) {
     opt_slider("TOTK_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
     opt_toggle("TOTK_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
     static const char *const ds_values[] = {"auto", "off"};
-    const char *ds_names[] = {menu_text(UI_MENU_DS_AUTO), menu_text(UI_MENU_OPT_OFF)};
+    const char *ds_names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_OFF)};
     opt_choice_list("TOTK_DS_HAPTICS", UI_MENU_DS_HAPTICS, ds_values, ds_names, 2, UI_MENU_DS_HAPTICS_DESC);
     opt_slider("TOTK_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 50, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");
     opt_slider("TOTK_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
