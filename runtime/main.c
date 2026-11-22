@@ -26,6 +26,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "dualsense_haptics.h"
 #include "platform/platform.h"
 #include "sha256.h"
 
@@ -622,7 +623,7 @@ static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--selftest | --probe-loader | "
                     "--probe-cfg | --probe-dpi | --probe-kernel | --probe-ipc | --probe-ipc-lifetime | --probe-services | --probe-input | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-present-color | --probe-shader | --probe-shader-geometry | --probe-vkmem | "
-                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --prepare-shaders | --warm-shaders | --play-experimental | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --probe-haptics | --prepare-shaders | --warm-shaders | --play-experimental | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -667,7 +668,6 @@ static void play_defaults(void) {
         {"HWAOI_POOL_BACKPRESSURE", "1"}, {"HWAOI_IR_BANKS", "1"}};
     for (size_t i = 0; i < sizeof env_on / sizeof *env_on; i++)
         if (!getenv(env_on[i][0])) plat_setenv(env_on[i][0], env_on[i][1]);
-    if (!cfg_is_set("TOTK_RUMBLE")) plat_setenv("HWAOI_RUMBLE", "0");
     if (!cfg_is_set("TOTK_PIPE_SKIP")) plat_setenv("HWAOI_PIPE_SKIP", "strict");
 #ifdef __linux__
     if (!getenv("HWAOI_ZLIB_DLL")) {
@@ -783,6 +783,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-astc")) return probe_astc();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
     if (!strcmp(mode, "--probe-movie")) return probe_movie();
+    if (!strcmp(mode, "--probe-haptics")) return ds_haptics_probe();
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();
     if (!strcmp(mode, "--warm-shaders")) return vk_pipeline_warm_shaders();
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }

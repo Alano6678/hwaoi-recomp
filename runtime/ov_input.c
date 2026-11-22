@@ -17,6 +17,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "dualsense_haptics.h"
 #include "input.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -416,6 +417,15 @@ static float light_share(float f) { return f > 160 ? (f < 320 ? log2f(f / 160) :
 static void rumble_update(int p, uint64_t now) {
     float heavy = 0, light = 0;
     rumble_cfg();
+    if (input_player_dualsense(p) && ds_haptics_ready()) {   // both bands of each side as audio on the actuators
+        for (int s = 0; s < 2; s++) {
+            const VibrationValue *v = &vib_last[p][s];
+            float g = rumble_strength / 1.3f;   // the strength setting, its default (130 %) = full
+            int live = vib_allowed && vib_at[p][s] && now - vib_at[p][s] <= RUMBLE_STALE_NS;
+            ds_haptics_set(s, live ? clamp01(v->amp_low) * g : 0, v->freq_low, live ? clamp01(v->amp_high) * g : 0, v->freq_high);
+        }
+        return;
+    }
     for (int s = 0; s < 2 && vib_allowed; s++) {
         if (!vib_at[p][s] || now - vib_at[p][s] > RUMBLE_STALE_NS) continue;
         const VibrationValue *v = &vib_last[p][s];

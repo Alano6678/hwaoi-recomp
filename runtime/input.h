@@ -59,6 +59,7 @@ int input_cursor_released(void);   // Esc or a non-client activation released th
 // milliseconds. 1 if a gamepad with rumble took it. Callable from any thread.
 int input_rumble(uint16_t low, uint16_t high, uint32_t ms);
 int input_rumble_player(int player, uint16_t low, uint16_t high, uint32_t ms);   // that player's gamepads
+int input_player_dualsense(int player);   // one of the player's gamepads is a DualSense
 // Motor value for a normalised amplitude: pow(a, curve) * strength, saturated to 0..65535. Pure.
 uint16_t rumble_motor(float a, float curve, float strength);
 // TOTK_RUMBLE_TRIGGERS=1: input_rumble also drives the impulse triggers (Xbox) with the high motor's value.

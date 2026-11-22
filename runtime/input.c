@@ -847,6 +847,23 @@ int input_rumble_player(int player, uint16_t low, uint16_t high, uint32_t ms) {
     return ok;
 }
 
+// 1 when one of the player's gamepads is the only wired DualSense (dualsense_haptics.c): its audio device exists only over
+// USB, and SDL does not say which audio device belongs to which pad, so with two wired DualSenses the normal rumble stays.
+int input_player_dualsense(int player) {
+    int mine = 0, wired = 0;
+    plat_mutex_lock(&lock);
+    if (state == 1) assign();
+    for (int i = 0; state == 1 && i < npads; i++) {
+        if (SDL_GetGamepadType(pads[i].g) != SDL_GAMEPAD_TYPE_PS5 ||
+            SDL_GetGamepadConnectionState(pads[i].g) != SDL_JOYSTICK_CONNECTION_WIRED)
+            continue;
+        wired++;
+        if (pad_owner[i] == player) mine = 1;
+    }
+    plat_mutex_unlock(&lock);
+    return mine && wired == 1;
+}
+
 int input_rumble(uint16_t low, uint16_t high, uint32_t ms) { return input_rumble_player(0, low, high, ms); }
 
 // SDL gamepad sensor axes (SDL_sensor.h, a gamepad held in front of you): x to the right, y up out of the face (lying

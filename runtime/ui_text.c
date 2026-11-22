@@ -169,6 +169,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_CURVE_DESC] = "Lower values make weak vibration stronger.",
     [UI_MENU_RUMBLE_TRIGGERS] = "Trigger vibration (Xbox)",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Vibrates the triggers of an Xbox controller too.",
+    [UI_MENU_DS_HAPTICS] = "DualSense haptics",
+    [UI_MENU_DS_HAPTICS_DESC] = "Plays the game's HD rumble on a DualSense's voice-coil actuators (USB only) instead of ordinary vibration.",
     [UI_MENU_PAD_LAYOUT] = "Button layout",
     [UI_MENU_PAD_LAYOUT_DESC] = "Which button is A. Nintendo: the right one, as on a Switch. Xbox: the bottom one, as "
                                 "labelled on an Xbox controller (cross on a PlayStation controller). Automatic picks "
@@ -493,6 +495,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_CURVE_DESC] = "Чем ниже значение, тем сильнее слабая вибрация.",
     [UI_MENU_RUMBLE_TRIGGERS] = "Вибрация триггеров (Xbox)",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Вибрация и в триггерах контроллера Xbox.",
+    [UI_MENU_DS_HAPTICS] = "Тактильный отклик DualSense",
+    [UI_MENU_DS_HAPTICS_DESC] = "Воспроизводит HD-вибрацию игры на линейных актуаторах DualSense (только USB) вместо обычной вибрации.",
     [UI_MENU_PAD_LAYOUT] = "Раскладка кнопок",
     [UI_MENU_PAD_LAYOUT_DESC] = "Какая кнопка работает как A. Nintendo: правая, как на Switch. Xbox: нижняя, как "
                                 "подписано на контроллере Xbox (крест на контроллере PlayStation). Автоматически: "
@@ -837,6 +841,8 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_CURVE_DESC] = "调低数值可加强较弱的振动。",
     [UI_MENU_RUMBLE_TRIGGERS] = "扳机振动（Xbox）",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "为 Xbox 手柄的扳机启用振动。",
+    [UI_MENU_DS_HAPTICS] = "DualSense 触觉反馈",
+    [UI_MENU_DS_HAPTICS_DESC] = "通过 DualSense 的线性马达播放游戏的 HD 振动（仅限 USB），而不是普通振动。",
     [UI_MENU_PAD_LAYOUT] = "手柄按键布局",
     [UI_MENU_PAD_LAYOUT_DESC] = "任天堂布局的 A 键在右侧，Xbox 布局的 A 键在下方，对应 PlayStation 手柄的叉键。自动会按手柄类型选择。Xbox 键位提示保留右侧 A 键，并以 B、A、Y、X 分别提示 A、B、X、Y，重启后生效。更改按键绑定后，游戏原有的提示字母会保留。",
     [UI_MENU_PAD_LAYOUT_AUTO] = "自动",
