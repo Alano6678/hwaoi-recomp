@@ -609,8 +609,9 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
                 !(img->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
                 !sampled_format_compatible(img->format, requested.vk))
                 rt_fatal("vk: unsupported sampled view reinterpretation nvn=%u Vulkan %d -> %d "
-                         "flags=%#x aspect=%#x samples=%u", v->format, (int)img->format, (int)requested.vk,
-                         img->create_flags, img->aspect, img->samples);
+                         "flags=%#x aspect=%#x samples=%u addr=%#llx extent=%ux%ux%u levels=%u layers=%u",
+                         v->format, (int)img->format, (int)requested.vk, img->create_flags, img->aspect, img->samples,
+                         (unsigned long long)img->addr, img->width, img->height, img->depth, img->levels, img->layers);
             format = requested.vk;
         }
     }

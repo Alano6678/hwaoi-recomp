@@ -1090,21 +1090,143 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
     *has_view = s->has_view;
     TexKey k;
     make_key(&s->t, &k);
+    uint32_t want_w = k.d.width > 1 ? k.d.width : 1u;
+    uint32_t want_h = (k.d.target == NVN_TEXTURE_TARGET_1D || k.d.target == NVN_TEXTURE_TARGET_1D_ARRAY)
+                          ? 1u : (k.d.height > 1 ? k.d.height : 1u);
+    uint32_t want_d = k.d.target == NVN_TEXTURE_TARGET_3D ? (k.d.depth > 1 ? k.d.depth : 1u) : 1u;
+    uint32_t want_samples = k.d.samples > 1 ? (uint32_t)k.d.samples : 1u;
+    uint32_t s_levels = k.d.levels > 1 ? k.d.levels : 1u;
+    uint32_t most = 1u, dim = want_w > want_h ? want_w : want_h;
+    if (want_d > dim) dim = want_d;
+    for (; dim > 1; dim >>= 1) most++;
+    if (s_levels > most) s_levels = most;
+    if (want_samples > 1) s_levels = 1u;
+    uint32_t s_layers = 1u;
+    switch (k.d.target) {
+    case NVN_TEXTURE_TARGET_1D_ARRAY:
+        s_layers = s->t.L.layers ? s->t.L.layers : (k.d.height > 1 ? k.d.height : 1u);
+        break;
+    case NVN_TEXTURE_TARGET_2D_ARRAY:
+    case NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY:
+    case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY:
+        s_layers = s->t.L.layers ? s->t.L.layers : (k.d.depth > 1 ? k.d.depth : 1u);
+        break;
+    case NVN_TEXTURE_TARGET_CUBEMAP:
+        s_layers = s->t.L.layers ? s->t.L.layers : 6u;
+        break;
+    default:
+        break;
+    }
     Tex *e = nvn_hm_get(&by_key, &k);
     if (!e || e->released) {   // MNG hle_nvn.c: a finalized slot follows the live texture at its storage
         // Prefer the live entry that differs from the slot descriptor only in its swizzle: transient render targets
         // share storage, and the newest one at the address is usually another size. The map screen samples its
         // 2250x1080 map target through an (R,G,B,1) descriptor and followed a 960x60 target at the same address.
+        // Only follow a live entry whose format, usage, geometry, and subresource range can serve this slot without
+        // failing get_view() (including linear storage bindings over sRGB images) or degrading to a dummy binding.
+        // When no compatible live entry exists, fall through to own or entry_of(&s->t).
         Tex *own = e, *any = NULL;
+        int want_fmt = s->has_view && s->v.set_format ? (int)s->v.format : k.d.format;
+        int slot_view_ok = want_fmt == k.d.format || (want_samples == 1 &&
+            ((k.d.format == NVN_FORMAT_RGBA8_SRGB && want_fmt == NVN_FORMAT_RGBA8) ||
+             (k.d.format == NVN_FORMAT_RGBA8 && want_fmt == NVN_FORMAT_RGBA8_SRGB) ||
+             (k.d.format == NVN_FORMAT_RGBA_DXT1 && want_fmt == NVN_FORMAT_RGBA_DXT1_SRGB) ||
+             (k.d.format == NVN_FORMAT_RGBA_DXT5 && want_fmt == NVN_FORMAT_RGBA_DXT5_SRGB) ||
+             (k.d.format == NVN_FORMAT_BPTC_UNORM && want_fmt == NVN_FORMAT_BPTC_UNORM_SRGB)));
+        uint32_t need_levels = s_levels;
+        if (s->has_view && s->v.set_levels) {
+            uint32_t l0 = s->v.base_level;
+            uint32_t nl = s->v.nlevels ? s->v.nlevels : (s_levels > l0 ? s_levels - l0 : 1u);
+            need_levels = l0 + nl;
+        }
+        uint32_t need_layers = s_layers;
+        if (k.d.target != NVN_TEXTURE_TARGET_3D && s->has_view && s->v.set_layers) {
+            uint32_t y0 = s->v.min_layer;
+            uint32_t ny = s->v.nlayers ? s->v.nlayers : (s_layers > y0 ? s_layers - y0 : 1u);
+            need_layers = y0 + ny;
+        }
         e = NULL;
-        for (Tex *p = nvn_hm_get(&by_addr, &k.addr); p; p = p->next_at) {
+        int s_lin = nvn_tex_is_linear(&k.d);
+        for (Tex *p = slot_view_ok ? nvn_hm_get(&by_addr, &k.addr) : NULL; p; p = p->next_at) {
             if (p->released) continue;
-            if (!any) any = p;
+            int pf = p->key.d.format;
+            int same_fmt = pf == want_fmt;
+            int xfmt = !same_fmt && p->pub.samples == 1 &&
+                       (p->pub.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+                       (p->pub.usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+                       p->pub.aspect == VK_IMAGE_ASPECT_COLOR_BIT && !p->pub.alpha_one && !p->pub.chan[0] &&
+                       ((pf == NVN_FORMAT_RGBA8_SRGB && want_fmt == NVN_FORMAT_RGBA8 &&
+                         p->pub.format == VK_FORMAT_R8G8B8A8_SRGB &&
+                         (p->pub.usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+                         (p->pub.create_flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) ||
+                        (pf == NVN_FORMAT_RGBA8 && want_fmt == NVN_FORMAT_RGBA8_SRGB &&
+                         p->pub.format == VK_FORMAT_R8G8B8A8_UNORM) ||
+                        (pf == NVN_FORMAT_RGBA_DXT1 && want_fmt == NVN_FORMAT_RGBA_DXT1_SRGB &&
+                         p->pub.format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK) ||
+                        (pf == NVN_FORMAT_RGBA_DXT5 && want_fmt == NVN_FORMAT_RGBA_DXT5_SRGB &&
+                         p->pub.format == VK_FORMAT_BC3_UNORM_BLOCK) ||
+                        (pf == NVN_FORMAT_BPTC_UNORM && want_fmt == NVN_FORMAT_BPTC_UNORM_SRGB &&
+                         p->pub.format == VK_FORMAT_BC7_UNORM_BLOCK));
+            if (!same_fmt && !xfmt) continue;
+            if (p->pub.samples != want_samples || p->key.d.target != k.d.target ||
+                p->pub.width != want_w || p->pub.height != want_h || p->pub.depth != want_d ||
+                p->pub.levels < need_levels || p->pub.layers < need_layers)
+                continue;
+            // Require matching guest storage layout for every requested subresource: pitch vs block-linear,
+            // block size (bpb), GOB tile geometry (which governs every mip offset), and per-layer stride
+            // whenever layer >= 1 is accessed.
+            if (nvn_tex_is_linear(&p->key.d) != s_lin) continue;
+            if (p->t.L.bpb != s->t.L.bpb) continue;
+            if (s_lin) {
+                if (p->t.L.layer_size != s->t.L.layer_size ||
+                    ((!s->t.L.layer_size || !p->t.L.layer_size) &&
+                     (p->key.d.stride != k.d.stride || (p->key.d.flags & 0x40) != (k.d.flags & 0x40))))
+                    continue;
+            } else {
+                if (p->t.L.tileH != s->t.L.tileH || p->t.L.tileD != s->t.L.tileD ||
+                    ((!s->t.L.bpb || !p->t.L.bpb) &&
+                     (p->key.d.pkg_block_h != k.d.pkg_block_h || (p->key.d.flags & 0x200) != (k.d.flags & 0x200))))
+                    continue;
+                if (need_layers > 1 && (p->t.L.layer_size != s->t.L.layer_size || p->pub.levels != s_levels))
+                    continue;
+            }
             if (same_but_swizzle(&p->key, &k)) { e = p; break; }
+            if (!any) any = p;
         }
         if (!e) e = any ? any : own;
     }
     if (!e) e = s->t.mem ? entry_of(&s->t) : NULL;
+    // A followed cross-format alias must preserve the slot's effective NVN format in the returned view,
+    // otherwise get_view() would sample the followed image's base format (e.g. UNORM 37 instead of sRGB 43).
+    if (e && e->key.d.format != k.d.format && !(s->has_view && s->v.set_format)) {
+        if (!*has_view) memset(view, 0, sizeof *view);
+        view->format = (uint32_t)k.d.format;
+        view->set_format = 1;
+        *has_view = 1;
+    }
+    // If a followed alias has more mips/layers than the slot's descriptor, clamp implicit subresource ranges
+    // so get_view() exposes only the slot's declared mip/layer extent.
+    if (e && e->pub.levels > s_levels && !(s->has_view && s->v.set_levels && s->v.nlevels)) {
+        uint32_t l0 = s->has_view && s->v.set_levels ? s->v.base_level : 0u;
+        if (l0 < s_levels) {
+            if (!*has_view) memset(view, 0, sizeof *view);
+            view->base_level = (uint8_t)l0;
+            view->nlevels = (uint8_t)(s_levels - l0);
+            view->set_levels = 1;
+            *has_view = 1;
+        }
+    }
+    if (e && k.d.target != NVN_TEXTURE_TARGET_3D && e->pub.layers > s_layers &&
+        !(s->has_view && s->v.set_layers && s->v.nlayers)) {
+        uint32_t y0 = s->has_view && s->v.set_layers ? s->v.min_layer : 0u;
+        if (y0 < s_layers && s_layers - y0 <= 65535u) {
+            if (!*has_view) memset(view, 0, sizeof *view);
+            view->min_layer = (uint16_t)y0;
+            view->nlayers = (uint16_t)(s_layers - y0);
+            view->set_layers = 1;
+            *has_view = 1;
+        }
+    }
     // A followed texture is another descriptor at the same storage: its image holds the content, but sampling takes the
     // slot descriptor's swizzle. The UI renders text into RGBA8 and samples it through a (A,A,A,A) descriptor; with the
     // render target's RGBA swizzle the text blur saw R = 1 everywhere and drew solid boxes behind tips and labels.
@@ -1115,7 +1237,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
             sw[0] = NVN_TEXTURE_SWIZZLE_R, sw[1] = NVN_TEXTURE_SWIZZLE_G, sw[2] = NVN_TEXTURE_SWIZZLE_B,
             sw[3] = NVN_TEXTURE_SWIZZLE_A;
         if (memcmp(sw, e->pub.swz, 4)) {
-            if (!s->has_view) memset(view, 0, sizeof *view);
+            if (!*has_view) memset(view, 0, sizeof *view);
             memcpy(view->swz, sw, 4);
             view->set_swizzle = 1;
             *has_view = 1;

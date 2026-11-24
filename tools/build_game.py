@@ -59,6 +59,7 @@ import ctypes.wintypes as wt   # the job-object structures below; importing it w
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,9 +95,29 @@ NINJA = UCRT / 'ninja.exe' if WIN else on_path('ninja')
 SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll'] if WIN else []
 
 # Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
+# Keep the ISA strictly capped at x86-64-v3 (AVX2/FMA/BMI2): runtime/kernel.c's async preemption stub only preserves
+# YMM0-15 and MXCSR, not AVX-512 state (ZMM/XMM16-31/k0-k7). Scheduling tuning (-mtune=native) adapts dynamically to
+# the host CPU without widening the emitted instruction set.
 GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden',
-             '-march=x86-64-v3']
-RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing', '-march=x86-64-v3']
+             '-march=x86-64-v3', '-mtune=native']
+RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing', '-march=x86-64-v3', '-mtune=native']
+
+
+def configure_compile_flags(gen_flags, rt_flags, *, gen_opt='O1', tune='native', portable=False):
+    """Apply optimization level and CPU scheduling tuning while keeping the x86-64-v3 ISA cap."""
+    if gen_opt not in ('O1', 'O2'):
+        raise ValueError(f'unsupported --gen-opt {gen_opt!r} (expected O1 or O2)')
+    if not tune or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', tune):
+        raise ValueError(f'invalid --tune target {tune!r}')
+    effective_tune = 'generic' if (portable and tune == 'native') else tune
+    gen_out = [f'-{gen_opt}' if f in ('-O1', '-O2') else (f'-mtune={effective_tune}' if f.startswith('-mtune=') else f)
+               for f in gen_flags]
+    rt_out = [f'-mtune={effective_tune}' if f.startswith('-mtune=') else f for f in rt_flags]
+    if not any(f.startswith('-mtune=') for f in gen_out):
+        gen_out.append(f'-mtune={effective_tune}')
+    if not any(f.startswith('-mtune=') for f in rt_out):
+        rt_out.append(f'-mtune={effective_tune}')
+    return gen_out, rt_out
 if WIN:
     # _WIN32_WINNT: Windows 10, the port's minimum. MSYS2's headers default to it, llvm-mingw's (the release toolchain)
     # to Windows 7, which hides the per-monitor DPI functions gfx_window_win.c and dpi_probe_win.c call.
@@ -763,6 +784,11 @@ def main():
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
     ap.add_argument('--toolchain-stamp', type=Path, help='validated compiler/dependency identity; changes rebuild objects')
     ap.add_argument('--icon', type=Path, help='an .ico to embed as the executable and window icon')
+    ap.add_argument('--gen-opt', choices=('O1', 'O2'), default='O1',
+                    help='optimization level for generated C (default O1; O2 uses more build RAM/time)')
+    ap.add_argument('--tune', default='native',
+                    help='Clang -mtune target (default native for local builds, generic for portable/sysroot builds; '
+                         'ISA remains capped at x86-64-v3)')
     ap.add_argument('--expected', type=Path,
                     help='expected hashes (default tools/data/expected-<display version>.json)')
     args = ap.parse_args()
@@ -780,7 +806,14 @@ def main():
             sys.exit(f'no expected hashes known for {args.version}; pass --expected')
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
     hashes = json.loads(Path(expected).read_text(encoding='utf-8'))['exefs_sha256']
-    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS, ICON
+    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS, ICON, GEN_FLAGS, RT_FLAGS
+    try:
+        GEN_FLAGS, RT_FLAGS = configure_compile_flags(
+            GEN_FLAGS, RT_FLAGS, gen_opt=args.gen_opt, tune=args.tune,
+            portable=bool(args.make_runtime_lib or args.sysroot),
+        )
+    except ValueError as exc:
+        sys.exit(f'build_game: {exc}')
     if args.icon:
         if not args.icon.is_file():
             sys.exit(f'build_game: icon {args.icon} not found')
