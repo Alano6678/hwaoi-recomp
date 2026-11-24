@@ -416,6 +416,10 @@ def build_parser():
     build.add_argument("--jobs", type=int, default=0, help="0 selects workers from available RAM/commit; 1..8 sets a ceiling")
     build.add_argument("--toolchain-stamp", type=Path, help="compiler/dependency identity for incremental builds")
     build.add_argument("--icon", type=Path, help="the game's .ico (tools/hwaoi_icon.py) to embed in the executable")
+    build.add_argument("--gen-opt", choices=("O1", "O2"), default="O1",
+                       help="optimization level for generated C (default O1; O2 uses more build RAM/time)")
+    build.add_argument("--tune", default="native",
+                       help="Clang -mtune scheduling target (default native; ISA remains capped at x86-64-v3)")
     launch = sub.add_parser("launch", help="Open the experimental game with live input and local logs")
     launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608" / GAME_EXE)
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
@@ -514,7 +518,8 @@ def dispatch(args):
                      "--gen", generated, "--out", out, "--expected", generated / "expected.json",
                      "--exefs", args.exefs.resolve(), "--romfs", args.romfs.resolve(),
                      "--profile", ROOT / "work/saves/hwaoi196608", "--toolchain", args.toolchain,
-                     "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build"]
+                     "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build",
+                     "--gen-opt", args.gen_opt, "--tune", args.tune]
                 if args.toolchain_stamp:
                     need(args.toolchain_stamp.is_file(), "toolchain identity stamp is missing")
                     command += ["--toolchain-stamp", args.toolchain_stamp.resolve()]

@@ -40,6 +40,36 @@ class BuildSpeedTests(unittest.TestCase):
             layout.write([("main", 0x200000, 4096)], out)
             self.assertIn("0x200000", (out / "layout.h").read_text())
 
+    def test_compile_flags_dynamic_tune_and_avx2_cap(self):
+        gen_def, rt_def = build_game.configure_compile_flags(build_game.GEN_FLAGS, build_game.RT_FLAGS)
+        self.assertIn("-O1", gen_def)
+        self.assertIn("-O2", rt_def)
+        self.assertIn("-march=x86-64-v3", gen_def)
+        self.assertIn("-mtune=native", gen_def)
+        self.assertIn("-march=x86-64-v3", rt_def)
+        self.assertIn("-mtune=native", rt_def)
+        self.assertFalse(any(f.startswith("-march=") and f != "-march=x86-64-v3" for f in gen_def + rt_def))
+
+        gen_o2, rt_o2 = build_game.configure_compile_flags(
+            build_game.GEN_FLAGS, build_game.RT_FLAGS, gen_opt="O2", tune="znver4"
+        )
+        self.assertIn("-O2", gen_o2)
+        self.assertNotIn("-O1", gen_o2)
+        self.assertIn("-mtune=znver4", gen_o2)
+        self.assertIn("-mtune=znver4", rt_o2)
+        self.assertIn("-march=x86-64-v3", gen_o2)
+
+        gen_port, rt_port = build_game.configure_compile_flags(
+            build_game.GEN_FLAGS, build_game.RT_FLAGS, portable=True
+        )
+        self.assertIn("-mtune=generic", gen_port)
+        self.assertIn("-mtune=generic", rt_port)
+
+        with self.assertRaises(ValueError):
+            build_game.configure_compile_flags(build_game.GEN_FLAGS, build_game.RT_FLAGS, gen_opt="O3")
+        with self.assertRaises(ValueError):
+            build_game.configure_compile_flags(build_game.GEN_FLAGS, build_game.RT_FLAGS, tune="native -march=native")
+
     @unittest.skipUnless(os.name == "nt" and Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang/Ninja")
     def test_ninja_noop_parallelism_and_compiler_stamp(self):
         with tempfile.TemporaryDirectory(prefix="hwaoi-build speed-") as tmp:
