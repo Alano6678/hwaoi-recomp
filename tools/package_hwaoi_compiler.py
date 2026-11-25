@@ -54,7 +54,7 @@ def source_files():
     raw = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT)
     for name in sorted(set(raw.decode("utf-8").split("\0")) - {""}):
         path = Path(name)
-        if path.parts[0] in ("compiler", "config", "recomp", "runtime", "tools", "tests") or name in (
+        if path.parts[0] in ("compiler", "config", "packaging", "recomp", "runtime", "tools", "tests") or name in (
                 "LICENSE", "LICENSE-MIT", "THIRD_PARTY_NOTICES.md", "README.md", "VERSION", "AGENTS.md"):
             problems = check_content.problems_for(ROOT / path)
             if problems:
@@ -84,6 +84,7 @@ def package(args):
     out.mkdir(parents=True)
     for relative in source_files():
         copy(ROOT / relative, out / "source" / relative)
+    copy(ROOT / "packaging/recomplauncher.json", out / "recomplauncher.json")
     # Standard-library Python with only the packages the verified NUP/generator needs.
     for path in args.python.iterdir():
         if path.is_file() and (path.suffix.lower() in (".exe", ".dll") or path.name == "LICENSE.txt"):
