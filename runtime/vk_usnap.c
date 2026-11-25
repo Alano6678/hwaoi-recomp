@@ -112,7 +112,9 @@ static void collect(const op_hdr *h, int depth) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk_usnap: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
-        const void *a = nvn_op_payload(h);
+        NvnOpScratch normalized;
+        const void *a = nvn_op_normalize(h, &normalized);
+        if (!a) rt_fatal("vk_usnap: invalid packed record op %u size %u", h->op, h->size);
         if (h->op == OP_END) return;
         if (h->op == OP_JUMP) {
             h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target;
@@ -124,6 +126,7 @@ static void collect(const op_hdr *h, int depth) {
             if (b->addr && b->size) {
                 if (U.ncol == U.ccol) U.col = grow(U.col, &U.ccol, sizeof *U.col);
                 uint64_t n = b->size < MAX_RANGE ? b->size : MAX_RANGE;
+                if (b->addr > UINT64_MAX - n) rt_fatal("vk_usnap: uniform range address overflow");
                 U.col[U.ncol++] = (Rng){b->addr & ~(uint64_t)(ALIGN - 1), b->addr + n};
             }
         }
@@ -278,16 +281,34 @@ static int first_above(uint64_t a) {
     return lo;
 }
 
-int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
-    if (!U.on || !n) return 0;
+static int snapshot_span(uint64_t addr, uint64_t n, uint64_t *offset) {
+    if (!U.on || !U.arena || !n || addr > UINT64_MAX - n) return 0;
     int i = first_above(addr);
     if (i >= U.nreg) return 0;
     const Reg *r = &U.reg[i];
-    if (r->dropped || addr < r->lo || addr + n > r->hi) return 0;
-    uint64_t off = r->off + (addr - r->lo);
-    if (off % align) return 0;
+    if (r->dropped || addr < r->lo || addr >= r->hi || n > r->hi - addr) return 0;
+    uint64_t delta = addr - r->lo;
+    if (r->off > UINT64_MAX - delta) return 0;
+    uint64_t off = r->off + delta;
+    if (off > U.arena->size || n > U.arena->size - off) return 0;
+    *offset = off;
+    return 1;
+}
+
+int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
+    uint64_t off;
+    if (!out || !align || !snapshot_span(addr, n, &off) || off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
     U.hits++;
+    return 1;
+}
+
+int vk_usnap_read(uint64_t addr, void *out, size_t n) {
+    uint64_t off;
+    if (!out || !snapshot_span(addr, n, &off) || !U.arena->map) return 0;
+    // The active replay owns this immutable arena until its GPU fence completes.
+    // Read these bytes, rather than guest storage the producer may have reused.
+    memcpy(out, U.arena->map + off, n);
     return 1;
 }
 

@@ -99,6 +99,7 @@ uint64_t gfx_shader_failures(void);                         // failed translatio
 enum { GFX_RES_UBO, GFX_RES_SSBO, GFX_RES_TEX, GFX_RES_IMG, GFX_RES_KINDS };
 // Version 1 requires guarded SSBOs to expose zero array elements when their address cannot be bound.
 enum { GFX_STORAGE_CANDIDATES_VERSION = 1, GFX_RES_SSBO_GUARDED = 0x80 };
+enum { GFX_SAMPLED_UNKNOWN, GFX_SAMPLED_FLOAT, GFX_SAMPLED_SINT, GFX_SAMPLED_UINT };
 typedef struct {
     uint16_t set, binding;      // as the SPIR-V decorates them: set 0, bindings from 1 per shader (0: support buffer)
     int16_t slot;               // UBO: c[slot]; SSBO: storage buffer index; TEX: c2 combined slot (handle at 0x20 + 8 slot)
@@ -111,6 +112,7 @@ typedef struct {
     uint16_t handle;            // TEX/IMG: raw handle (word offset; separate: texture | sampler << 14); SSBO: address offset
     uint16_t count;             // descriptors (array length)
     uint8_t separate;           // TEX: texture and sampler handles are separate
+    uint8_t sampled_type;        // buffer textures/images: actual SPIR-V scalar type, GFX_SAMPLED_*; not guessed from NVN format
 } GfxShaderRes;
 typedef struct { uint8_t type, comps, packed, scalar_bits; } GfxShaderIo;   // scalar_bits: actual numeric SPIR-V width, 0 unknown
 int gfx_shader_stage(const GfxShader *s);                   // GFX_STAGE_VS, GFX_STAGE_GS, GFX_STAGE_FS or GFX_STAGE_CS

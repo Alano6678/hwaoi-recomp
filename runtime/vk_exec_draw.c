@@ -35,6 +35,7 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_texel_policy.h"
 #include "nvn_program_source.h"
 #include "platform/platform.h"
 
@@ -358,7 +359,7 @@ static struct {
     int ready;
     VkBuffer zbuf;
     VmaAllocation zalloc;
-    VkBufferView zview;
+    VkBufferView zview[4];
     VkSampler samp, samp_shadow;
     struct { VkImage image; VmaAllocation alloc; VkImageView view, sview; } img[DV_COUNT];
 } Z;
@@ -451,7 +452,11 @@ static void dummies_init(void) {
     memset(info.pMappedData, 0, ZERO_BYTES);
     VkBufferViewCreateInfo bv = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = Z.zbuf,
                                  .format = VK_FORMAT_R32G32B32A32_SFLOAT, .range = ZERO_BYTES};
-    if (vkCreateBufferView(c->device, &bv, NULL, &Z.zview) != VK_SUCCESS) rt_fatal("vk: zero buffer view failed");
+    for (unsigned scalar = GFX_SAMPLED_FLOAT; scalar <= GFX_SAMPLED_UINT; scalar++) {
+        bv.format = vk_texel_zero_format(scalar);
+        if (vkCreateBufferView(c->device, &bv, NULL, &Z.zview[scalar]) != VK_SUCCESS)
+            rt_fatal("vk: typed zero buffer view failed (%u)", scalar);
+    }
     samp_par sp;
     memset(&sp, 0, sizeof sp);
     sp.lod_max = 1000.0f;
@@ -496,7 +501,8 @@ void vk_exec_draw_shutdown(void) {
     vk_vertex_cache_shutdown();
     texel_views_shutdown(c);
     if (Z.ready) {
-        vkDestroyBufferView(c->device, Z.zview, NULL);
+        for (unsigned scalar = GFX_SAMPLED_FLOAT; scalar <= GFX_SAMPLED_UINT; scalar++)
+            vkDestroyBufferView(c->device, Z.zview[scalar], NULL);
         vmaDestroyBuffer(c->vma, Z.zbuf, Z.zalloc);
     }
     memset(&Z, 0, sizeof Z);
@@ -1389,7 +1395,7 @@ static VkBufferView texel_view_of(VkBuffer buf, VkDeviceSize off, VkDeviceSize r
 }
 
 // The texel buffer view for handle h of a buffer texture slot, or VK_NULL_HANDLE (the caller binds the zero view).
-static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage) {
+static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage, unsigned scalar) {
     uint64_t addr;
     int nvn_format;
     uint32_t elements;
@@ -1399,9 +1405,12 @@ static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage) {
     if (!found) return VK_NULL_HANDLE;
     TexVkFormat tf;
     if (!tex_vk_format(nvn_format, &tf) || tf.expand_rgb || tf.astc_bw) return VK_NULL_HANDLE;
+    VkFormat sampled = vk_texel_sample_format(tf.vk, scalar, storage);
+    if (sampled == VK_FORMAT_UNDEFINED)
+        rt_fatal("vk: unsupported texel-buffer numeric type: format %d sampled %u storage %d", tf.vk, scalar, storage);
     VkDeviceSize align;
-    uint32_t max_elements, bytes = texel_bytes(tf.vk);
-    if (!bytes || !texel_format_ok(tf.vk, storage, &align, &max_elements)) return VK_NULL_HANDLE;
+    uint32_t max_elements, bytes = texel_bytes(sampled);
+    if (!bytes || bytes != texel_bytes(tf.vk) || !texel_format_ok(sampled, storage, &align, &max_elements)) return VK_NULL_HANDLE;
     if (elements > max_elements) elements = max_elements;
     VkDescriptorBufferInfo bi;
     if (!bind_range(ex, addr, (uint64_t)elements * bytes, align, (uint64_t)max_elements * bytes,
@@ -1410,7 +1419,7 @@ static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage) {
     VkDeviceSize range = bi.range / bytes * bytes;
     if (!range) return VK_NULL_HANDLE;
     if (storage) note_written(ex, addr, bi.range);
-    return texel_view_of(bi.buffer, bi.offset, range, tf.vk);
+    return texel_view_of(bi.buffer, bi.offset, range, sampled);
 }
 
 static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
@@ -2664,8 +2673,10 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     int slot = r->slot + (int)k;
                     uint64_t h = img ? (slot >= 0 && slot < 32 ? ex->img[st][slot] : 0)
                                      : (slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0);
-                    VkBufferView view = texel_view(ex, h, img);
-                    if (view == VK_NULL_HANDLE) view = Z.zview;
+                    if (r->sampled_type < GFX_SAMPLED_FLOAT || r->sampled_type > GFX_SAMPLED_UINT)
+                        rt_fatal("vk: texel-buffer SPIR-V scalar type missing");
+                    VkBufferView view = texel_view(ex, h, img, r->sampled_type);
+                    if (view == VK_NULL_HANDLE) view = Z.zview[r->sampled_type];
                     o[k].w[0] = 0, o[k].w[1] = 0, o[k].w[2] = 0;
                     o[k].view = view;
                     if (need_w) bv[nd + k] = view;

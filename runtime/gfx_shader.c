@@ -42,6 +42,7 @@
 
 #include "cfg.h"
 #include "gfx.h"
+#include "gfx_texel_reflect.h"
 #include "host.h"
 #include "nvn_geometry_control.h"
 #include "platform/platform.h"
@@ -1174,6 +1175,11 @@ static int reflect(GfxShader *s, int require_c0) {
             return 0;
         }
     reflect_spirv(s);
+    if (!gfx_reflect_texel_types(s->spirv, s->words, s->res[GFX_RES_TEX], s->nres[GFX_RES_TEX]) ||
+        !gfx_reflect_texel_types(s->spirv, s->words, s->res[GFX_RES_IMG], s->nres[GFX_RES_IMG])) {
+        rt_log("gfx_shader: texel-buffer sampled scalar type is missing or invalid in SPIR-V");
+        return 0;
+    }
     if (s->geometry_source_passthrough) {
         if (s->geometry_position != 3) return 0;
         uint32_t locations = 0;
