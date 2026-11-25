@@ -166,6 +166,14 @@ static void cache_path_init(void) {
     snprintf(P.cache_path, sizeof P.cache_path, "%s/pipeline-cache.bin", exe);
 }
 
+// Intel's Windows driver faults in vkGetPipelineCacheData while another thread builds a pipeline into the same cache
+// (igvk64 101.9175 on an Xe iGPU, device 0x7d67: a read at 0x190 on the first autosave, two seconds into every boot).
+// There the copy takes cache_rw exclusively and every build that uses P.cache takes it shared; other drivers
+// synchronise P.cache themselves, as Vulkan asks, and take no lock.
+static PlatMutex cache_rw = PLAT_MUTEX_INIT;
+static void cache_build_begin(void) { if (vk_caps.intel_win) plat_mutex_lock_shared(&cache_rw); }
+static void cache_build_end(void) { if (vk_caps.intel_win) plat_mutex_unlock_shared(&cache_rw); }
+
 // Cache data whose header names another device or driver is dropped before Vulkan sees it.
 static void cache_load(VkCtx *c) {
     cache_path_init();
@@ -195,6 +203,7 @@ static void cache_load(VkCtx *c) {
         if (vkCreatePipelineCache(c->device, &ci, NULL, &P.cache) != VK_SUCCESS) P.cache = VK_NULL_HANDLE;
     }
     free(data);
+    if (vk_caps.intel_win) rt_log("vk_pipeline: Intel driver: the cache is copied only between pipeline builds");
 }
 
 static void keys_open(void);
@@ -2003,7 +2012,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     if (k->fbl & 1) pi.flags |= VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     if (k->fbl & 2) pi.flags |= VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     uint64_t p0 = perf_begin();
+    cache_build_begin();
     VkResult r = vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe);
+    cache_build_end();
     perf_end(PERF_PIPE, p0);   // counts on the render thread only, so background builds stay out of it
     if (r != VK_SUCCESS) {
         rt_log("vk_pipeline: vkCreateGraphicsPipelines failed (%d)", (int)r);
@@ -2155,7 +2166,9 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         ri.depthAttachmentFormat = (VkFormat)k->depth, ri.stencilAttachmentFormat = (VkFormat)k->stencil;
         pi.pColorBlendState = &cb, pi.pMultisampleState = &ms;
     }
+    cache_build_begin();
     if (vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    cache_build_end();
 out:
     if (m) vkDestroyShaderModule(P.device, m, NULL);
     free(patched);
@@ -3095,7 +3108,9 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
                                       .layout = l->layout};
     pin_subgroup32(&ci.stage, &rqc, code, words);
     VkPipeline pipe = VK_NULL_HANDLE;
+    cache_build_begin();
     if (vkCreateComputePipelines(P.device, P.cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    cache_build_end();
     vkDestroyShaderModule(P.device, m, NULL);
     return pipe;
 }
@@ -3810,10 +3825,11 @@ void vk_pipeline_save(void) {
     }
     size_t size = 0;
     void *data = NULL;
-    if (vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
-        vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS) {
-        if (!plat_file_write_atomic(P.cache_path, data, size)) rt_log("vk_pipeline: cannot write %s", P.cache_path);
-    }
+    if (vk_caps.intel_win) plat_mutex_lock(&cache_rw);   // between builds there (cache_build_begin)
+    int got = vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
+              vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS;
+    if (vk_caps.intel_win) plat_mutex_unlock(&cache_rw);
+    if (got && !plat_file_write_atomic(P.cache_path, data, size)) rt_log("vk_pipeline: cannot write %s", P.cache_path);
     free(data);
     plat_mutex_unlock(&save_lock);
 }
@@ -3858,7 +3874,7 @@ void vk_pipeline_shutdown(void) {
     workers_drain();   // jobs point at layouts and Pipe entries freed below
     vk_pipeline_save();
     plat_mutex_lock(&P.lock);
-    vkDeviceWaitIdle(P.device);
+    vk_device_idle(P.device);
     for (int i = 0; i < PIPE_BUCKETS; i++) {
         for (Pipe *p = pipes[i], *n; p; p = n) {
             n = p->next;

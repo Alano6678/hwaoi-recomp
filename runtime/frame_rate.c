@@ -129,9 +129,16 @@ static int limit_parse(void) {
     if (RT_TARGET_HWAOI) {
         if (!strcmp(e, "30")) return 30;
         if (!strcmp(e, "60")) return 60;
-        if (!strcmp(e, "90")) return 90;
-        if (!strcmp(e, "120")) return 120;
-        rt_fatal("frame rate: HWAoI FPS_LIMIT must be 30, 60, 90 or 120");
+        // 90 and 120 remain for the developer rate experiments (native unlock or EXPERIMENTAL_RATE=1). Players get 30
+        // or 60; another value, such as one an older menu saved, plays at 60.
+        const char *experiment = cfg_get("TOTK_EXPERIMENTAL_RATE");
+        if (hwaoi_rate_word || (experiment && !strcmp(experiment, "1"))) {
+            if (!strcmp(e, "90")) return 90;
+            if (!strcmp(e, "120")) return 120;
+            rt_fatal("frame rate: HWAoI FPS_LIMIT must be 30, 60, 90 or 120");
+        }
+        rt_log("frame rate: HWAoI FPS_LIMIT=%s is not 30 or 60; 60", e);
+        return 60;
     }
     if (!strcmp(e, "display")) return 0;
     char *end;

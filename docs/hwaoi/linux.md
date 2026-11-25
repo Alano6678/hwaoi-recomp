@@ -1,43 +1,38 @@
 # Linux build
 
-HWAoI Recomp builds on x86-64 Linux from the same sources as the Windows build: `tools/build_game.py` compiles the
-runtime's SDL3 files (`*_sdl.c`) and `runtime/platform/linux.c` in place of the Win32 ones and links against the
-system libraries. There is no Linux release or installer; this is a build from your own extracted game files.
+The game builds on x86-64 Linux from the same sources as the Windows build: `tools/build_game.py` compiles the
+runtime's SDL3 files (`*_sdl.c`) and `runtime/platform/linux.c` in place of the Win32 ones.
 
-## Requirements
+## The release (players)
 
-- Linux 6.7 or later (userfaultfd write protection with `PAGEMAP_SCAN`).
-- A Vulkan 1.3 driver with `VK_EXT_external_memory_host` (RADV, NVIDIA).
-- Packages, on Arch:
+Age of Decomp's Linux AppImage (and the `.tar.xz` of the same folder) carries the whole compiler, as the Windows zip
+does, so the player's PC needs nothing installed: LLVM's own clang and lld, the files of the Steam Runtime 3 "sniper"
+SDK the build reads (glibc 2.31, GCC 14's libstdc++) in `llvm/sysroot`, Opus, libvpx, zstd and the Vulkan loader's link
+library in `deps/`, SDL 3.4 built in the SDK's image with every optional part loaded at run time (`libSDL3.so.0` goes
+beside the game, rpath `$ORIGIN`), Ninja, and Python (python-build-standalone). The game it builds needs glibc 2.31,
+the PC's `libvulkan.so.1` and a Vulkan 1.3 driver; the AppImage's programs need glibc 2.34 (SteamOS 3, Ubuntu 22.04,
+Debian 12, Fedora 36 or newer). `tools/engine.py toolchain` (repository root) makes that toolchain; the model is DKB
+Recomp's `tools/make_release_linux.py`.
 
-  ```sh
-  pacman -S --needed clang lld ninja make sdl3 opus libvpx zstd zlib vulkan-headers vulkan-icd-loader \
-      shaderc spirv-tools dotnet-sdk python git
-  ```
+The setup step and Play run without a window (`AppRun cli prepare …`, `AppRun --play …` start aod-cli), which is what
+RecompLauncher uses, on a Steam Deck too; only the launcher's own window needs WebKitGTK 4.1 from the system.
 
-- Extracted game files of the supported version (ExeFS and RomFS), by default in `work/game/exefs` and
-  `work/game/romfs`. `tools/hwaoi.py` checks the module hashes before it generates anything.
+- Linux 6.7 or later is faster (userfaultfd write protection with `PAGEMAP_SCAN`); older kernels work.
+- A Vulkan 1.3 driver with `VK_EXT_external_memory_host` (RADV, ANV, NVIDIA).
 
-## Build and run
+## A developer build
+
+From the repository root (`python3`, 3.12 or newer):
 
 ```sh
-python -m venv .venv && .venv/bin/pip install -r tools/requirements-hwaoi.txt
-tools/linux/build.sh            # or: tools/linux/build.sh <exefs dir> <romfs dir>
-tools/linux/play.sh
+python3 tools/engine.py toolchain    # LLVM, the sniper sysroot, SDL3 (docker or podman), deps, Ninja, Python
+python3 tools/engine.py translator   # the shader translator (system .NET 10 SDK and git)
+python3 tools/engine.py stage        # out/engine/linux
+python3 tools/engine.py game --nup <your .nup>   # work/game-linux
 ```
 
-`build.sh` runs three steps and keeps everything under the ignored `work/` folder:
-
-1. `tools/hwaoi.py generate --display-settings` writes the game's C to `work/generated/hwaoi196608-full`.
-2. `tools/build_game.py` compiles and links `work/build/hwaoi196608/hwaoi`.
-3. `tools/build_xlate_hwaoi.py` publishes the managed shader translator for `linux-x64` to
-   `work/build/hwaoi196608/xlate-managed-irbanks`. The first run restores its .NET packages from nuget.org into
-   `work/toolchain/NuGet` (`--online`); the comparison of `tools/vendor/ryujinx` with a pinned DKB clone is skipped
-   (`--no-vendor-reference`, recorded in `build-report.json`).
-
-`play.sh` starts the game with the settings `tools/hwaoi.py launch` uses on Windows. Saves go to
-`work/saves/hwaoi196608`, each run's log to `work/logs/`. Variables set before the call win, for example
-`HWAOI_FPS_LIMIT=60 SDL_VIDEODRIVER=wayland tools/linux/play.sh`.
+The steps keep everything under ignored folders. Saves go to `work/saves/hwaoi196608` of the game folder, each run's
+log to its `logs/`.
 
 ## Notes
 

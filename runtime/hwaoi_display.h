@@ -5,6 +5,14 @@
 
 #define HWAOI_TEXTURE_POOL_BASE UINT64_C(0x122f00000)
 
+// Whether the native-display patch sets (hwaoi_display, hwaoi_native1080: scene = output, both scale policies 1.0) are
+// wanted. TOTK_NATIVE_1080 decides when set; otherwise they are, except with RENDER_SCALE=game: the game's own path
+// then runs (its 1600x900 scene, dynamic resolution and temporal upscaler to 1080p, which also smooths edges).
+static inline int hwaoi_native_wanted(const char *native_1080, const char *render_scale) {
+    if (native_1080 && *native_1080) return strcmp(native_1080, "0") != 0;
+    return !render_scale || strcmp(render_scale, "game") != 0;
+}
+
 static inline int hwaoi_display_size(const char *value, unsigned size[2]) {
     static const struct { const char *name; unsigned w, h; } presets[] = {
         {"1280x720", 1280, 720}, {"1920x1080", 1920, 1080},

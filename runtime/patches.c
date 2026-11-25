@@ -17,6 +17,8 @@
 #include <string.h>
 
 #include "host.h"
+#include "game_target.h"
+#include "hwaoi_display.h"
 
 #if __has_include("patches.h")
 #include "patches.h"
@@ -46,8 +48,12 @@ void rt_patches_init(void) {
     list[0] = 0;
     for (int i = 0; i < RT_PATCH_COUNT; i++) {
         const char *e = cfg_get(sets[i].env);
+        int on = sets[i].on;
+        // HWAoI: the native-display sets follow the 3D resolution when TOTK_NATIVE_1080 is unset (hwaoi_display.h).
+        if (RT_TARGET_HWAOI && !strcmp(sets[i].env, "TOTK_NATIVE_1080"))
+            on = hwaoi_native_wanted(NULL, cfg_value("TOTK_RENDER_SCALE"));
         // a set with a row in the settings table takes its default from there; the generated default serves the rest
-        rt_patch_on[i] = (uint8_t)(cfg_meta(sets[i].env) ? cfg_bool(sets[i].env) : e && *e ? strcmp(e, "0") != 0 : sets[i].on);
+        rt_patch_on[i] = (uint8_t)(cfg_meta(sets[i].env) ? cfg_bool(sets[i].env) : e && *e ? strcmp(e, "0") != 0 : on);
         n += (size_t)snprintf(list + n, sizeof list - n, "%s%s %s", i ? ", " : "", sets[i].name,
                               rt_patch_on[i] ? "on" : "off");
         if (n >= sizeof list) n = sizeof list - 1;

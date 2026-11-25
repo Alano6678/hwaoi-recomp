@@ -49,15 +49,16 @@ class CompilerCacheTests(unittest.TestCase):
     def test_stable_tool_paths_and_identity_change_on_repair(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); bundle = root / "bundle"; out = root / "output"
-            files = {p: self.put(bundle, p) for p in ("llvm/bin/clang.exe", "deps/include/a.h", "bin/ninja.exe")}
+            exe = ".exe" if os.name == "nt" else ""
+            files = {p: self.put(bundle, p) for p in (f"llvm/bin/clang{exe}", "deps/include/a.h", f"bin/ninja{exe}")}
             stamp = cache.prepare_tools(bundle, out, {"files": files}, Path("work/backups/one"))
             first = stamp.read_bytes(); mtime = stamp.stat().st_mtime_ns
             cache.prepare_tools(bundle, out, {"files": files}, Path("work/backups/two"))
             self.assertEqual(stamp.stat().st_mtime_ns, mtime)
-            (out / "work/toolchain/llvm/bin/clang.exe").write_bytes(b"corruption")
+            (out / f"work/toolchain/llvm/bin/clang{exe}").write_bytes(b"corruption")
             cache.prepare_tools(bundle, out, {"files": files}, Path("work/backups/three"))
             self.assertNotEqual(stamp.read_bytes(), first)
-            self.assertEqual((out / "work/toolchain/llvm/bin/clang.exe").read_bytes(), b"owned fixture")
+            self.assertEqual((out / f"work/toolchain/llvm/bin/clang{exe}").read_bytes(), b"owned fixture")
 
     def test_resource_cache_rechecks_changed_bytes_and_rejects_wrong_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,7 +79,7 @@ class CompilerCacheTests(unittest.TestCase):
             self.assertIsNone(cache.resource_cache(folder, identity, exefs, nup, first))
             self.assertIsNone(cache.resource_cache(folder, {**identity, "toc": "wrong"}, exefs, nup, first))
 
-    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    @unittest.skipUnless(os.name == "nt" or sys.platform.startswith("linux"), "Windows or Linux file locking")
     def test_lock_is_exclusive_and_released_after_worker_dies(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
@@ -96,14 +97,18 @@ class CompilerCacheTests(unittest.TestCase):
             with cache.workspace_lock(out):
                 pass
 
-    @unittest.skipUnless(os.name == "nt", "Windows compiler workflow")
+    @unittest.skipUnless(os.name == "nt" or sys.platform.startswith("linux"), "Windows or Linux compiler workflow")
     def test_repeated_build_source_update_corruption_and_failed_build_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); bundle = root / "bundle"; out = root / "game"; nup = root / "source.nup"
             nup.write_bytes(b"owned source package fixture")
-            names = ("source/tools/hwaoi.py", "source/tools/hostmem.py", "source/tools/check_content.py", "source/recomp/gen.py",
-                     "source/runtime/a.c", "llvm/bin/clang.exe", "deps/include/a.h", "bin/ninja.exe", "bin/zlib1.dll",
-                     "translator/totk_xlate.exe", "translator/totk_xlate.id")
+            sources = ("source/tools/hwaoi.py", "source/tools/hostmem.py", "source/tools/check_content.py",
+                       "source/recomp/gen.py", "source/runtime/a.c")
+            # Both systems' bundles carry their compiler
+            names = sources + (("llvm/bin/clang.exe", "deps/include/a.h", "bin/ninja.exe", "bin/zlib1.dll",
+                                "translator/totk_xlate.exe", "translator/totk_xlate.id") if os.name == "nt" else
+                               ("llvm/bin/clang", "llvm/bin/ld.lld", "deps/include/a.h", "bin/ninja",
+                                "translator/totk_xlate", "translator/totk_xlate.id"))
             manifest = {"source_revision": "fixture", "files": {p: self.put(bundle, p) for p in names}}
             identity = {"header": "header", "toc": "toc", "size": nup.stat().st_size}
             hashes = {"main": "fixture-module-hash"}; calls = []; fail = [False]
@@ -129,7 +134,7 @@ class CompilerCacheTests(unittest.TestCase):
                 elif action == "build":
                     if fail[0]:
                         raise ValueError("synthetic compile failure")
-                    self.put(o, "work/build/hwaoi196608/hwaoi.exe", b"owned output fixture")
+                    self.put(o, "work/build/hwaoi196608/" + backend.hwaoi.GAME_EXE, b"owned output fixture")
                 else:
                     self.fail(action)
             disk = type("Disk", (), {"free": 60 << 30})()

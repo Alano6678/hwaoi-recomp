@@ -151,6 +151,9 @@ int probe_cfg(void) {
     CHECK(m && EQ(m->def, "130") && EQ(m->values, "0..300"), "meta: rumble strength 130 in 0..300");
     m = cfg_meta("PERF_OVERLAY");
     CHECK(m && EQ(m->def, "off") && EQ(m->values, "off|fps|full") && m->live, "meta: perf_overlay is live, off by default");
+    m = cfg_meta("CONFIRM_BUTTON");
+    CHECK(m && EQ(m->def, "auto") && EQ(m->values, "auto|bottom|right") && m->live,
+          "meta: confirm_button is live, auto by default, the menu's three values in order");
     CHECK(cfg_meta("BIND_A") == NULL && cfg_meta("FPS_COUNTER") == NULL && cfg_meta("NO_SUCH") == NULL,
           "meta: keys the menu does not show are NULL");
 
@@ -236,8 +239,14 @@ int probe_cfg(void) {
     CHECK(input_map_buttons(dn) == 0, "keys: nothing held, no buttons");
     dn[KEY_MOUSE_L] = 1;
     CHECK(input_map_buttons(dn) == 1ull << B_Y, "keys: left mouse button is Y");
-    dn[KEY_MOUSE_R] = dn[KEY_Z] = 1;
-    CHECK(input_map_buttons(dn) == (1ull << B_Y | 1ull << B_ZL), "keys: right mouse button and Z both press ZL");
+    dn[KEY_MOUSE_R] = 1;
+    CHECK(input_map_buttons(dn) == (1ull << B_Y | 1ull << B_X), "keys: right mouse button is X");
+    memset(dn, 0, sizeof dn);
+    dn[KEY_LSHIFT] = dn[KEY_Z] = 1;
+    CHECK(input_map_buttons(dn) == 1ull << B_ZL, "keys: Left Shift and Z both press ZL");
+    memset(dn, 0, sizeof dn);
+    dn[KEY_SPACE] = dn[KEY_MOUSE_M] = 1;
+    CHECK(input_map_buttons(dn) == (1ull << B_B | 1ull << B_STICK_R), "keys: Space B, middle mouse button stick click");
     memset(dn, 0, sizeof dn);
     dn[KEY_X] = dn[KEY_TAB] = dn[KEY_M] = dn[KEY_LCTRL] = dn[KEY_3] = 1;
     CHECK(input_map_buttons(dn) == (1ull << B_ZR | 1ull << B_PLUS | 1ull << B_MINUS | 1ull << B_STICK_L | 1ull << B_RIGHT),
@@ -282,13 +291,18 @@ int probe_cfg(void) {
           "pad stick: a square gate's corner stays on the unit circle");
     input_pad_stick(0, 32767 / 2 + 1, 0.2f, st);
     CHECK(abs(st[1] - 32767 * 3 / 8) <= 3, "pad stick: half deflection past a 20% zone is (0.5 - 0.2) / 0.8 of full");
+    // The menus' confirm button (input.c input_confirm_bottom): with no gamepad in use, the game's own, whatever the value
+    cfg_set("TOTK_CONFIRM_BUTTON", "bottom");
+    CHECK(!input_confirm_bottom(), "confirm button: without a gamepad the menus keep the game's confirm, even on bottom");
+    cfg_set("TOTK_CONFIRM_BUTTON", "auto");
+    CHECK(!input_confirm_bottom(), "confirm button: without a gamepad automatic keeps the game's confirm");
     // Gamepad layouts (input_map.c)
-    CHECK(input_pad_layout_pick("auto", 1) == PAD_LAYOUT_NINTENDO && input_pad_layout_pick(NULL, 0) == PAD_LAYOUT_XBOX,
-          "pad layout: automatic is Nintendo for an east button labelled A, Xbox otherwise");
-    CHECK(input_pad_layout_pick("Xbox", 1) == PAD_LAYOUT_XBOX && input_pad_layout_pick("nintendo", 0) == PAD_LAYOUT_NINTENDO,
-          "pad layout: a set layout wins over the labels");
-    CHECK(input_pad_layout_pick("xbox_prompts", 0) == PAD_LAYOUT_NINTENDO &&
-              input_pad_layout_pick("Xbox_Prompts", 1) == PAD_LAYOUT_NINTENDO,
+    CHECK(input_pad_layout_pick("auto") == PAD_LAYOUT_NINTENDO && input_pad_layout_pick(NULL) == PAD_LAYOUT_NINTENDO &&
+              input_pad_layout_pick("") == PAD_LAYOUT_NINTENDO,
+          "pad layout: the default is the Nintendo positions on every pad");
+    CHECK(input_pad_layout_pick("Xbox") == PAD_LAYOUT_NINTENDO && input_pad_layout_pick("nintendo") == PAD_LAYOUT_NINTENDO,
+          "pad layout: xbox (gone in 0.2.0) and nintendo are older names of the default");
+    CHECK(input_pad_layout_pick("xbox_prompts") == PAD_LAYOUT_NINTENDO && input_pad_layout_pick("Xbox_Prompts") == PAD_LAYOUT_NINTENDO,
           "pad layout: Xbox prompts keep the Nintendo positions (only the prompts change, romfs.c overlay_init)");
     uint8_t pd[PAD_COUNT] = {0};
     pd[PAD_SOUTH] = pd[PAD_NORTH] = 1;
@@ -342,7 +356,10 @@ int probe_cfg(void) {
     CHECK(!strcmp(line, "key:x, pad:default"), "edit: ZR keeps X");
     CHECK(input_map_set_key(&mp, B_ZL, 1, KEY_NONE) == -1, "edit: clearing a key takes from no one");
     uint8_t ks[8];
-    CHECK(input_map_keys_of(&mp, B_ZL, ks, 8) == 1 && ks[0] == KEY_MOUSE_R, "edit: ZL keeps its first key only");
+    CHECK(input_map_keys_of(&mp, B_ZL, ks, 8) == 1 && ks[0] == KEY_LSHIFT, "edit: ZL keeps its first key only");
+    mp = input_map;
+    CHECK(input_map_set_key(&mp, B_ZL, 0, KEY_LSHIFT) == -1 && input_map_keys_of(&mp, B_ZL, ks, 8) == 2,
+          "edit: a key put in the slot that has it already keeps the action's other keys");
     mp = input_map;
     CHECK(input_map_set_pad(&mp, B_X, PAD_LAYOUT_XBOX, PAD_SOUTH) == B_A, "edit: south swaps X with A (Xbox layout)");
     uint8_t ps[8];

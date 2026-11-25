@@ -35,6 +35,53 @@ int input_pad_layout(void);
 enum { PAD_LABEL_NONE, PAD_LABEL_A, PAD_LABEL_B, PAD_LABEL_X, PAD_LABEL_Y, PAD_LABEL_CROSS, PAD_LABEL_CIRCLE,
        PAD_LABEL_SQUARE, PAD_LABEL_TRIANGLE };
 int input_pad_label(int pad);
+int input_pad_type(void); // SDL type of the gamepad the menu shows (the one used last, else player 1's); 0 without one.
+// The connected devices, for the menu's Controls page: what each gamepad is and has, as SDL reports it, and whose
+// it is. Nothing here is guessed: a field the pad does not report is 0 or -1.
+enum { PAD_FAMILY_GENERIC, PAD_FAMILY_XBOX, PAD_FAMILY_PLAYSTATION, PAD_FAMILY_NINTENDO };
+typedef struct {
+    char name[80];             // SDL's name; "#2" after it when two of one model are connected
+    char value[64];            // the TOTK_PLAYER<n>_DEVICE value that names it
+    int type;                  // SDL_GamepadType
+    int family;                // PAD_FAMILY_*
+    int switch2;               // a Switch 2 controller (Pro Controller 2, Joy-Con 2, the NSO GameCube pad)
+    int player;                // the player it feeds (0, 1), -1 none
+    int wired;                 // 1 cable, 0 wireless, -1 not reported
+    int battery;               // percent, -1 not reported
+    int rumble, trigger_rumble, motion, light, back_buttons;   // what it has
+    int layout;                // PAD_LAYOUT_* in effect for it
+    int labels[4];             // its south, east, west, north labels (PAD_LABEL_*)
+} InputPadInfo;
+int input_pads(InputPadInfo *out, int max);   // in connection order; returns how many
+// The gamepad that feeds player (its first one); 0 when the player has none.
+int input_player_pad(int player, InputPadInfo *out);
+int input_keyboard_player(void);              // the player the keyboard and mouse feed, -1 none
+// A short rumble on gamepad index of input_pads, to tell which one it is; 0 when it has no motors.
+int input_pad_identify(int index);
+// The menu's rumble rows: a short pulse on every connected gamepad that rumbles, through the rumble strength, curve
+// and trigger settings as they are now, so a change is felt at once. 1 if one rumbled.
+int input_rumble_preview(void);
+// The device used last: 1 while it is the keyboard or the mouse (also with gamepads connected), 0 a gamepad.
+// input_note_keyboard: the window saw a key or the mouse (the menu's own events, which never pass the game's poll).
+int input_keyboard_active(void);
+void input_note_keyboard(void);
+// What the game's own button pictures should show (hud_prompts.c): the device used last, as the menu's hints follow
+// it, and for each Switch button (input_map.h B_A..B_DOWN, the bit numbers) the first input bound to it; the keys also
+// for the stick directions (B_SL_LEFT..B_SR_DOWN). Any thread; before the input has started it answers as with the
+// keyboard alone.
+typedef struct {
+    int keyboard;             // the keyboard or the mouse was used after every gamepad, or no gamepad is connected
+    int family;               // PAD_FAMILY_* of the gamepad used last, else player 1's
+    int layout;               // its PAD_LAYOUT_* in effect, -1 without a gamepad
+    int labels[4];            // its south, east, west, north labels (PAD_LABEL_*), PAD_LABEL_NONE when not known
+    uint8_t pad[16], key[24]; // input_map.h PAD_* and KEY_* ids; 0 (PAD_NONE, KEY_NONE): nothing bound
+} InputPromptState;
+void input_prompt_state(InputPromptState *out);
+// 1 while the game's menus confirm with Switch B, the bottom button, and go back with Switch A, the right one (the
+// generated patch set hwaoi_confirm, which ov_input.c switches at every controller read; battle keeps every button).
+// TOTK_CONFIRM_BUTTON: auto with a gamepad of another maker than Nintendo in use (the one the pictures follow), bottom
+// with any gamepad in use, right never (the game's own way). The keyboard and the mouse keep the game's keys. Any thread.
+int input_confirm_bottom(void);
 // The menu's remapping rows (Controls tab). input_map_snapshot copies the tables in effect (after any changed TOTK_BIND_* line).
 // input_capture polls the keys, the mouse buttons and the gamepad for a press: reset 1 takes what is held now as the
 // start (a held key counts once released and pressed again) and returns NONE; then it returns KEY or PAD with *id the

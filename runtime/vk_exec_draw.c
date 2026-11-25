@@ -1546,8 +1546,9 @@ static int hwaoi_scene_sharpness_override(VkExec *ex, int stage, int slot,
         if (!hwaoi_scene_sharpness_parse(setting, &configured_percent))
             rt_fatal("scene sharpness: SCENE_SHARPNESS must be game or an integer from 0 to 100");
     }
-    // Apply FSR sharpening while temporal processing is active, including after late initialization.
-    int percent = use_temporal_default && vk_temporal_running() ? 0 : configured_percent;
+    // FSR sharpens its own result, so the game's pass is off while it runs, including after late initialization. DLSS
+    // does not sharpen: the game's pass stays as configured.
+    int percent = use_temporal_default && vk_temporal_sharpens() ? 0 : configured_percent;
     if (percent < 0) return 0;   // game: preserve the original descriptor and every byte
     const uint8_t *control, *code;
     uint32_t length;
@@ -3158,6 +3159,76 @@ static int indirect_can_stay_in_pass(const VkExec *ex, uint64_t addr, uint64_t s
 }
 
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
+// TOTK_DRAW_CRUMBS=1 (vk_crumbs.c): a crumb in front of the draw prepare_draw has just set up, and a note of what the
+// draw is. The crumb goes through the recorder thread in order with the draw's own commands.
+static void draw_crumb(VkExec *ex, int32_t count) {
+    VkDrawNote n = {.sub = (uint32_t)((vk_sync_issued() + 1) & 0x0fffffff), .vertices = (uint32_t)count,
+                    .w = (uint16_t)(ex->pass_w < 0xffff ? ex->pass_w : 0xffff),
+                    .h = (uint16_t)(ex->pass_h < 0xffff ? ex->pass_h : 0xffff),
+                    .frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1};
+    for (int i = 0; i < 9; i++) {
+        const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
+        if (t->image) n.fmt[i] = (uint16_t)((uint32_t)t->format < 0xffff ? (uint32_t)t->format : 0xffff);
+    }
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    if (ex->prog) {
+        n.vs = bound_stage(ex, NVN_STAGE_VS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+        n.fs = bound_stage(ex, NVN_STAGE_FS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+    }
+    rec_crumb(ex->cb, VK_CRUMB_DRAW, vk_crumbs_draw(&n));
+}
+
+// A one-shot pass that looks like a camera view: a colour and a depth target of 640x360 or more. The Sync Strike's
+// cut-in draws into a new 1600x900 colour + depth pair, and on its first frame each of its draws waited in turn for its
+// shaders and pipeline: 20 new pipelines stopped the game for 3 s (2026-11-22, RTX 5070 Ti). Such waits share
+// TOTK_ONESHOT_SCENE_MS (250) per presented frame; once that is spent, the pass's draws are skipped while they build,
+// as a per-frame pass's are, and the effect fills in over the next frames (its targets count as per-frame from its
+// second frame on). 0: no budget, every one-shot draw waits as before. Volumes, LUTs and shadow layers (no colour or no
+// depth target, or smaller) wait as before: skipped, they would stay empty for the session.
+static int oneshot_scene(const VkExec *ex) {
+    if (!ex->depth.image || ex->pass_w < 640 || ex->pass_h < 360) return 0;
+    for (int i = 0; i < 8; i++)
+        if (ex->color[i].image) return 1;
+    return 0;
+}
+
+static int os_budget_ms = -1;            // TOTK_ONESHOT_SCENE_MS
+static uint64_t os_frame, os_left_ns;    // the presented frame the budget belongs to, and what is left of it
+
+// How long a one-shot draw may wait now, in ms: ONESHOT_WAIT_MS, or for a pass oneshot_scene takes what is left of
+// this frame's budget (0: the draw is skipped).
+static uint32_t oneshot_wait_ms(const VkExec *ex) {
+    if (os_budget_ms < 0) {
+        const char *v = getenv("TOTK_ONESHOT_SCENE_MS");
+        os_budget_ms = v && *v ? atoi(v) : 250;
+        if (os_budget_ms < 0) os_budget_ms = 0;
+    }
+    if (!os_budget_ms || !oneshot_scene(ex)) return ONESHOT_WAIT_MS;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != os_frame) os_frame = f, os_left_ns = (uint64_t)os_budget_ms * 1000000u;
+    return (uint32_t)(os_left_ns / 1000000u);
+}
+
+// ns waited by a one-shot draw: taken from the budget when its pass is one oneshot_wait_ms budgets.
+static void oneshot_spent(const VkExec *ex, uint64_t ns) {
+    if (os_budget_ms <= 0 || !oneshot_scene(ex)) return;
+    os_left_ns = ns < os_left_ns ? os_left_ns - ns : 0;
+}
+
+// The first draw a spent budget skips in a frame, logged for 20 frames.
+static void oneshot_skip_note(VkExec *ex) {
+    static uint64_t noted;
+    static int notes;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
+    if (f == noted || notes >= 20) return;
+    noted = f, notes++;
+    char tg[512];
+    vk_exec_targets_describe(ex, tg, sizeof tg);
+    rt_log("vk_exec: frame %llu: %d ms of one-shot waits spent, the draws of this pass are skipped while they build "
+           "(TOTK_ONESHOT_SCENE_MS): pass %ux%u, %s", (unsigned long long)f, os_budget_ms, ex->pass_w, ex->pass_h, tg);
+}
+
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (ex->render_disabled) return 0;
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
@@ -3230,10 +3301,13 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     int oneshot = -1, skip = pipe_skip_mode();   // -1: not looked up
     if (vs_wait || fs_wait || gs_wait) {
         if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1))) return perf_count(PERF_CNT_SHADER_SKIP), 0;   // skipped until ready
+        if (!oneshot_wait_ms(ex)) return oneshot_skip_note(ex), perf_count(PERF_CNT_SHADER_SKIP), 0;   // budget spent
         perf_count(PERF_CNT_ONESHOT_WAIT);
+        uint64_t s0 = kern_now_ns();
         if (vs_wait) vs = shader_for(ex, NVN_STAGE_VS, &has_vs, NULL, 1);
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
         if (gs_wait) gs = shader_for(ex, NVN_STAGE_GS, &has_gs, NULL, 1);
+        oneshot_spent(ex, kern_now_ns() - s0);
     }
     if (light_quad_fault_skip(ex, vs, fs)) return 0;
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) return 0;
@@ -3259,7 +3333,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     uint32_t wait_ms = 0;
     uint64_t t0 = 0;
     if (oneshot > 0) {
-        wait_ms = ONESHOT_WAIT_MS;
+        wait_ms = oneshot_wait_ms(ex);
     } else if (skip < 2 && count <= 6 && (uint64_t)sc.extent.width * sc.extent.height * 2 >= (uint64_t)ex->pass_w * ex->pass_h) {
         uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
         if (f != wait_frame) wait_frame = f, wait_left_ns = 50000000;
@@ -3282,12 +3356,23 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
             uint64_t spent = kern_now_ns() - t0;
             wait_left_ns = spent < wait_left_ns ? wait_left_ns - spent : 0;
         }
+        if (oneshot > 0) {
+            if (w0) oneshot_spent(ex, kern_now_ns() - w0);
+            if (pending && !wait_ms) oneshot_skip_note(ex);
+        }
         why = oneshot > 0 ? "one-shot, shader" : wait_ms ? "full-screen" : NULL;
         if (pending && oneshot < 0 && !vk_exec_targets_recent(ex, skip >= 1)) {
             perf_count(PERF_CNT_ONESHOT_WAIT);
             why = "one-shot";
-            if (!w0) w0 = kern_now_ns();
-            p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
+            uint32_t ms = oneshot_wait_ms(ex);
+            if (ms) {
+                uint64_t s1 = kern_now_ns();
+                if (!w0) w0 = s1;
+                p = vk_pipeline_graphics_async(&s, &info, &pending, ms);
+                oneshot_spent(ex, kern_now_ns() - s1);
+            } else {
+                oneshot_skip_note(ex);
+            }
         }
         PM.valid = !pending && p && info;
         if (PM.valid) MX_CPY(&PM.s, &s, sizeof s), PM.info = info;
@@ -3335,6 +3420,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (vk_dump_armed) vk_dump_draw(ex, &s, p, info);
     vk_exec_oq_draw(ex);
     if (indirect_batch_on()) ex->pass_storage_writes |= pipeline_storage_writes(info);
+    if (vk_crumbs_draws()) draw_crumb(ex, count);
     return 1;
 }
 

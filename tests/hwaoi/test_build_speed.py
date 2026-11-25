@@ -17,7 +17,9 @@ import gen
 
 class BuildSpeedTests(unittest.TestCase):
     def test_worker_budget_and_layout_mtimes(self):
-        self.assertEqual(build_game.compile_jobs(0, 24, 20 << 30), 8)
+        self.assertEqual(build_game.compile_jobs(0, 24, 20 << 30), 21)   # 24 processors, all but one in eight
+        self.assertEqual(build_game.compile_jobs(0, 20, 60 << 30), 18)
+        self.assertEqual([build_game.hostmem.build_threads(n) for n in (1, 2, 4, 8, 16, 20, 64)], [1, 1, 3, 7, 14, 18, 56])
         self.assertEqual(build_game.compile_jobs(0, 24, 5 << 30), 4)
         self.assertEqual(build_game.compile_jobs(8, 24, 2 << 30), 1)
         self.assertEqual(build_game.compile_jobs(2, 24, 20 << 30), 2)
@@ -39,6 +41,24 @@ class BuildSpeedTests(unittest.TestCase):
             layout.write(mods, out); self.assertEqual((out / "layout.h").stat().st_mtime_ns, old)
             layout.write([("main", 0x200000, 4096)], out)
             self.assertIn("0x200000", (out / "layout.h").read_text())
+
+    def test_a_huge_unit_compiles_with_the_slow_passes_turned_down(self):
+        # main_0163.c of 1.0.3 is one game function of 100,473 lines: 278 s at plain -O1, 107 s with these flags
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); out = root / "out"; out.mkdir()
+            big, small = root / "big.c", root / "small.c"
+            big.write_bytes(b"/*" + b" " * (4 << 20) + b"*/ int big(void){return 1;}")
+            small.write_text("int small(void){return 2;}")
+            values = {"CLANG": root / "clang.exe", "DEPS": root / "deps"}
+            with patch.multiple(build_game, **values), patch.object(build_game, "runtime_sources", side_effect=lambda *args: []):
+                text, _, _ = build_game.ninja_file(root, out, {"main": [big, small]}, 2)
+            lines = text.splitlines()
+            at = next(i for i, l in enumerate(lines) if l.startswith("build ") and "big.o" in l)
+            self.assertEqual(lines[at + 1], "  pool = large_gen")
+            self.assertEqual(lines[at + 2], "  genflags = $genflags " + " ".join(build_game.LARGE_UNIT_FLAGS))
+            at = next(i for i, l in enumerate(lines) if l.startswith("build ") and "small.o" in l)
+            self.assertEqual(lines[at + 1], "  pool = gen")
+            self.assertFalse(lines[at + 2].startswith("  genflags"))
 
     @unittest.skipUnless(os.name == "nt" and Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang/Ninja")
     def test_ninja_noop_parallelism_and_compiler_stamp(self):

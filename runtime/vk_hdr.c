@@ -61,11 +61,24 @@ static volatile int32_t g_active;   // the swapchain is HDR10 (gfx_present.c vk_
 void vk_hdr_set_active(int on) { plat_xchg32(&g_active, on); }
 int vk_hdr_active(void) { return plat_cas32(&g_active, 0, 0); }
 
+// The window's surface offers an HDR10 format, whatever TOTK_HDR says: 1, 0, or -1 before the first swapchain. Set at
+// each swapchain (vk_hdr_surface_format); the menu greys its HDR rows on 0.
+static volatile int32_t g_offered = -1;
+int vk_hdr_offered(void) { return plat_cas32(&g_offered, 0, 0); }
+
+static int hdr10(const VkSurfaceFormatKHR *f) {
+    return f->colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+           (f->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f->format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+}
+
 // ---- swapchain
 
 // With TOTK_HDR=1, the HDR10 format among the surface's (10-bit UNORM, ST 2084): 1 with *out set, else 0 and the
 // reason logged once.
 int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceFormatKHR *out) {
+    int offered = 0;
+    for (uint32_t i = 0; i < n && !offered; i++) offered = hdr10(&f[i]);
+    plat_xchg32(&g_offered, offered);
     if (!vk_hdr_wanted()) return 0;
     static int logged;
     if (!logged) {
@@ -138,7 +151,7 @@ static int img_ensure(VkCtx *c, Img *m, uint32_t w, uint32_t h, VkFormat fmt, Vk
     if (m->img && m->w == w && m->h == h) return 1;
     if (m->img) {
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        vk_device_idle(c->device);
         vk_queue_unlock();
         img_free(c, m);
     }
@@ -295,7 +308,7 @@ static int ui_pipeline(VkCtx *c, VkFormat fmt) {
     if (H.ui && H.ui_fmt == fmt) return 1;
     if (H.ui) {   // another swapchain format: earlier presents may still use the old pipeline
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        vk_device_idle(c->device);
         vk_queue_unlock();
         vkDestroyPipeline(c->device, H.ui, NULL);
         H.ui = VK_NULL_HANDLE;

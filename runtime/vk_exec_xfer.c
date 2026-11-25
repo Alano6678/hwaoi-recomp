@@ -45,7 +45,7 @@
 #include "vk.h"
 #include "vk_exec.h"
 
-enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_QUERY, W_COUNT };
+enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_QUERY, W_DEPTH_COPY, W_COUNT };
 
 static void warn_once(int key, const char *fmt, ...) {
     static volatile int32_t seen[W_COUNT];
@@ -492,25 +492,40 @@ static int copy_depth_stencil(VkExec *ex, const p_copy_t2t *p) {
         p->dst->d.format != p->src->d.format) depth_copy_fail(p, "formats or flags");
     const uint64_t sa = (uintptr_t)p->src->mem, da = (uintptr_t)p->dst->mem;
     if (!sa || !da || !p->src->L.size || !p->dst->L.size ||
-        p->src->L.size > UINT64_MAX - sa || p->dst->L.size > UINT64_MAX - da ||
-        (sa <= da ? da - sa < p->src->L.size : sa - da < p->dst->L.size))
-        depth_copy_fail(p, "overlapping or unknown guest storage");
+        p->src->L.size > UINT64_MAX - sa || p->dst->L.size > UINT64_MAX - da)
+        depth_copy_fail(p, "invalid guest storage");
     const VkTexImage *si = vk_texture_get(p->src), *di = vk_texture_get(p->dst);
     Sub s, d;
     if (!depth_copy_sub(p->src, &p->sv, p->has_sv, &p->sr, si, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &s) ||
         !depth_copy_sub(p->dst, &p->dv, p->has_dv, &p->dr, di, VK_IMAGE_USAGE_TRANSFER_DST_BIT, &d))
         depth_copy_fail(p, "image, view or region");
-    // Unbound images own independent allocations in create_tex. Distinct virtual
-    // guest addresses would not prove nonaliasing for physical-pool bound images.
-    if (si->bound || di->bound || si->image == di->image) depth_copy_fail(p, "bound or identical images");
     if (s.w != d.w || s.h != d.h || s.nz != d.nz) depth_copy_fail(p, "unequal extents");
+    // A split-screen pass can copy between two regions of the same depth image.
+    // Both layouts are GENERAL. Vulkan requires the copied regions to be disjoint
+    // in memory, so check the subresources and rectangles of the one known image.
+    int safe;
+    if (si->image == di->image) {
+        const uint64_t sl = (uint64_t)s.layer0 + s.z, dl = (uint64_t)d.layer0 + d.z;
+        safe = s.level != d.level || sl + s.nz <= dl || dl + d.nz <= sl ||
+               (uint64_t)s.x + s.w <= (uint64_t)d.x || (uint64_t)d.x + d.w <= (uint64_t)s.x ||
+               (uint64_t)s.y + s.h <= (uint64_t)d.y || (uint64_t)d.y + d.h <= (uint64_t)s.y;
+    } else {
+        // Separate pool-bound images may alias at physical addresses that are
+        // invisible here. Unbound images own independent allocations, but an
+        // overlapping guest range still requires alias-aware synchronization.
+        safe = !si->bound && !di->bound && (sa <= da ? da - sa >= p->src->L.size : sa - da >= p->dst->L.size);
+    }
+    vk_exec_pass_end(ex);
+    vk_exec_barrier(ex);
+    if (!safe) {
+        warn_once(W_DEPTH_COPY, "depth-stencil copy skipped because its storage may overlap");
+        return 1;
+    }
     // Vulkan 1.0 VkImageSubresourceLayers permits DEPTH|STENCIL together. Both
     // subresources must name the same aspects and compatible depth/stencil formats:
     // https://docs.vulkan.org/refpages/latest/refpages/source/VkImageSubresourceLayers.html
     // https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyImage.html
     VkImageCopy copy = {sub_layers(&s), sub_offset(&s), sub_layers(&d), sub_offset(&d), sub_extent(&s)};
-    vk_exec_pass_end(ex);
-    vk_exec_barrier(ex);
     vkCmdCopyImage(ex->cb, si->image, VK_IMAGE_LAYOUT_GENERAL, di->image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
     ex->recorded++;
     vk_texture_gpu_written(p->dst);

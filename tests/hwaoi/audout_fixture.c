@@ -59,6 +59,16 @@ const char *cfg_get(const char *name) {
     TASSERT(!strcmp(name, "TOTK_AUDIO") || !strcmp(name, "TOTK_AUDIO_OFF"));
     return !strcmp(name, "TOTK_AUDIO") ? audio_mode : NULL;
 }
+/* The player's settings and the window focus the gain follows. */
+static unsigned cfg_ver = 1;
+static double host_volume_pct = 100;
+static int mute_unfocused, window_focused = 1;
+static const char *audio_latency = "low";
+unsigned cfg_version(void) { return cfg_ver; }
+double cfg_double(const char *name) { TASSERT(!strcmp(name, "TOTK_VOLUME")); return host_volume_pct; }
+int cfg_bool(const char *name) { TASSERT(!strcmp(name, "TOTK_MUTE_UNFOCUSED")); return mute_unfocused; }
+const char *cfg_value(const char *name) { TASSERT(!strcmp(name, "TOTK_AUDIO_LATENCY")); return audio_latency; }
+int gfx_window_focused(void) { return window_focused; }
 uint64_t kern_now_ns(void) { return clock_ns; }
 int kern_core_away(void) { return 0; }
 void kern_core_back(int *away) { TASSERT(*away == 0); }
@@ -465,6 +475,41 @@ static void test_controls(void) {
     kern_handle_close(h); _aligned_free(p); clean();
 }
 
+/* The SDL gain is the game's volume times the player's (VOLUME, 0..300 %, live) and is 0 while the window is behind
+   others with MUTE_UNFOCUSED on. The game still reads back its own volume. */
+static void test_player_volume(void) {
+    audio_mode = "sdl"; host_volume_pct = 200; cfg_ver++;
+    uint32_t h = open_out(3, 48000, 2); IpcSession *s = session(h); AudioOut *o = s->state;
+    TASSERT(o->stream->gain == 2.0f);
+    float value = 0.25f; IpcRequest q = {.cmd = 12, .data = (uint8_t *)&value, .data_size = 4};
+    (void)call(s, q); TASSERT(o->stream->gain == 0.5f);
+    IpcResponse r = command(s, 13); TASSERT(r.data_size == 4); memcpy(&value, r.data, 4); TASSERT(value == 0.25f);
+    unsigned char *p = samples(4096);
+    host_volume_pct = 50; cfg_ver++; append(s, 1, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.125f);
+    host_volume_pct = 999; cfg_ver++; append(s, 2, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.75f);
+    host_volume_pct = -5; cfg_ver++; append(s, 3, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.0f);
+    host_volume_pct = 300; cfg_ver++; append(s, 4, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.75f);
+    mute_unfocused = 1; cfg_ver++; window_focused = 0; append(s, 5, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.0f);
+    window_focused = 1; append(s, 6, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.75f);
+    mute_unfocused = 0; cfg_ver++; window_focused = 0; append(s, 7, p, 4096, 8, 0); TASSERT(o->stream->gain == 0.75f);
+    kern_handle_close(h); _aligned_free(p); clean();
+    host_volume_pct = 100; window_focused = 1; cfg_ver++;
+}
+
+/* AUDIO_LATENCY picks the SDL device period (10, 20 or 40 ms at 48 kHz); the lead follows the period SDL reports. */
+static void test_latency(void) {
+    audio_mode = "sdl";
+    static const char *const levels[] = {"low", "normal", "high", "unknown"};
+    static const int frames[] = {480, 960, 1920, 480};
+    for (int i = 0; i < 4; i++) {
+        audio_latency = levels[i]; period_hint[0] = 0; device_period = frames[i];
+        uint32_t h = open_out(3, 48000, 2); IpcSession *s = session(h); AudioOut *o = s->state;
+        TASSERT(atoi(period_hint) == frames[i] && o->lead == (2u * (unsigned)frames[i] + 240) * 4);
+        kern_handle_close(h); clean();
+    }
+    audio_latency = "low"; device_period = 480; period_hint[0] = 0;
+}
+
 int main(int argc, char **argv) {
     TASSERT(argc == 2);
     if (!strcmp(argv[1], "manager")) test_manager();
@@ -478,6 +523,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "fifo")) test_fifo();
     else if (!strcmp(argv[1], "event-life")) test_event_life();
     else if (!strcmp(argv[1], "controls")) test_controls();
+    else if (!strcmp(argv[1], "player-volume")) test_player_volume();
+    else if (!strcmp(argv[1], "latency")) test_latency();
     else TASSERT(0);
     puts("audout fixture check passed");
     return 0;

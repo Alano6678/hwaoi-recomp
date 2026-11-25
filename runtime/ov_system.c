@@ -25,6 +25,7 @@
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
+#include "save_identity.h"
 
 #define NFP_R_DEVICE_NOT_FOUND 0x8073u     // nfp: no NFC reader on the host
 #define ACCOUNT_R_INVALID 0x7c67u          // MacNativeGames' result for an unknown user handle or uid
@@ -361,27 +362,59 @@ static void make_dirs(const char *dir) {
     if (!plat_dir_exists(dir)) rt_fatal("account: cannot create %s", dir);
 }
 
-// Holding account_lock.
+// Holding account_lock. The account is the one account.uid names; a profile folder without the file gets a new one.
+// Two cases would leave a save on the disk beside a game that begins anew, and take the account of that save instead
+// (save_identity.c), when it is the only save in the folder:
+//   - account.uid is missing: a save folder copied here without it, or the file deleted;
+//   - account.uid names an account without a save: the game was started here once before the save was copied in.
+// An account that has a save, or a save commit waiting in save-tx, is never replaced. The identity given up had no
+// save and stays beside the file as account.uid.before-<UTC time>.
 static void load_uid(void) {
     if (local.lo || local.hi) return;
     const char *dir = rt_config()->profile;
-    char path[1100];
+    char path[1100], name[33] = "";
+    uint64_t lone[2] = {0, 0};
     make_dirs(dir);
     need(snprintf(path, sizeof path, "%s/account.uid", dir) < (int)sizeof path, "account: path too long");
     int64_t size = plat_file_size(path);
     if (size <= 0) {
+        int saves = save_identity_saves(dir, lone, name);
+        // A commit waiting in save-tx is the newest save of the account that is gone: the new account takes it at
+        // this start (fs_host.c save_recover), as before, and no other save is put under it.
+        if (saves == 1 && !save_identity_pending(dir)) {
+            local.lo = lone[0], local.hi = lone[1];
+            need(plat_file_write_atomic(path, &local, sizeof local), "account: persist the local account identity");
+            rt_log("account: no account.uid in %s: the account of the only save there, save/%s, is used", dir, name);
+            return;
+        }
         do need(plat_random(&local, sizeof local), "account: random uid");
         while (!local.lo && !local.hi);
         need(plat_file_write_atomic(path, &local, sizeof local), "account: persist the local account identity");
         rt_log("account: new local account in %s", path);
-    } else {
-        uint64_t got = 0;
-        uint8_t *b = plat_file_read(path, &got);
-        if (b && got == sizeof local) memcpy(&local, b, sizeof local);
-        free(b);
-        if (got != sizeof local || (!local.lo && !local.hi))
-            rt_fatal("account: %s is not a local account identity (16 bytes)", path);
+        if (saves > 1)
+            rt_log("account: %s/save holds the saves of %d accounts and no account.uid says which is the player's: "
+                   "the game starts without a save", dir, saves);
+        return;
     }
+    uint64_t got = 0;
+    uint8_t *b = plat_file_read(path, &got);
+    if (b && got == sizeof local) memcpy(&local, b, sizeof local);
+    free(b);
+    if (got != sizeof local || (!local.lo && !local.hi))
+        rt_fatal("account: %s is not a local account identity (16 bytes)", path);
+    uint64_t own[2] = {local.lo, local.hi};
+    if (save_identity_has(dir, own) || save_identity_pending(dir) || save_identity_saves(dir, lone, name) != 1) return;
+    char kept[1200];
+    struct tm t;
+    plat_gmtime((int64_t)(plat_unix_time_ns() / 1000000000u), &t);
+    snprintf(kept, sizeof kept, "%s.before-%04d%02d%02d-%02d%02d%02d", path, t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
+    int kept_ok = plat_fs_rename(path, kept, 1) == PLAT_FS_OK;
+    local.lo = lone[0], local.hi = lone[1];
+    need(plat_file_write_atomic(path, &local, sizeof local), "account: persist the local account identity");
+    rt_log("account: the account in %s had no save and save/%s is the only save in the folder: its account is used "
+           "from now on%s%s", path, name, kept_ok ? "; the identity it replaces is kept as " : "",
+           kept_ok ? kept : "");
 }
 
 // host.h: the save directory of fs_host.c is named after this Uid.

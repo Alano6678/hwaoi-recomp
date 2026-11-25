@@ -1,33 +1,97 @@
 #version 450
-// Camera motion vectors for the temporal upscaler (vk_temporal.c mv_pass), after totk-pc-recomp's dlaa_mv.comp. Each
-// pixel's depth goes from this frame's clip space to last frame's through one reprojection matrix R (inverse(this VP) *
-// last VP, row-vector convention as HWAoI's camera block: clip = v * VP), built on the CPU in double precision. The
-// vector is last frame's window position minus this frame's, in render pixels, without the jitter. Window y grows
-// downwards from ndc y = +1; HWAoI's depth is ndc z itself (0..1, reversed). Objects moving on their own get only the
-// camera's motion. The depth is also written out as R32F (the scene depth is D32S8, which FSR does not take).
+// Motion vectors for the temporal upscaler and frame generation (vk_temporal.c mv_pass), after totk-pc-recomp's
+// dlaa_mv.comp. Each pixel's depth goes from this frame's clip space to last frame's through one reprojection matrix R
+// (inverse(this VP) * last VP, row-vector convention as HWAoI's camera block: clip = v * VP), built on the CPU in double
+// precision. The vector is last frame's window position minus this frame's, in render pixels, without the jitter.
+// Window y grows downwards from ndc y = +1; HWAoI's depth is ndc z itself (0..1, reversed). The depth is also written
+// out as R32F (the scene depth is D32S8, which FSR does not take).
+//
+// Characters (Age of Decomp's own, 2026-11-23): the game has no motion vectors for what moves by itself, and its
+// G-buffer marks every character in the stencil (value 1, the rest of the scene 2: pc.chars holds the bits). With the
+// camera's motion only, a character that the camera follows stands still on the screen while its history was fetched
+// where the ground behind it was: DLSS blended the ground into it, and in the dark, where the two differ little, the
+// character turned see-through. A character's pixel now gets one of two motions, whichever last frame's picture
+// confirms: it stayed where it is on the screen (the followed player: no motion), or it stands in the world (the
+// camera's motion). Last frame's picture is hist (the depth, negative where a character was), looked at 3x3 around
+// each candidate's place; the candidate whose place had a character's surface at the depth it expects wins.
+//
+// Where the history is another surface's, DLSS is made to drop it: where neither candidate finds the character (it moves
+// faster than that, or it has just come into view), and where last frame's surface at a pixel of the scene was a
+// character at another depth (a character just moved away from it, or the scene now covers it). DLSS ignores its
+// bias input (kBufferTypeBiasCurrentColorHint: tried 2026-11-23, every pixel marked still left the character's ghost), so
+// such a pixel's motion points far outside the picture, as at an edge the camera brings into view, which every temporal
+// upscaler takes as "no history here" (pc.drop; 0 keeps the motion), in mvsr_out, the upscaler's own: frame generation
+// takes mv_out, the plain motion. bias_out marks them, for TEMPORAL_DEBUG=mask.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D depth_tex;
 layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
 layout(binding = 2, r32f) uniform writeonly image2D depth_out;
+layout(binding = 3) uniform sampler2D prev_hist;    // last frame's hist_out
+layout(binding = 4, r8) uniform writeonly image2D bias_out;
+layout(binding = 5) uniform usampler2D stencil_tex;  // the scene depth's stencil
+layout(binding = 6, r32f) uniform writeonly image2D hist_out;
+layout(binding = 7, rg16f) uniform writeonly image2D mvsr_out;   // mv_out, or far outside the picture where dropped
 layout(push_constant) uniform P {
-    vec4 r[4];     // the reprojection's rows
-    vec2 size;     // render size in pixels
-    vec2 jitter;   // this frame's jitter, pixels, as the scene was drawn (window x right, y down)
+    vec4 r[4];          // the reprojection's rows
+    vec2 size;          // render size in pixels
+    vec2 jitter;        // this frame's jitter, pixels, as the scene was drawn (window x right, y down)
+    vec2 prev_jitter;   // last frame's
+    float history;      // 1: prev_hist holds last frame's at this size; 0: no history (mask 0); 2: mask 1 (a test)
+    float tolerance;    // the relative difference of distance from which a surface counts as another one
+    uint chars;         // the stencil bits that mark a character (0: characters get the camera's motion, as before)
+    uint drop;          // 1: a pixel whose history is another surface's gets a motion out of the picture
 } pc;
+
+const float NONE = 1e9;
+
+// The smallest relative depth difference between z and a character's surface of last frame, 3x3 around window
+// position w of last frame's picture (NONE: no character there).
+float char_err(vec2 w, float z) {
+    ivec2 c = ivec2(floor(w)), top = ivec2(pc.size) - 1;
+    float best = NONE;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float v = texelFetch(prev_hist, clamp(c + ivec2(dx, dy), ivec2(0), top), 0).r;
+            if (v < 0.0) best = min(best, abs(-v - z) / max(z, 1e-7));
+        }
+    return best;
+}
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(pc.size.x) || p.y >= int(pc.size.y)) return;
     float d = texelFetch(depth_tex, p, 0).r;
+    bool ch = pc.chars != 0u && (texelFetch(stencil_tex, p, 0).r & pc.chars) != 0u;
     imageStore(depth_out, p, vec4(d));
+    imageStore(hist_out, p, vec4(ch ? -max(d, 1e-9) : d));
     vec2 win = vec2(p) + 0.5 - pc.jitter;   // where this pixel's surface sits without the jitter
     vec4 ndc = vec4(win.x / pc.size.x * 2.0 - 1.0, 1.0 - win.y / pc.size.y * 2.0, d, 1.0);
     vec4 clip = ndc.x * pc.r[0] + ndc.y * pc.r[1] + ndc.z * pc.r[2] + ndc.w * pc.r[3];
     vec2 mv = vec2(0.0);
+    float bias = pc.history > 1.5 ? 1.0 : 0.0;
     if (clip.w > 1e-6) {
         vec2 pn = clip.xy / clip.w;
         vec2 pwin = vec2((pn.x * 0.5 + 0.5) * pc.size.x, (0.5 - pn.y * 0.5) * pc.size.y);
         mv = pwin - win;
+        vec2 q = pwin + pc.prev_jitter;   // the pixel of last frame's picture this point was drawn in, if it stood still
+        if (pc.history > 0.5 && pc.history < 1.5 && pc.chars != 0u) {
+            // Reversed depth is near / distance but for a term too small to matter here: a larger value is nearer,
+            // and the relative difference of two depths is that of their distances.
+            float zexp = clip.z / clip.w;
+            if (ch) {
+                float on_screen = char_err(win + pc.prev_jitter, d);   // stayed on the screen: the same depth
+                float in_world = char_err(q, zexp);                    // stood in the world: the camera's change
+                if (on_screen < in_world) mv = vec2(0.0);
+                if (min(on_screen, in_world) > 2.0 * pc.tolerance) bias = 1.0;
+            } else if (q.x >= 0.0 && q.y >= 0.0 && q.x < pc.size.x && q.y < pc.size.y) {
+                float v = texelFetch(prev_hist, ivec2(q), 0).r;
+                if (v < 0.0 && abs(-v - zexp) > pc.tolerance * max(zexp, 1e-7)) bias = 1.0;   // a character, elsewhere
+            }
+        }
     }
+    // mv_out keeps the plain motion (frame generation: far motions made DLSS-G stall ~70 ms every few seconds);
+    // mvsr_out, for the upscaler, sends a dropped pixel's last-frame place far outside the picture
     imageStore(mv_out, p, vec4(mv, 0.0, 0.0));
+    imageStore(mvsr_out, p, vec4(bias > 0.5 && pc.drop != 0u ? -4.0 * pc.size : mv, 0.0, 0.0));
+    imageStore(bias_out, p, vec4(bias));
 }

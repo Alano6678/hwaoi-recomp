@@ -8,3 +8,5 @@ void binds_rows(float scale);
 void binds_after_page(void);
 // A cell waits for a press (or its press is still reaching the menu): B, Esc, L / R and the tab keys stay on the page.
 bool binds_modal(void);
+// The first player-one controller binding for an action, or fallback when it has none.
+const char *binds_pad_hint(int action, const char *fallback, int *face_label = nullptr);

@@ -1,4 +1,5 @@
-"""Real mirror admission policy: low Windows commit, explicit overrides and unknown readings."""
+"""Real mirror admission policy: low Windows commit, a page file that may still grow, explicit overrides and unknown
+readings."""
 import os
 from pathlib import Path
 import subprocess
@@ -23,10 +24,11 @@ class MirrorCommitBudgetTests(unittest.TestCase):
 #include <assert.h>
 #include <stdio.h>
 static const char *mode="auto";
-static double used,limit;
+static double used,limit,growth;
 static unsigned queries;
 static const char *cfg_value(const char *key){assert(!strcmp(key,"TOTK_MEMORY"));return mode;}
 static void plat_commit_info(double *p,double *u,double *l){*p=15555;*u=used;*l=limit;queries++;}
+static double plat_commit_growth_mb(void){return growth;}
 '''
         main = r'''
 int main(void){
@@ -43,6 +45,16 @@ int main(void){
  limit=INFINITY;assert(mirror_commit_room(pool,&available) && available==-1);
  used=-1;limit=30000;assert(mirror_commit_room(pool,&available) && available==-1);
  used=10000;limit=20000;assert(!mirror_commit_room(UINT64_MAX,&available));
+ // GitHub #15: 16 GB of RAM, 2482 MiB of commit left; a page file Windows manages may still grow, so it counts
+ limit=19300;used=16818;growth=0;assert(!mirror_commit_room(pool,&available));assert(available==2482);
+ growth=5244;assert(!mirror_commit_room(pool,&available));assert(available==7726);  // one MiB short
+ growth=5245;assert(mirror_commit_room(pool,&available));assert(available==7727);
+ growth=44000;assert(mirror_commit_room(pool,&available));
+ growth=-1;assert(!mirror_commit_room(pool,&available));assert(available==2482);  // unknown: not counted
+ growth=NAN;assert(!mirror_commit_room(pool,&available));assert(available==2482);
+ growth=INFINITY;assert(!mirror_commit_room(pool,&available));assert(available==2482);
+ used=limit+1;growth=8000;assert(mirror_commit_room(pool,&available));assert(available==8000);  // over the limit now
+ growth=0;
  const char *overrides[]={"import","mirror","verify"};
  used=30000;limit=30001;
  for(unsigned i=0;i<3;i++){mode=overrides[i];unsigned before=queries;assert(mirror_commit_room(pool,&available));
@@ -63,7 +75,8 @@ int main(void){
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             source.write_text(head + policy + r'''
 int main(void){double available;used=999;limit=1000;assert(mirror_commit_room(1ull<<40,&available));
- assert(!queries && available==-1);(void)cfg_value;(void)plat_commit_info;return 0;}
+ assert(!queries && available==-1);(void)cfg_value;(void)plat_commit_info;(void)plat_commit_growth_mb;(void)growth;
+ return 0;}
 ''', encoding="utf-8")
             result = subprocess.run([str(CC), "-O2", "-DRT_TARGET_HWAOI=0", "-Wall", "-Wextra", "-Werror",
                                      str(source), "-o", str(exe)], capture_output=True, text=True, timeout=30)

@@ -53,7 +53,9 @@ enum {
 };
 
 // Gamepad layouts (TOTK_PAD_LAYOUT): which face button is Switch A. Nintendo: by position, east A, south B, west Y,
-// north X. Xbox: south A, east B, west X, north Y, as an Xbox pad labels them (cross A, circle B on a PlayStation pad).
+// north X, on every maker's pad: the game's combos, its dots and its skill wheel show positions, so the button to
+// press is where the game draws it (hud_prompts.c draws what the pad prints there). Xbox: south A, east B, west X,
+// north Y, as an Xbox pad labels them (cross A, circle B on a PlayStation pad).
 enum { PAD_LAYOUT_NINTENDO, PAD_LAYOUT_XBOX, PAD_LAYOUT_COUNT };
 
 enum { INPUT_BINDING_MAX = 96, INPUT_PAD_BINDING_MAX = 48 };
@@ -97,11 +99,12 @@ int input_map_bind_into(InputMap *m, const char *button, const char *list);   //
 // Applies the TOTK_BIND_<action> settings (cfg_get) over the defaults: at start, and again when one of them changes.
 void input_map_configure(void);
 
-// The layout for a TOTK_PAD_LAYOUT value: "nintendo" or "xbox" (any case); "xbox_prompts" is the Nintendo layout with
-// the A/B and X/Y prompts swapped (runtime/romfs.c overlay_init), so the buttons map as "nintendo". Anything else
-// ("auto", NULL) picks Nintendo when the pad's east button is labelled A (a Switch Pro Controller, a GuliKit) and Xbox
-// otherwise.
-int input_pad_layout_pick(const char *setting, int east_labelled_a);
+// The layout for a TOTK_PAD_LAYOUT value: the Nintendo layout, whatever the value. The Xbox layout ("xbox", A at the
+// bottom) was a choice in 0.1.3's previews and is gone in 0.2.0: the game draws positions (combos, dots, skill
+// wheels), so with it the button drawn was not the one to press; a player who wants A at the bottom moves A and B in
+// the Controls page instead. "auto", "nintendo" and "xbox_prompts" are the older names. Up to 0.1.2 "auto" was the
+// Xbox layout on a pad whose east button is not labelled A. PAD_LAYOUT_XBOX stays for input_map's tables and tests.
+int input_pad_layout_pick(const char *setting);
 // down[pad] != 0 for the gamepad inputs held. Returns the Switch button bits (0..15) the layout's pad table presses.
 uint64_t input_map_pad_buttons(const uint8_t down[PAD_COUNT], int layout);
 uint64_t input_map_pad_buttons_m(const InputMap *m, const uint8_t down[PAD_COUNT], int layout);   // with table m

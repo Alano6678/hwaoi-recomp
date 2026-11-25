@@ -46,6 +46,26 @@ hwaoi_ui_canvas replaces the copy at af42e4..af42f0 by: `ldp q0,q1,[x2]; adrp x9
 fmul v0.4s/v1.4s by v2.s[0]; stp q0,q1,[x1]` (the original ldp/stp pairs become nops). Page +0xb8 = f32
 output_w / 1920 (res_init). The corners reach the vertex buffer in output pixels, consistent with text.
 
+### The recorder's other shapes (2026-11-23, Age of Decomp; not yet seen in a battle)
+
+A report from 2560x1440: the enemies' dots are missing in the zoomed minimap and there in the whole-map view. The
+recorder's geometry methods, read in the generated C (items of 0x60 bytes in batch = renderer+8):
+
+| Method | Item | Positions | Above 1080p |
+|---|---|---|---|
+| main+af38c0, af3ea4 | 0: quad, four corners | through main+af42dc | scaled (the sites above) |
+| main+af3788 (one colour), af3d7c (item 6) | quad from a rectangle x0 y0 x1 y1 | through main+af43d0 | was not scaled |
+| main+af3b24 | 1: line, two points, colour, width (s0..s4) | stored as given for a batch with a target | was not scaled |
+| main+af39f0 | 2: triangle, three points | stored as given, no branch on the target | not scaled, left alone |
+
+main+af43d0, for a batch with a target, copies the rectangle's four numbers into four corners with eight `ldr s0` /
+`str s0` pairs (af43d8..af4414). hwaoi_ui_canvas now follows each load with `fmul s0, s0, s2`, s2 = page +0xb8 loaded
+before the first one (x9 and s2 are free there: both callers load them again after the call). main+af3b24 gets its
+five kept arguments s12..s8 multiplied at af3b74, the first instruction of the path for a batch with a target (the
+width too). The world map and the training field's HUD at 2560x1440 look the same with and without the nine sites.
+If the zoomed minimap still lacks something, the triangles are next. resolution.c also writes the canvas (1920x1080)
+and a scale of 1.0 to the page on the game's own 3D path (`RENDER_SCALE=game`), where the page was left at zero.
+
 How it was found: hardware write breakpoints (perf_event_open PERF_TYPE_BREAKPOINT, one event per thread, signal
 handler logs host rip and the guest frame-pointer chain via kern_cpu()) on the corner values of one icon found in
 memory (scan of rw mappings for the vertex buffer's first x,y), which pointed at main+15f2ca4; then a temporary hook in

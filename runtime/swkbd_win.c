@@ -73,8 +73,10 @@ static LRESULT CALLBACK entry_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         input_poll_ui(&b, &lx, &ly, &rx, &ry);
         uint64_t pressed = b & e->armed;   // down now, up at the previous tick
         e->armed = ~b;
-        if (pressed & (1ull << B_A | 1ull << B_PLUS)) finish(e, 1);
-        else if (pressed & 1ull << B_B) finish(e, -1);
+        // OK with the button the game's menus confirm with (input_confirm_bottom: the game's B), Cancel with the other
+        int ok = input_confirm_bottom() ? B_B : B_A, cancel = ok == B_A ? B_B : B_A;
+        if (pressed & (1ull << ok | 1ull << B_PLUS)) finish(e, 1);
+        else if (pressed & 1ull << cancel) finish(e, -1);
         return 0;
     }
     }

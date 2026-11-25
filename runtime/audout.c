@@ -5,8 +5,11 @@
 // guest buffer) without it: HWAoI keeps only four 5-ms buffers in flight, and
 // releasing them only when the device pulled their bytes left less queued than
 // one SDL/PipeWire period (1024 frames), so every period ended in silence.
-// Explicit AUDIO=none uses a real-time sample clock instead.
+// Explicit AUDIO=none or an unavailable audio device uses a real-time sample clock instead.
 // Only the default device is exposed; unsupported formats/modes fail visibly.
+// The SDL gain is the game's own volume (SetAudioOutVolume) times the player's: TOTK_VOLUME (0..300 %, the launcher's
+// and the menu's master volume) and, with TOTK_MUTE_UNFOCUSED=1, silence while the game window is not in front. Both
+// are live; TOTK_AUDIO_LATENCY=low|normal|high (10, 20, 40 ms device periods) applies when the output opens.
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +30,10 @@ typedef struct {
     volatile int32_t running;
     uint32_t event, state, rate, channels, lead;
     uint64_t played, last_ns, fraction, submitted, consumed;
-    float volume;
+    float volume;              // the game's own (SetAudioOutVolume, 0..1)
+    float host, gain;          // the player's factor (volume and background mute), and the gain SDL has
+    unsigned host_seen;        // cfg_version the player's volume was read at
+    int mute_unfocused;        // TOTK_MUTE_UNFOCUSED at that version
     OutBuffer pending[OUT_MAX_BUFFERS];
     uint64_t released[OUT_MAX_BUFFERS];
     unsigned npending, nreleased;
@@ -38,6 +44,31 @@ typedef struct {
 
 static void out_need(int ok, const char *what) {
     if (!ok) { ipc_backtrace(); rt_fatal("audout: %s", what); }
+}
+int gfx_window_focused(void);   // gfx.h: 1 while the game window has the input focus
+
+// The stream's SDL gain: the game's volume times the player's (see the top of the file). Called with o->lock held on
+// open, on SetAudioOutVolume and on every append, so a changed setting or focus reaches the sound within a buffer.
+static void out_apply_gain(AudioOut *o) {
+    unsigned version = cfg_version();
+    if (version != o->host_seen) {
+        o->host_seen = version;
+        double pct = cfg_double("TOTK_VOLUME");
+        o->host = (float)((pct > 0 ? (pct < 300 ? pct : 300) : 0) / 100);
+        o->mute_unfocused = cfg_bool("TOTK_MUTE_UNFOCUSED");
+    }
+    float gain = o->volume * o->host;
+    if (o->mute_unfocused && !gfx_window_focused()) gain = 0;
+    if (o->stream && gain != o->gain) {
+        out_need(SDL_SetAudioStreamGain(o->stream, gain), "SDL gain failed");
+        o->gain = gain;
+    }
+}
+
+// SDL device period for TOTK_AUDIO_LATENCY: low 480 frames (10 ms at 48 kHz, the default), normal 960, high 1920.
+static const char *out_latency_frames(void) {
+    const char *v = cfg_value("TOTK_AUDIO_LATENCY");
+    return !strcmp(v, "high") ? "1920" : !strcmp(v, "normal") ? "960" : "480";
 }
 static IpcBuffer out_input(const IpcRequest *rq) {
     if (rq->na && rq->a[0].size) return rq->a[0];
@@ -187,7 +218,7 @@ static void out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
         // an explicit Flush. No buffer is falsely reported as played on Stop.
         if (o->stream) out_need(SDL_PauseAudioStreamDevice(o->stream), "SDL pause failed");
         o->state = 1; o->fraction = 0; break;
-    case 3: case 7: out_append(o, rq); break;
+    case 3: case 7: out_append(o, rq); out_apply_gain(o); break;
     case 4: rs->copy[rs->ncopy++] = kern_event_readable(o->event); break;
     case 5: case 8: {
         IpcBuffer out = out_output(rq, rs);
@@ -221,8 +252,8 @@ static void out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     case 12: {
         float v = IPC_ARG(rq, float, 0);
         out_need(isfinite(v) && v >= 0 && v <= 1, "volume outside 0..1");
-        if (o->stream) out_need(SDL_SetAudioStreamGain(o->stream, v), "SDL gain failed");
-        o->volume = v; break;
+        o->volume = v;
+        out_apply_gain(o); break;
     }
     case 13: IPC_OUT(rs, o->volume); break;
     default: plat_mutex_unlock(&o->lock); ipc_unimplemented(s, rq);
@@ -259,18 +290,24 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
         AudioOut *o = calloc(1, sizeof *o);
         out_need(o != NULL, "state allocation");
         o->state = 1; o->rate = rate; o->channels = channels; o->volume = 1;
+        o->host = 1; o->gain = 1; o->host_seen = ~0u;   // SDL streams start at gain 1; the first apply reads the setting
         o->last_ns = kern_now_ns(); o->event = kern_event_new();
         o->tr_ns = o->last_ns; o->tr_min = ~0ull; o->tr_low = -1;
         plat_mutex_init(&o->lock);
         const char *mode = cfg_get("TOTK_AUDIO");
-        if (!((mode && !strcmp(mode, "none")) || cfg_get("TOTK_AUDIO_OFF"))) {
-            out_need(SDL_InitSubSystem(SDL_INIT_AUDIO), "SDL audio initialization failed (use HWAOI_AUDIO=none for explicit silent mode)");
-            SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)channels, (int)rate};
-            // A 10-ms device period instead of SDL's 1024-frame default keeps the lead short. The
-            // SDL_AUDIO_DEVICE_SAMPLE_FRAMES environment variable still overrides it.
-            if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)) SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");
-            o->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-            out_need(o->stream != NULL, "SDL output device failed (use HWAOI_AUDIO=none for explicit silent mode)");
+        const int silent = (mode && !strcmp(mode, "none")) || cfg_get("TOTK_AUDIO_OFF");
+        if (!silent) {
+            if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+                SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)channels, (int)rate};
+                // A 10-ms device period keeps the lead short; AUDIO_LATENCY trades it for fewer underruns on slow
+                // or Bluetooth outputs. An explicit SDL hint still wins.
+                if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES))
+                    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, out_latency_frames());
+                o->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+            }
+            if (!o->stream) rt_log("audout: no usable SDL audio device (%s); playing without sound", SDL_GetError());
+        }
+        if (o->stream) {
             SDL_AudioSpec device;
             int period = 0;
             if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(o->stream), &device, &period) || period <= 0 || device.freq <= 0) {
@@ -284,6 +321,7 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
             out_need(lead <= OUT_MAX_BYTES, "unsupported audio device period");
             o->lead = (uint32_t)lead;
         }
+        out_apply_gain(o);   // the player's volume from the first sample (no other thread has o yet)
         o->running = 1;
         o->thread = plat_thread_new(out_worker, o, "audout");
         out_need(o->thread != NULL, "worker creation");
@@ -291,7 +329,7 @@ void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
         IPC_OUT(rs, info);
         rs->move[rs->nmove++] = ipc_session_new("IAudioOut", out_handler, o, out_close);
         rt_log("audout: opened %u Hz PCM16 x%u, aruid %#llx, %s, lead %u frames", rate, channels,
-               (unsigned long long)aruid, o->stream ? "SDL output" : "explicit silent sample clock",
+               (unsigned long long)aruid, o->stream ? "SDL output" : "silent sample clock",
                o->lead / (2u * channels));
         return;
     }

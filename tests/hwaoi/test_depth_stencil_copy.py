@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
-DEPS = Path("F:/TotKDependencies/runtime/deps/include")
+CC = Path(os.environ.get("AOD_CC", os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe"))
+DEPS = Path(os.environ.get("AOD_DEPS", "F:/TotKDependencies/runtime/deps/include"))
 sys.path.insert(0, str(ROOT / "tests"))
 from nvn2_compute_c0_test import function
 
@@ -71,10 +71,14 @@ def copy_source():
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"check line %d: %s\n",__LINE__,#x);exit(1); } } while(0)
 static tex_t source_tex, destination_tex;
 static VkTexImage images[2];
-static unsigned lookups, pass_ends, barriers, copies, written;
+static unsigned lookups, pass_ends, barriers, copies, written, warnings;
 static int missing;
 static VkImageCopy received;
 static VkExec *execution;
+enum { W_DEPTH_COPY, W_COUNT };
+void rt_log(const char *fmt,...) {
+    CHECK(strstr(fmt, "%s")); warnings++;
+}
 void rt_fatal(const char *fmt,...) {
     CHECK(!pass_ends && !barriers && !copies && !written && !execution->recorded);
     va_list ap;va_start(ap,fmt);vfprintf(stderr,fmt,ap);va_end(ap);exit(73);
@@ -95,7 +99,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer cb,VkImage src,VkImage
 }
 void vk_texture_gpu_written(const tex_t *t) {CHECK(t==&destination_tex && copies==1 && execution->recorded==1);written++;}
 '''
-    funcs = ["static uint32_t max1(", "static int combined_depth_stencil(",
+    funcs = ["static void warn_once(", "static uint32_t max1(", "static int combined_depth_stencil(",
              "static VkImageSubresourceLayers sub_layers(", "static VkOffset3D sub_offset(",
              "static VkExtent3D sub_extent(", "static int depth_copy_sub(",
              "static _Noreturn void depth_copy_fail(", "static int copy_depth_stencil("]
@@ -171,7 +175,13 @@ int main(int argc,char **argv) {
     else if(!strcmp(mode,"dst-usage"))images[1].usage=0;
     else if(!strcmp(mode,"bound-src"))images[0].bound=1;
     else if(!strcmp(mode,"bound-dst"))images[1].bound=1;
-    else if(!strcmp(mode,"same-image"))images[1].image=images[0].image;
+    else if(!strcmp(mode,"same-image") || !strcmp(mode,"same-image-disjoint")) {
+        images[1].image=images[0].image;
+        destination_tex.mem=source_tex.mem;
+        if (!strcmp(mode,"same-image-disjoint")) {
+            expected_h=450; p.sr.height=p.dr.height=450; p.dr.yoffset=450;
+        }
+    }
     else if(!strcmp(mode,"same-storage"))destination_tex.mem=source_tex.mem;
     else if(!strcmp(mode,"overlap"))destination_tex.mem=source_tex.mem+source_tex.L.size-1;
     else if(!strcmp(mode,"reverse-overlap"))source_tex.mem=destination_tex.mem+1;
@@ -193,12 +203,19 @@ int main(int argc,char **argv) {
     int handled=copy_depth_stencil(&ex,&p);
     CHECK(!memcmp(&p,&before,sizeof p) && !memcmp(&source_tex,&st,sizeof st) && !memcmp(&destination_tex,&dt,sizeof dt));
     if(!strcmp(mode,"colour")) {CHECK(!handled && !lookups && !copies && !ex.recorded);return 0;}
+    if(!strcmp(mode,"bound-src") || !strcmp(mode,"bound-dst") || !strcmp(mode,"same-image") ||
+       !strcmp(mode,"same-storage") || !strcmp(mode,"overlap") || !strcmp(mode,"reverse-overlap")) {
+        CHECK(handled && lookups==2 && pass_ends==1 && barriers==1 && warnings==1);
+        CHECK(!copies && !written && !ex.recorded);
+        return 0;
+    }
     CHECK(handled && lookups==2 && pass_ends==1 && barriers==1 && copies==1 && written==1 && ex.recorded==1);
     CHECK(received.srcSubresource.aspectMask==(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT));
     CHECK(received.dstSubresource.aspectMask==received.srcSubresource.aspectMask);
     CHECK(received.extent.width==expected_w && received.extent.height==expected_h && received.extent.depth==1);
     CHECK(received.srcSubresource.layerCount==expected_layers && received.dstSubresource.layerCount==expected_layers);
     CHECK(received.srcOffset.z==0 && received.dstOffset.z==0);
+    if(!strcmp(mode,"same-image-disjoint")) CHECK(received.srcOffset.y==0 && received.dstOffset.y==450);
     if(!strcmp(mode,"array") || !strcmp(mode,"default-counts")) {
         CHECK(received.srcSubresource.mipLevel==1 && received.dstSubresource.mipLevel==1);
         CHECK(received.srcSubresource.baseArrayLayer==3 && received.dstSubresource.baseArrayLayer==7);
@@ -235,13 +252,14 @@ class DepthStencilCopyTests(unittest.TestCase):
 
     def test_copy_aspects_ranges_order_and_failures(self):
         good = ("observed", "array", "default-counts", "default-region", "identity-view", "no-view", "adjacent-storage", "colour")
+        good += ("same-image-disjoint", "bound-src", "bound-dst", "same-image", "same-storage", "overlap", "reverse-overlap")
         bad = ("null-src", "null-dst", "format", "linear", "engine", "mirror", "unknown-flag",
                "mip-32", "mip-255", "mip-end", "mip-range", "layer-base", "layer-range", "view-layer-bound",
                "negative-x", "negative-y", "negative-z", "negative-width", "negative-height", "negative-depth",
                "x-outside", "y-outside", "z-outside", "region-overflow", "width", "height", "layer-count",
                "image-format", "missing", "zero-handle", "aspect", "3d", "native-3d", "depth", "samples", "resolve",
                "zero-width", "zero-height", "zero-levels", "over-levels", "zero-layers", "src-usage", "dst-usage",
-               "bound-src", "bound-dst", "same-image", "same-storage", "overlap", "reverse-overlap", "zero-address",
+               "zero-address",
                "zero-size", "overflow-storage", "swizzle", "dsmode", "view-format", "view-target")
         with tempfile.TemporaryDirectory(prefix="hwaoi-depth-copy-") as tmp:
             path = Path(tmp) / "fixture.c"

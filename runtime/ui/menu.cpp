@@ -6,10 +6,12 @@
 // da35b83a9611d046a9a681aae668d7085954d37f, MIT, Copyright (c) 2026 Peiikai): dynamic rendering into the swapchain
 // image, an internal descriptor pool, vertex buffers rotated over more frames than are in flight.
 //
-// The look (colours, rounding, the tab bar with L / R and Q / E, the window over a dimmed game) follows
-// SavageWindRecomp's runtime/ui/menu.mm (https://github.com/Revivedx/SavageWindRecomp @
+// The look and layout are Age of Decomp's "Seal of the Imprisoned", after its launcher. Page switching with L / R and
+// Q / E and the full performance panel follow SavageWindRecomp's runtime/ui/menu.mm
+// (https://github.com/Revivedx/SavageWindRecomp @
 // 575ad88e02f9a89a9a885d90039d48af33c982f4, MIT, Copyright (c) 2026 Revivedx and the Savage Wind Recomp contributors,
-// Copyright (c) 2026 Peiikai); the pages are rows of option_rows.cpp.
+// Copyright (c) 2026 Peiikai). This file came from TotK Recomp (https://github.com/valentderah/totk-pc-recomp,
+// MIT, Copyright (c) 2026 Valiantsin Dzerakh) through DKB Recomp.
 #include <atomic>
 #include <limits.h>
 #include <math.h>
@@ -32,10 +34,12 @@ static int g_font_bad;
 #pragma clang diagnostic pop
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
+#include "ui/theme.h"
 #include "game_target.h"
 
 extern "C" {
 #include "cfg.h"
+#include "color_presets.h"
 #include "input.h"
 #include "input_map.h"
 #include "perfmon.h"
@@ -48,22 +52,33 @@ void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int vk_ffx_lib_present(void);   // vk_ffx.h
 void vk_ffx_fetch_async(void);  // vk_ffx_fetch.h
 int vk_ffx_fetch_state(void);
+int vk_dlss_offered(void);      // vk_dlss.h
+int vk_dlss_failed(void);
+int vk_fg_wanted(void);         // frame generation (vk_dlss.h)
+int vk_fg_offered(void);
+int vk_fg_failed(void);
+int vk_fg_factor(void);
+int vk_fg_max(void);
+double vk_fg_rate(void);
+int vk_hdr_offered(void);       // vk.h: the screen offers an HDR10 picture (1, 0, -1 not known yet)
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
 void res_sizes(unsigned out[2], unsigned scene[2]);
+void res_auto_size(unsigned out[2]);
+int rt_patch_set(const char *name);
 double frame_step_limit_hz(void);
 extern const int rt_game_version;
-// fs.h (romfs.c): romfs-patches-xbox was next to romfs-index.bin at start, and was loaded.
-int romfs_xbox_prompts_ready(void);
-int romfs_xbox_prompts_active(void);
 extern const char rt_port_version[];
 }
 
-// Roboto Medium (Apache-2.0, ui/fonts/LICENSE-Roboto.txt) with Latin and Cyrillic glyphs.
+// Inter and Cinzel (OFL-1.1, ui/fonts/OFL-Inter.txt and OFL-Cinzel.txt).
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc23-extensions"   // #embed in C++
-static const unsigned char roboto_ttf[] = {
-#embed "fonts/Roboto-Medium.ttf"
+static const unsigned char inter_ttf[] = {
+#embed "fonts/Inter-Variable.ttf"
+};
+static const unsigned char cinzel_ttf[] = {
+#embed "fonts/Cinzel-Variable.ttf"
 };
 #pragma clang diagnostic pop
 
@@ -112,10 +127,21 @@ static void push(Ev e) {
     plat_mutex_unlock(&ev_lock);
 }
 
-extern "C" void menu_event_key(int key, int down) { push({EV_KEY, key, down, 0, 0}); }
+// A key, a mouse button or the wheel makes the keyboard and mouse the device in use (the hints show keys); moving the
+// pointer alone does not, so a nudged mouse leaves a controller's hints in place.
+extern "C" void menu_event_key(int key, int down) {
+    if (down) input_note_keyboard();
+    push({EV_KEY, key, down, 0, 0});
+}
 extern "C" void menu_event_mouse_pos(float x, float y) { push({EV_POS, 0, 0, x, y}); }
-extern "C" void menu_event_mouse_button(int button, int down) { push({EV_BUTTON, button, down, 0, 0}); }
-extern "C" void menu_event_wheel(float dx, float dy) { push({EV_WHEEL, 0, 0, dx, dy}); }
+extern "C" void menu_event_mouse_button(int button, int down) {
+    if (down) input_note_keyboard();
+    push({EV_BUTTON, button, down, 0, 0});
+}
+extern "C" void menu_event_wheel(float dx, float dy) {
+    input_note_keyboard();
+    push({EV_WHEEL, 0, 0, dx, dy});
+}
 extern "C" void menu_event_focus(int focused) { push({EV_FOCUS, focused, 0, 0, 0}); }
 
 static void drain_events(ImGuiIO &io) {
@@ -138,7 +164,8 @@ static void drain_events(ImGuiIO &io) {
 }
 
 // ---- gamepad navigation: the Switch buttons of our SDL3 gamepad to ImGui's gamepad keys. Nintendo layout: A (east)
-// activates, B (south) cancels.
+// activates, B (south) cancels; the other way round while the game's menus confirm with B (input_confirm_bottom), so
+// this menu confirms with the button the game's menus confirm with.
 static const struct { int bit; ImGuiKey key; } pad_keys[] = {
     {B_A, ImGuiKey_GamepadFaceDown}, {B_B, ImGuiKey_GamepadFaceRight}, {B_X, ImGuiKey_GamepadFaceUp},
     {B_Y, ImGuiKey_GamepadFaceLeft}, {B_L, ImGuiKey_GamepadL1}, {B_R, ImGuiKey_GamepadR1},
@@ -147,6 +174,7 @@ static const struct { int bit; ImGuiKey key; } pad_keys[] = {
 };
 static uint64_t pad_prev;   // buttons at the last frame; a button held when the menu opened counts once released
 static int stick_dir = -1;  // the D-pad button the left stick holds, -1 none
+static bool pad_have;
 
 // The left stick moves the cursor as the D-pad does (ImGui's own stick handling only scrolls the page): past half way
 // it holds the D-pad direction of its larger axis, kept until that axis falls under 0.35; ImGui repeats a held one.
@@ -161,11 +189,15 @@ static int stick_to_dpad(int32_t lx, int32_t ly) {
 static void pad_events(ImGuiIO &io, int reset) {
     uint64_t b;
     int32_t lx, ly;
-    int have = input_pad_read(&b, &lx, &ly);
-    if (have) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    pad_have = input_pad_read(&b, &lx, &ly) != 0;
+    if (pad_have) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     stick_dir = stick_to_dpad(lx, ly);
     if (stick_dir >= 0) b |= 1ull << stick_dir;
+    if (input_confirm_bottom()) {   // A and B change places (a change while one is held reads as a release and a press)
+        uint64_t a = b >> B_A & 1, bb = b >> B_B & 1;
+        b = (b & ~(1ull << B_A | 1ull << B_B)) | a << B_B | bb << B_A;
+    }
     if (reset) {
         pad_prev = b;
         return;
@@ -182,6 +214,8 @@ static int g_ctx_ok;              // context made
 static std::atomic<int> g_failed; // set-up failed for good (the menu stays closed)
 static int g_failed_flag() { return g_failed.load(std::memory_order_relaxed); }
 static int g_vk_ok;               // back end initialised for g_vk_fmt
+static theme::Fonts g_fonts;
+const theme::Fonts &theme::fonts() { return g_fonts; }
 static VkFormat g_vk_fmt;
 static float g_font_scale;        // the scale of the uploaded font atlas; 0 when none is uploaded
 static float g_style_scale;       // the scale the style was last sized for
@@ -197,27 +231,82 @@ static float menu_scale(uint32_t h) {
     return ((float)h >= least ? (float)h : least) / 1080.0f;
 }
 
-// SavageWindRecomp's colours: dark green panels, gold accents.
 static void style_init(ImGuiStyle &s) {
     ImGui::StyleColorsDark(&s);
-    s.WindowRounding = 14; s.FrameRounding = 8; s.GrabRounding = 8; s.TabRounding = 8; s.ChildRounding = 10;
-    s.WindowPadding = ImVec2(28, 22); s.FramePadding = ImVec2(14, 8); s.ItemSpacing = ImVec2(14, 12);
-    s.WindowBorderSize = 0; s.ScrollbarSize = 18;
+    s.WindowRounding = 20; s.FrameRounding = 10; s.GrabRounding = 10; s.PopupRounding = 14; s.ChildRounding = 0;
+    s.WindowPadding = ImVec2(32, 32); s.FramePadding = ImVec2(14, 8); s.ItemSpacing = ImVec2(14, 8);
+    s.WindowBorderSize = 1; s.PopupBorderSize = 1; s.ScrollbarSize = 14;
     ImVec4 *c = s.Colors;
-    ImVec4 gold(0.93f, 0.76f, 0.33f, 1), green(0.15f, 0.36f, 0.25f, 1);
-    c[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.09f, 0.08f, 0.94f);
+    for (int i = 0; i < ImGuiCol_COUNT; i++) c[i] = theme::colour(theme::surface3);
+    c[ImGuiCol_WindowBg] = theme::colour(theme::surface1);
+    c[ImGuiCol_PopupBg] = theme::colour(theme::surface2);
     c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_Text] = ImVec4(0.96f, 0.94f, 0.88f, 1);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.64f, 0.58f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.14f, 0.22f, 0.18f, 1);
-    c[ImGuiCol_ButtonHovered] = green;
-    c[ImGuiCol_ButtonActive] = ImVec4(0.21f, 0.50f, 0.34f, 1);
-    c[ImGuiCol_Tab] = ImVec4(0.12f, 0.18f, 0.15f, 1);
-    c[ImGuiCol_TabHovered] = green;
-    c[ImGuiCol_TabSelected] = ImVec4(0.21f, 0.44f, 0.31f, 1);
-    c[ImGuiCol_TabSelectedOverline] = gold;
-    c[ImGuiCol_NavCursor] = gold;
-    c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
+    c[ImGuiCol_Border] = theme::colour(theme::line_strong);
+    c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_Text] = theme::colour(theme::text);
+    c[ImGuiCol_TextDisabled] = theme::colour(theme::text_dim);
+    c[ImGuiCol_FrameBg] = theme::colour(theme::surface3);
+    c[ImGuiCol_FrameBgHovered] = c[ImGuiCol_FrameBgActive] = theme::colour(theme::surface4);
+    c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_TitleBgCollapsed] = theme::colour(theme::surface1);
+    c[ImGuiCol_MenuBarBg] = theme::colour(theme::surface2);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = theme::colour(theme::surface4);
+    c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_ScrollbarGrabActive] = theme::colour(theme::line_strong);
+    c[ImGuiCol_CheckMark] = c[ImGuiCol_SliderGrab] = c[ImGuiCol_SliderGrabActive] = theme::colour(theme::focus);
+    c[ImGuiCol_Button] = theme::colour(theme::surface3);
+    c[ImGuiCol_ButtonHovered] = theme::colour(theme::surface4);
+    c[ImGuiCol_ButtonActive] = theme::colour(theme::surface4);
+    c[ImGuiCol_Header] = theme::colour(theme::surface3);
+    c[ImGuiCol_HeaderHovered] = c[ImGuiCol_HeaderActive] = theme::colour(theme::surface4);
+    c[ImGuiCol_Tab] = c[ImGuiCol_TabDimmed] = theme::colour(theme::surface2);
+    c[ImGuiCol_TabHovered] = c[ImGuiCol_TabSelected] = c[ImGuiCol_TabDimmedSelected] = theme::colour(theme::surface3);
+    c[ImGuiCol_TabSelectedOverline] = c[ImGuiCol_TabDimmedSelectedOverline] = theme::colour(theme::focus);
+    c[ImGuiCol_PlotLines] = c[ImGuiCol_PlotLinesHovered] = c[ImGuiCol_PlotHistogram] =
+        c[ImGuiCol_PlotHistogramHovered] = theme::colour(theme::focus);
+    c[ImGuiCol_TextSelectedBg] = theme::colour(theme::focus_soft);
+    c[ImGuiCol_TextLink] = c[ImGuiCol_DragDropTarget] = theme::colour(theme::focus);
+    c[ImGuiCol_NavCursor] = theme::colour(theme::focus);
+    c[ImGuiCol_Separator] = theme::colour(theme::line);
+    c[ImGuiCol_SeparatorHovered] = c[ImGuiCol_SeparatorActive] = theme::colour(theme::line_strong);
+    c[ImGuiCol_TableHeaderBg] = theme::colour(theme::surface2);
+    c[ImGuiCol_TableBorderStrong] = theme::colour(theme::line_strong);
+    c[ImGuiCol_TableBorderLight] = theme::colour(theme::line);
+    c[ImGuiCol_TableRowBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_TableRowBgAlt] = theme::colour(theme::surface2);
+    c[ImGuiCol_NavWindowingHighlight] = theme::colour(theme::focus);
+    c[ImGuiCol_NavWindowingDimBg] = theme::colour(theme::alpha(theme::bg, 140.0f / 255));
+    c[ImGuiCol_ModalWindowDimBg] = theme::colour(theme::alpha(theme::bg, 140.0f / 255));
+}
+
+bool theme::button(const char *label, ImVec2 size, float scale, bool primary) {
+    ImVec2 p = ImGui::GetCursorScreenPos(), end(p.x + size.x, p.y + size.y);
+    ImGui::PushID(label);
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+    bool pressed = ImGui::InvisibleButton("##button", size, ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
+    bool hover = ImGui::IsItemHovered();
+    bool focus = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float r = 10 * scale;
+    if (primary) {
+        dl->AddRectFilled(p, end, theme::gold, r);
+        dl->AddRectFilledMultiColor(ImVec2(p.x + r, p.y), ImVec2(end.x - r, end.y),
+                                    theme::gold_strong, theme::gold_strong, theme::gold, theme::gold);
+    } else {
+        if (hover) dl->AddRectFilled(p, end, theme::surface3, r);
+        dl->AddRect(p, end, theme::line_strong, r);
+    }
+    if (focus) {
+        dl->AddRect(ImVec2(p.x - 2 * scale, p.y - 2 * scale), ImVec2(end.x + 2 * scale, end.y + 2 * scale),
+                    theme::focus_soft, r, 0, 6 * scale);
+        dl->AddRect(ImVec2(p.x - 2 * scale, p.y - 2 * scale), ImVec2(end.x + 2 * scale, end.y + 2 * scale),
+                    theme::focus, r, 0, 2 * scale);
+    }
+    ImVec2 text_size = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(p.x + (size.x - text_size.x) * .5f, p.y + (size.y - text_size.y) * .5f),
+                primary ? theme::gold_ink : theme::text, label);
+    ImGui::PopID();
+    return pressed;
 }
 
 static void make_context(void) {
@@ -268,10 +357,9 @@ static int vk_up(const MenuTarget *t) {
     return 1;
 }
 
-// Roboto Medium at 26 px per 1080 lines. Merge CJK language names and the Simplified Chinese catalog's
-// glyphs from the corresponding system fonts.
-// Made again when the window height changes; the old texture goes after the queue is idle (CreateFontsTexture).
-static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2010, 0x2027, 0};
+// The text fonts cover Latin, Cyrillic, punctuation and arrows. Language names merge their system fonts into Inter.
+static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2010, 0x2027, 0x2190, 0x2193, 0};
+static const ImWchar kCyrillic[] = {0x0400, 0x052F, 0};
 static const struct { const char *lang; UiTextId name; } kCjk[] = {
     {"ja", UI_MENU_LANGNAME_JA}, {"ko", UI_MENU_LANGNAME_KO}, {"zh-Hans", UI_MENU_LANGNAME_ZH_HANS},
     {"zh-Hant", UI_MENU_LANGNAME_ZH_HANT},
@@ -299,14 +387,14 @@ static int font_usable(const uint8_t *d, uint64_t n) {
 }
 
 extern "C" int menu_font_check(void) {
-    uint64_t n = sizeof roboto_ttf;
+    uint64_t n = sizeof inter_ttf;
     uint8_t *bad = (uint8_t *)malloc(n);
     if (!bad) return 0;
-    memcpy(bad, roboto_ttf, n);
+    memcpy(bad, inter_ttf, n);
     uint32_t tables = (uint32_t)bad[4] << 8 | bad[5];
     for (uint32_t i = 0; i < tables; i++)
         if (!memcmp(bad + 12 + 16 * i, "cmap", 4)) memset(bad + 12 + 16 * i, 0, 4);   // no character map
-    int ok = font_usable(roboto_ttf, n) && !font_usable(roboto_ttf, 4096) && !font_usable(roboto_ttf, 100) &&
+    int ok = font_usable(inter_ttf, n) && !font_usable(inter_ttf, 4096) && !font_usable(inter_ttf, 100) &&
              !font_usable(bad, n);
     memset(bad, 0, 4);             // an unknown font tag
     ok = ok && !font_usable(bad, n);
@@ -314,13 +402,17 @@ extern "C" int menu_font_check(void) {
     return ok;
 }
 
+// Inter at 25 / 21 px and Cinzel at 38 / 24 px per 1080 lines; Inter supplies the Cyrillic glyphs Cinzel lacks.
+// The Japanese, Korean and Chinese language names merge into the text font from a system font when there is one (each
+// language is named in its own script). Made again when the window height changes; the old texture goes after the queue
+// is idle (CreateFontsTexture).
 static int fonts_up(float scale) {
     enum { N = sizeof kCjk / sizeof *kCjk };
     ImFontAtlas *fa = ImGui::GetIO().Fonts;
     fa->Clear();
     ImFontConfig fc;
     fc.FontDataOwnedByAtlas = false;
-    fa->AddFontFromMemoryTTF((void *)roboto_ttf, (int)sizeof roboto_ttf, 26.0f * scale, &fc, kRanges);
+    g_fonts.text = fa->AddFontFromMemoryTTF((void *)inter_ttf, (int)sizeof inter_ttf, 25.0f * scale, &fc, kRanges);
     uint8_t *data[N] = {};
     ImVector<ImWchar> ranges[N];
     int merged = 0;
@@ -345,15 +437,24 @@ static int fonts_up(float scale) {
         ImFontConfig mc;
         mc.MergeMode = true;
         mc.FontDataOwnedByAtlas = false;
-        fa->AddFontFromMemoryTTF(data[i], (int)size, 26.0f * scale, &mc, ranges[i].Data);
+        fa->AddFontFromMemoryTTF(data[i], (int)size, 25.0f * scale, &mc, ranges[i].Data);
     }
+    g_fonts.small = fa->AddFontFromMemoryTTF((void *)inter_ttf, (int)sizeof inter_ttf, 21.0f * scale, &fc, kRanges);
+    g_fonts.title = fa->AddFontFromMemoryTTF((void *)cinzel_ttf, (int)sizeof cinzel_ttf, 38.0f * scale, &fc, kRanges);
+    ImFontConfig merge;
+    merge.MergeMode = true;
+    merge.FontDataOwnedByAtlas = false;
+    fa->AddFontFromMemoryTTF((void *)inter_ttf, (int)sizeof inter_ttf, 38.0f * scale, &merge, kCyrillic);
+    g_fonts.brand = fa->AddFontFromMemoryTTF((void *)cinzel_ttf, (int)sizeof cinzel_ttf, 24.0f * scale, &fc, kRanges);
+    fa->AddFontFromMemoryTTF((void *)inter_ttf, (int)sizeof inter_ttf, 24.0f * scale, &merge, kCyrillic);
+    ImGui::GetIO().FontDefault = g_fonts.text;
     vk_queue_lock();   // the upload submits on the queue and waits for it
     int ok = ImGui_ImplVulkan_CreateFontsTexture();
     vk_queue_unlock();
     fa->ClearInputData();   // the glyphs are in the texture: the font files and the pixels are not needed again
     fa->ClearTexData();
     for (uint8_t *d : data) free(d);
-    rt_log("menu: font atlas at %.1f px, merged %d of %d CJK system fonts", 26.0f * scale, merged, (int)N);
+    rt_log("menu: font atlas at %.1f px, merged %d of %d CJK system fonts", 25.0f * scale, merged, (int)N);
     g_font_scale = ok ? scale : 0;
     return ok;
 }
@@ -368,7 +469,9 @@ extern "C" void menu_vk_release(void) {
 // working directory) as menu-test-<frame>-<page>.png; after the last tab the menu closes.
 // TOTK_MENU_TEST_SET=<frame>:<key>=<value>[,<key>=<value>...][;<frame>:...]: cfg_set of each key (TOTK_ prefix
 // optional) at that presented frame; changes live settings with no input, menu open or not. totk.ini is written only by
-// the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note).
+// the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note). The pseudo-key
+// RESTART=1 does what the action bar's Restart does, only while that button would show (so a game started again with
+// the same hook does not restart a second time).
 enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MENU, TAB_ADVANCED, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
@@ -422,7 +525,11 @@ static void test_apply_sets(uint64_t frame) {
         const TestSet &t = g_test.sets[g_test.next_set];
         rt_log("menu: test hook: frame %llu: %s=%s", (unsigned long long)frame, t.key, t.value);
         if (!strcmp(t.key, "TOTK_SAVE")) rt_log("menu: test hook: cfg_save %s", cfg_save() ? "wrote" : "failed");
-        else cfg_set(t.key, t.value);
+        else if (!strcmp(t.key, "TOTK_RESTART")) {
+            bool shown = opt_restart_needed() && gfx_restart_available();
+            rt_log("menu: test hook: Restart %s", shown ? "pressed" : "not shown");
+            if (shown && cfg_save()) gfx_request_restart();
+        } else cfg_set(t.key, t.value);
     }
 }
 
@@ -476,7 +583,20 @@ static void row_window_size(void) {
         pv[i] = vals[i];
         pn[i] = shown[i];
     }
-    opt_choice_list("TOTK_WINDOW_SIZE", UI_MENU_WINDOW_SIZE, pv, pn, n, UI_MENU_WINDOW_SIZE_DESC);
+    // In fullscreen the window covers the screen and this size waits for Windowed: the row is greyed, as the launcher's
+    // (when: fullscreen = 0), and says the size in use.
+    static char in_use[96];
+    const char *note = nullptr;
+    if (cfg_bool("TOTK_FULLSCREEN")) {
+        opt_disable_next(UI_MENU_WINDOW_SIZE_WINDOWED_ONLY);
+        if (have && !(cur_ok && cw == mw && ch == mh)) {   // as the other "in use" notes: only when it differs
+            char screen[32];
+            snprintf(screen, sizeof screen, "%d × %d", mw, mh);
+            snprintf(in_use, sizeof in_use, menu_text(UI_MENU_PRESENT_IN_USE), screen);
+            note = in_use;
+        }
+    }
+    opt_choice_list("TOTK_WINDOW_SIZE", UI_MENU_WINDOW_SIZE, pv, pn, n, UI_MENU_WINDOW_SIZE_DESC, -1, note);
 }
 
 // The game resolution (resolution.c): 16:9 sizes from its smallest, 1280x720 (for weak GPUs), up, the common 21:9 and
@@ -485,10 +605,14 @@ static void row_window_size(void) {
 // the current value when it is another size.
 static void row_output_res(void) {
     if (RT_TARGET_HWAOI) {
-        static const char *const vals[] = {"1280x720", "1920x1080", "2560x1440", "3840x2160"};
-        static const char *const names[] = {"1280 × 720 (experimental)", "1920 × 1080 (native)",
-                                            "2560 × 1440 (experimental)", "3840 × 2160 (experimental)"};
-        opt_choice_list("TOTK_OUTPUT_RES", UI_MENU_OUTPUT_RES, vals, names, 4, UI_MENU_OUTPUT_RES_DESC);
+        // auto: the screen's size as far as the graphics card's memory allows (resolution.c); the row names what it is
+        static const char *const vals[] = {"auto", "1280x720", "1920x1080", "2560x1440", "3840x2160"};
+        static char automatic[64];
+        unsigned a[2];
+        res_auto_size(a);
+        snprintf(automatic, sizeof automatic, menu_text(UI_MENU_OUTPUT_RES_AUTO), a[0], a[1]);
+        const char *names[] = {automatic, "1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"};
+        opt_choice_list("TOTK_OUTPUT_RES", UI_MENU_OUTPUT_RES, vals, names, 5, UI_MENU_OUTPUT_RES_DESC);
         return;
     }
     static const char *const vals[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3200x1800", "3840x2160",
@@ -559,10 +683,10 @@ static void row_game_lang(void) {
 // The frame limit (frame_rate.c): unset, the older fps60 = 0 still means 30. The monitor choice shows the rate it gives.
 static void row_fps_limit() {
     if (RT_TARGET_HWAOI) {
-        static const char *const vals[] = {"30", "60", "90", "120"};
-        static const char *const names[] = {"30 FPS", "60 FPS (normal speed)", "90 FPS (game runs 1.5x fast)",
-                                             "120 FPS (game runs 2x fast)"};
-        opt_choice_list("TOTK_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, 4, UI_MENU_FPS_LIMIT_DESC);
+        // Above 60 the game's fixed step runs the whole game faster, so players get 30 and 60 (frame_rate.c).
+        static const char *const vals[] = {"30", "60"};
+        const char *names[] = {menu_text(UI_MENU_FPS_30), menu_text(UI_MENU_FPS_60)};
+        opt_choice_list("TOTK_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, 2, UI_MENU_FPS_LIMIT_DESC);
         return;
     }
     // 40 and 45: the Steam Deck's screen runs at 40 to 60 Hz (the OLED to 90); 40 divides 40 and 120 Hz evenly
@@ -607,19 +731,16 @@ static const char *present_note(void) {
 // Colour adjustment (vk_color.c): a profile writes the four values (STS78721's presets, issue #136); moving one of them
 // makes the profile Custom.
 static void rows_color(void) {
-    static const struct { const char *name, *b, *c, *s, *g; } presets[] = {
-        {"default", "0", "100", "100", "1"}, {"vivid", "0", "115", "135", "0.95"}, {"clarity", "2", "110", "115", "1"}};
+    // The profiles' values come from color_presets.h, the table the picture itself applies (vk_color.c).
     static const UiTextId names[] = {UI_MENU_COLOR_DEFAULT, UI_MENU_COLOR_VIVID, UI_MENU_COLOR_CLARITY,
-                                     UI_MENU_COLOR_CUSTOM};
+                                     UI_MENU_COLOR_OLED, UI_MENU_COLOR_CUSTOM};   // COLOR_PRESET's order in cfg.c
     opt_group(UI_MENU_COLOR);
-    if (opt_choice("TOTK_COLOR_PRESET", UI_MENU_COLOR_PRESET, names, 4, UI_MENU_COLOR_PRESET_DESC)) {
-        const char *p = cfg_value("TOTK_COLOR_PRESET");
-        for (const auto &e : presets)
-            if (!strcmp(p, e.name)) {
-                cfg_set("TOTK_COLOR_BRIGHTNESS", e.b), cfg_set("TOTK_COLOR_CONTRAST", e.c);
-                cfg_set("TOTK_COLOR_SATURATION", e.s), cfg_set("TOTK_COLOR_GAMMA", e.g);
-                cfg_save();
-            }
+    if (opt_choice("TOTK_COLOR_PRESET", UI_MENU_COLOR_PRESET, names, 5, UI_MENU_COLOR_PRESET_DESC)) {
+        if (const ColorPreset *e = color_preset_find(cfg_value("TOTK_COLOR_PRESET"))) {
+            cfg_set("TOTK_COLOR_BRIGHTNESS", e->brightness), cfg_set("TOTK_COLOR_CONTRAST", e->contrast);
+            cfg_set("TOTK_COLOR_SATURATION", e->saturation), cfg_set("TOTK_COLOR_GAMMA", e->gamma);
+            cfg_save();
+        }
     }
     bool moved = opt_slider("TOTK_COLOR_BRIGHTNESS", UI_MENU_COLOR_BRIGHTNESS, -30, 30, UI_MENU_COLOR_BRIGHTNESS_DESC, 1,
                             "%+.0f %%");
@@ -633,46 +754,91 @@ static void rows_color(void) {
     }
 }
 
-// HWAoI: one scaling selector over two keys: Off = UPSCALER bilinear, FSR 1 = UPSCALER fsr, FSR 4 = UPSCALER fsr plus
-// TEMPORAL fsr (vk_temporal.c; the window scaling stays FSR 1). TEMPORAL is read at start, so the row says "after
-// restart" once its value differs from the one the game started with.
-static bool fsr4_on(void) { return !strcmp(cfg_value("TOTK_TEMPORAL"), "fsr"); }
-
-static void row_scaling(void) {
-    static const UiTextId names[] = {UI_MENU_SCALE_OFF, UI_MENU_SCALE_FSR1, UI_MENU_UPSCALER_FSR4};
-    static const bool at_start = fsr4_on();
-#ifdef _WIN32
-    // Windows: the DLLs are downloaded from AMD's SDK repository when FSR 4 is picked (or at start, if it already is)
-    bool lib = true;
-    const char *note = vk_ffx_lib_present() ? nullptr : menu_text(UI_MENU_FFX_DOWNLOAD);
-#else
-    bool lib = vk_ffx_lib_present() != 0;
-    const char *note = lib ? nullptr : menu_text(UI_MENU_FFX_MISSING);
-#endif
-    int cur = fsr4_on() ? 2 : !strcmp(cfg_value("TOTK_UPSCALER"), "fsr") ? 1 : 0;
-    int pick = opt_select("TOTK_UPSCALER", UI_MENU_UPSCALER, names, 3, cur, UI_MENU_UPSCALER_FSR4_DESC, 1,
-                          lib ? -1 : 2, fsr4_on() != at_start, note);
-    if (pick < 0) return;
-    if (pick == 2 && !vk_ffx_lib_present()) vk_ffx_fetch_async();
-    cfg_set("TOTK_UPSCALER", pick == 0 ? "bilinear" : "fsr");
-    cfg_set("TOTK_TEMPORAL", pick == 2 ? "fsr" : "off");
-    opt_save_soon();
+// The upscaler of the 3D scene (TEMPORAL, read at start): AMD FSR (vk_ffx.c) or NVIDIA DLSS (vk_dlss.c), each with its
+// own quality key. The window's own scaling (UPSCALER) is another row. 0 off, 1 FSR, 2 DLSS ("dlaa" is 0.1.2's name
+// for DLSS at the native size).
+static int temporal_now(void) {
+    const char *v = cfg_value("TOTK_TEMPORAL");
+    return !strcmp(v, "fsr") ? 1 : !strcmp(v, "dlss") || !strcmp(v, "dlaa") ? 2 : 0;
 }
 
-// HWAoI: the FSR 4 sub-rows, greyed out unless FSR 4 is selected.
-static void rows_fsr4(void) {
-    static const UiTextId q[] = {UI_MENU_FSR_Q_NATIVE, UI_MENU_FSR_Q_QUALITY, UI_MENU_FSR_Q_BALANCED,
-                                 UI_MENU_FSR_Q_PERFORMANCE};
-    if (!fsr4_on()) opt_disable_next(UI_MENU_NEEDS_FSR4);
-    opt_choice("TOTK_FSR_QUALITY", UI_MENU_FSR_QUALITY, q, 4, UI_MENU_FSR_QUALITY_DESC);
+static void rows_temporal(void) {
+    static const UiTextId names[] = {UI_MENU_TEMPORAL_OFF, UI_MENU_TEMPORAL_FSR, UI_MENU_TEMPORAL_DLSS};
+    static const int at_start = temporal_now();
+    if (!strcmp(cfg_value("TOTK_TEMPORAL"), "dlaa")) {   // the same thing under the newer names
+        cfg_set("TOTK_TEMPORAL", "dlss");
+        cfg_set("TOTK_DLSS_QUALITY", "native");
+        opt_save_soon();
+    }
+    int cur = temporal_now();
+    static char in_use[96];
+    const char *note = nullptr;
+#ifdef _WIN32
+    // Windows: AMD's DLLs are downloaded from its SDK repository when FSR is picked (or at start, if it already is)
+    bool fsr = true;
+    if (cur == 1 && !vk_ffx_lib_present()) note = menu_text(UI_MENU_FFX_DOWNLOAD);
+#else
+    bool fsr = vk_ffx_lib_present() != 0;
+    if (!fsr) note = menu_text(UI_MENU_FFX_MISSING);
+#endif
+    // DLSS was asked for at start and does not run (no RTX card, a DLL missing, Streamline failed)
+    if (cur == 2 && at_start == 2 && vk_dlss_failed()) {
+        snprintf(in_use, sizeof in_use, menu_text(UI_MENU_PRESENT_IN_USE), menu_text(UI_MENU_TEMPORAL_OFF));
+        note = in_use;
+    }
+    // DLSS is offered on NVIDIA cards that have its files beside the game (and shown while it is the setting)
+    int n = vk_dlss_offered() || cur == 2 ? 3 : 2;
+    int pick = opt_select("TOTK_TEMPORAL", UI_MENU_TEMPORAL, names, n, cur, UI_MENU_TEMPORAL_DESC, 0, fsr ? -1 : 1,
+                          cur != at_start, note);
+    if (pick >= 0) {
+        if (pick == 1 && !vk_ffx_lib_present()) vk_ffx_fetch_async();
+        cfg_set("TOTK_TEMPORAL", pick == 1 ? "fsr" : pick == 2 ? "dlss" : "off");
+        opt_save_soon();
+        cur = pick;
+    }
+    static const UiTextId fq[] = {UI_MENU_FSR_Q_NATIVE, UI_MENU_FSR_Q_QUALITY, UI_MENU_FSR_Q_BALANCED,
+                                  UI_MENU_FSR_Q_PERFORMANCE};
+    static const UiTextId dq[] = {UI_MENU_DLSS_Q_NATIVE, UI_MENU_FSR_Q_QUALITY, UI_MENU_FSR_Q_BALANCED,
+                                  UI_MENU_FSR_Q_PERFORMANCE};
+    if (!cur) opt_disable_next(UI_MENU_NEEDS_UPSCALING);
+    if (cur == 2) opt_choice("TOTK_DLSS_QUALITY", UI_MENU_TEMPORAL_QUALITY, dq, 4, UI_MENU_TEMPORAL_QUALITY_DESC);
+    else opt_choice("TOTK_FSR_QUALITY", UI_MENU_TEMPORAL_QUALITY, fq, 4, UI_MENU_TEMPORAL_QUALITY_DESC);
+    if (cur != 1) return;   // FSR's own rows
     static const char *const fv[] = {"auto", "3.1"};
     const char *fn[] = {menu_text(UI_MENU_FSR_V_AUTO), menu_text(UI_MENU_FSR_V_31)};
-    if (!fsr4_on()) opt_disable_next(UI_MENU_NEEDS_FSR4);
     opt_choice_list("TOTK_FSR_VERSION", UI_MENU_FSR_VERSION, fv, fn, 2, UI_MENU_FSR_VERSION_DESC);
     static const char *const sv[] = {"", "game", "0", "50", "100"};
     const char *sn[] = {menu_text(UI_MENU_SCENE_SHARP_AUTO), menu_text(UI_MENU_SCENE_SHARP_GAME), "0 %", "50 %", "100 %"};
-    if (!fsr4_on()) opt_disable_next(UI_MENU_NEEDS_FSR4);
     opt_choice_list("TOTK_SCENE_SHARPNESS", UI_MENU_SCENE_SHARP, sv, sn, 5, UI_MENU_SCENE_SHARP_DESC);
+}
+
+// NVIDIA DLSS frame generation (FRAME_GEN, read at start; vk_dlss.c): frames shown per frame the game draws. Offered
+// on NVIDIA cards that have its files beside the game, and shown while it is the setting. Once it runs, the list ends
+// at the multiplier the graphics card reaches.
+static void row_frame_gen(void) {
+    static const char *const all[] = {"off", "2", "3", "4", "5", "6"};
+    static const char *const all_names[] = {nullptr, "2x", "3x", "4x", "5x", "6x"};
+    static const int at_start = vk_fg_wanted();
+    int now = atoi(cfg_value("TOTK_FRAME_GEN"));   // "off" reads as 0
+    if (!vk_fg_offered() && now < 2) return;
+    // Off, then 2x up to what the card reaches (6x until that is known), and the value set if it is beyond that
+    const char *values[6], *names[6];
+    int max = vk_fg_max(), top = max >= 2 ? max : 6, n = 0;
+    for (int i = 0; i < 6; i++) {
+        int factor = i ? i + 1 : 0;
+        if (factor > top && factor != now) continue;
+        values[n] = all[i], names[n++] = i ? all_names[i] : menu_text(UI_MENU_TEMPORAL_OFF);
+    }
+    static char in_use[96];
+    const char *note = nullptr;
+    // asked for at start and it does not run (no RTX 40 or 50 card, a file missing), or the card stops below it
+    int running = vk_fg_factor();
+    if (at_start && now == at_start && (vk_fg_failed() || (running && running != at_start))) {
+        snprintf(in_use, sizeof in_use, menu_text(UI_MENU_PRESENT_IN_USE),
+                 running >= 2 && running <= 6 ? all_names[running - 1] : menu_text(UI_MENU_TEMPORAL_OFF));
+        note = in_use;
+    }
+    opt_choice_list("TOTK_FRAME_GEN", UI_MENU_FRAME_GEN, values, names, n, UI_MENU_FRAME_GEN_DESC, -1, note);
 }
 
 static void tab_screen(float scale) {
@@ -688,17 +854,15 @@ static void tab_screen(float scale) {
     opt_group(UI_MENU_GRAPHICS);
     row_output_res();
     row_render_scale();
-    if (RT_TARGET_HWAOI) {
-        row_scaling();
-        rows_fsr4();
-    } else {
-        static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
-        opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
-    }
+    if (RT_TARGET_HWAOI) rows_temporal();
+    if (RT_TARGET_HWAOI) row_frame_gen();
+    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
+    opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
     opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
     static const UiTextId aspect[] = {UI_MENU_ASPECT_FIT, UI_MENU_ASPECT_STRETCH};
     opt_choice("TOTK_ASPECT", UI_MENU_ASPECT, aspect, 2, UI_MENU_ASPECT_DESC);
-    opt_slider("TOTK_FOV", UI_MENU_FOV, 70, 140, UI_MENU_FOV_DESC, 5, "%.0f %%");
+    // Only where this game version has the field-of-view patch (res_fov_live); without it the row would do nothing.
+    if (rt_patch_set("fov") >= 0) opt_slider("TOTK_FOV", UI_MENU_FOV, 70, 140, UI_MENU_FOV_DESC, 5, "%.0f %%");
     if (RT_TARGET_HWAOI) {   // SMAA on the present (vk_smaa.c)
         static const UiTextId aa[] = {UI_MENU_AA_OFF, UI_MENU_AA_SMAA};
         opt_choice("TOTK_ANTIALIASING", UI_MENU_AA, aa, 2, UI_MENU_AA_DESC);
@@ -706,9 +870,23 @@ static void tab_screen(float scale) {
     rows_color();
     if (RT_TARGET_HWAOI) {   // HDR10 output (vk_hdr.c)
         opt_group(UI_MENU_HDR_GROUP);
-        opt_toggle("TOTK_HDR", UI_MENU_HDR, UI_MENU_HDR_DESC);
+        // Greyed while the window's screen offers no HDR10 picture (HDR off in the system, or a screen without it), as
+        // the launcher greys them; the brightness rows also while HDR output is off (the launcher's when: hdr = 1).
+        bool no_screen = vk_hdr_offered() == 0, grey = no_screen || !cfg_bool("TOTK_HDR");
+        UiTextId why = no_screen ? UI_MENU_HDR_NO_SCREEN : UI_MENU_NEEDS_HDR;
+        static char in_use[96];   // set on such a screen: the picture is SDR, as the other rows' "in use: Off"
+        const char *note = nullptr;
+        if (no_screen && cfg_bool("TOTK_HDR")) {
+            snprintf(in_use, sizeof in_use, menu_text(UI_MENU_PRESENT_IN_USE), menu_text(UI_MENU_TEMPORAL_OFF));
+            note = in_use;
+        }
+        if (no_screen) opt_disable_next(why);
+        opt_toggle("TOTK_HDR", UI_MENU_HDR, UI_MENU_HDR_DESC, false, note);
+        if (grey) opt_disable_next(why);
         opt_slider("TOTK_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f nits");
+        if (grey) opt_disable_next(why);
         opt_slider("TOTK_HDR_GAME_NITS", UI_MENU_HDR_GAME, 80, 500, UI_MENU_HDR_GAME_DESC, 5, "%.0f nits");
+        if (grey) opt_disable_next(why);
         opt_slider("TOTK_HDR_UI_NITS", UI_MENU_HDR_UI, 80, 500, UI_MENU_HDR_UI_DESC, 5, "%.0f nits");
     }
     opt_end();
@@ -731,24 +909,12 @@ static void tab_game(float scale) {
 
 static void tab_sound(float scale) {
     opt_begin("##sound", scale);
-    opt_slider("TOTK_VOLUME", UI_MENU_VOLUME, 0, 200, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+    opt_slider("TOTK_VOLUME", UI_MENU_VOLUME, 0, 300, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+    opt_toggle("TOTK_MUTE_UNFOCUSED", UI_MENU_MUTE_UNFOCUSED, UI_MENU_MUTE_UNFOCUSED_DESC);
+    static const UiTextId latency[] = {UI_MENU_AUDIO_LATENCY_LOW, UI_MENU_AUDIO_LATENCY_NORMAL,
+                                       UI_MENU_AUDIO_LATENCY_HIGH};
+    opt_choice("TOTK_AUDIO_LATENCY", UI_MENU_AUDIO_LATENCY, latency, 3, UI_MENU_AUDIO_LATENCY_DESC);
     opt_end();
-}
-
-// The note under the layout. Xbox prompts (the Nintendo layout with the A/B and X/Y prompts swapped, romfs.c
-// overlay_init) change the buttons at once but the prompts only at the next start: "files missing" without
-// romfs-patches-xbox, "prompts change after restart" while the prompts in use differ from the choice. Automatic with a
-// gamepad connected: "in use: Xbox". NULL otherwise.
-static const char *pad_layout_note(void) {
-    bool want = !strcasecmp(cfg_value("TOTK_PAD_LAYOUT"), "xbox_prompts");
-    if (want && !romfs_xbox_prompts_ready()) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_MISSING);
-    if (want != (romfs_xbox_prompts_active() != 0)) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART);
-    int got = input_pad_layout();
-    if (got < 0 || strcmp(cfg_value("TOTK_PAD_LAYOUT"), "auto")) return nullptr;
-    static char note[96];
-    snprintf(note, sizeof note, menu_text(UI_MENU_PAD_LAYOUT_IN_USE),
-             menu_text(got == PAD_LAYOUT_XBOX ? UI_MENU_PAD_LAYOUT_XBOX : UI_MENU_PAD_LAYOUT_NINTENDO));
-    return note;
 }
 
 // A player's input device (input.c assign): Auto, the keyboard and mouse, each connected gamepad by name, and None for
@@ -793,17 +959,116 @@ static void players_rows() {
     opt_group(UI_MENU_TAB_CONTROLS);
 }
 
+// The connected devices (input.c input_pads): the keyboard and mouse, then every gamepad with what SDL reports of it
+// (nothing is assumed from its name). A or a click on a gamepad makes it rumble, to tell two apart.
+static InputPadInfo g_pads[8];
+static int g_npads;
+
+static const char *pad_family_name(const InputPadInfo &p) {
+    switch (p.family) {
+    case PAD_FAMILY_XBOX: return "Xbox";
+    case PAD_FAMILY_PLAYSTATION: return "PlayStation";
+    case PAD_FAMILY_NINTENDO: return p.switch2 ? "Nintendo Switch 2" : "Nintendo Switch";
+    }
+    return menu_text(UI_MENU_DEVICE_GENERIC);
+}
+
+static const char *player_name(int player) {
+    return menu_text(player < 0 ? UI_MENU_DEVICE_UNUSED : player ? UI_BINDS_PLAYER_2 : UI_BINDS_PLAYER_1);
+}
+
+static void devices_rows(void) {
+    opt_group(UI_MENU_DEVICES);
+    g_npads = input_pads(g_pads, 8);
+    opt_info("##dev_keyboard", menu_text(UI_MENU_DEVICE_KEYBOARD), player_name(input_keyboard_player()),
+             menu_text(UI_MENU_DEVICE_KEYBOARD_DESC));
+    for (int i = 0; i < g_npads; i++) {
+        const InputPadInfo &p = g_pads[i];
+        char value[128], has[192], desc[UI_DESC_BYTES], id[24];
+        int n = snprintf(value, sizeof value, "%s", player_name(p.player));
+        if (p.wired >= 0 && n < (int)sizeof value)
+            n += snprintf(value + n, sizeof value - n, " · %s", menu_text(p.wired ? UI_MENU_DEVICE_WIRED : UI_MENU_DEVICE_WIRELESS));
+        if (p.battery >= 0 && n < (int)sizeof value) snprintf(value + n, sizeof value - n, " · %d %%", p.battery);
+        const struct { int on; UiTextId name; } caps[] = {
+            {p.rumble, UI_MENU_CAP_RUMBLE}, {p.trigger_rumble, UI_MENU_CAP_TRIGGER_RUMBLE}, {p.motion, UI_MENU_CAP_MOTION},
+            {p.back_buttons, UI_MENU_CAP_BACK_BUTTONS}, {p.light, UI_MENU_CAP_LIGHT},
+        };
+        int h = 0;
+        has[0] = 0;
+        for (const auto &c : caps)
+            if (c.on && h < (int)sizeof has) h += snprintf(has + h, sizeof has - h, "%s%s", h ? ", " : "", menu_text(c.name));
+        if (!h) snprintf(has, sizeof has, "%s", menu_text(UI_MENU_CAP_NONE));
+        int d = snprintf(desc, sizeof desc, menu_text(UI_MENU_DEVICE_DESC), pad_family_name(p), has);
+        if (p.rumble && d > 0 && d < (int)sizeof desc) snprintf(desc + d, sizeof desc - d, " %s", menu_text(UI_MENU_DEVICE_IDENTIFY));
+        snprintf(id, sizeof id, "##dev_pad%d", i);
+        if (opt_info(id, p.name, value, desc)) input_pad_identify(i);
+    }
+    if (!g_npads) opt_text(UI_MENU_DEVICES_NONE);
+}
+
 static void tab_controls(float scale) {
     opt_begin("##controls", scale);
+    devices_rows();
     players_rows();
-    static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
-                                      UI_MENU_PAD_LAYOUT_XBOX_PROMPTS};
-    opt_choice("TOTK_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
+    // Only the rows that do something with what is connected: a row for a feature no connected gamepad has would be
+    // an option that changes nothing.
+    // Each row's description ends with the connected devices it is for.
+    enum { FOR_ALL, FOR_RUMBLE, FOR_TRIGGERS, FOR_MOTION, FOR_COUNT };
+    static char used[FOR_COUNT][256];
+    bool any[FOR_COUNT] = {};
+    for (int k = 0; k < FOR_COUNT; k++) {
+        char names[200];
+        int n = 0;
+        names[0] = 0;
+        for (int i = 0; i < g_npads; i++) {
+            const InputPadInfo &p = g_pads[i];
+            bool has = k == FOR_ALL || (k == FOR_RUMBLE && p.rumble) || (k == FOR_TRIGGERS && p.trigger_rumble) ||
+                       (k == FOR_MOTION && p.motion);
+            if (!has) continue;
+            any[k] = true;
+            if (n < (int)sizeof names) n += snprintf(names + n, sizeof names - n, "%s%s", n ? ", " : "", p.name);
+        }
+        snprintf(used[k], sizeof used[k], menu_text(UI_MENU_USED_BY), names);
+    }
+    // No Button layout row (gone in 0.2.0): every button is where a Switch controller has it (input_pad_layout_pick).
+    {   // Whose buttons the game's own pictures show (hud_prompts.c). Also with the keyboard alone: its automatic
+        // choice shows the keys then, and a player may still want a maker's buttons or the game's own.
+        static const UiTextId prompts[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_BUTTON_PROMPTS_XBOX,
+                                           UI_MENU_BUTTON_PROMPTS_PLAYSTATION, UI_MENU_BUTTON_PROMPTS_SWITCH,
+                                           UI_MENU_BUTTON_PROMPTS_GAME};
+        opt_choice("TOTK_BUTTON_PROMPTS", UI_MENU_BUTTON_PROMPTS, prompts, 5, UI_MENU_BUTTON_PROMPTS_DESC);
+    }
+    if (any[FOR_ALL]) {   // The button the game's menus confirm with (input_confirm_bottom): gamepads only.
+        static const UiTextId confirm[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_PAD_SOUTH, UI_PAD_EAST};   // cfg.c's values
+        opt_describe_next(used[FOR_ALL]);
+        opt_choice("TOTK_CONFIRM_BUTTON", UI_MENU_CONFIRM_BUTTON, confirm, 3, UI_MENU_CONFIRM_BUTTON_DESC);
+    }
+    // Motion stays in sight, greyed with the reason, while no connected gamepad has a gyro and an accelerometer SDL can
+    // read (an Xbox controller, and a controller that works as one, sends none): players look for this row.
+    if (any[FOR_MOTION]) opt_describe_next(used[FOR_MOTION]);
+    else opt_disable_next(UI_MENU_MOTION_NONE);
     opt_toggle("TOTK_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
-    opt_slider("TOTK_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
-    opt_slider("TOTK_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
-    opt_toggle("TOTK_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
-    opt_slider("TOTK_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 50, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");
+    if (any[FOR_RUMBLE]) {
+        // Each change rumbles the gamepads at once with the new values, so it is felt (input_rumble_preview).
+        opt_describe_next(used[FOR_RUMBLE]);
+        if (opt_slider("TOTK_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%"))
+            input_rumble_preview();
+        opt_describe_next(used[FOR_RUMBLE]);
+        if (opt_slider("TOTK_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f"))
+            input_rumble_preview();
+    }
+    if (any[FOR_TRIGGERS]) {
+        opt_describe_next(used[FOR_TRIGGERS]);
+        if (opt_toggle("TOTK_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC))
+            input_rumble_preview();
+    }
+    if (any[FOR_ALL]) {
+        opt_describe_next(used[FOR_ALL]);
+        opt_slider("TOTK_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 50, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");
+    }
+    static char mouse[128];
+    snprintf(mouse, sizeof mouse, menu_text(UI_MENU_USED_BY), menu_text(UI_MENU_DEVICE_KEYBOARD));
+    opt_describe_next(mouse);
     opt_slider("TOTK_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
     binds_rows(scale);
     opt_end();
@@ -812,8 +1077,8 @@ static void tab_controls(float scale) {
 
 static void tab_menu(float scale) {
     opt_begin("##menu", scale);
-    static const UiTextId langs[] = {
-        UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU, UI_MENU_LANGNAME_ZH_HANS,
+    static const UiTextId langs[] = {   // the order of MENU_LANG's values in cfg.c
+        UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU, UI_MENU_LANGNAME_IT, UI_MENU_LANGNAME_ZH_HANS,
     };
     opt_choice("TOTK_MENU_LANG", UI_MENU_MENU_LANG, langs, sizeof langs / sizeof *langs, UI_MENU_MENU_LANG_DESC);
     opt_end();
@@ -856,6 +1121,7 @@ static bool validation_layer_present(void) {
 static void reset_all(void) {
     const char *keys[128];
     int n = 0;
+    opt_restart_needed();   // the values at start are taken before the reset changes any
     for (const CfgMeta *m; n < 128 && (m = cfg_meta_at(n)); n++) keys[n] = m->key;
     int done = cfg_reset(keys, n);
     opt_save_soon();
@@ -960,10 +1226,10 @@ static void tab_advanced(float scale) {
         const ImGuiStyle &st = ImGui::GetStyle();
         float bw = fmaxf(ImGui::CalcTextSize(yes).x, ImGui::CalcTextSize(no).x) + st.FramePadding.x * 4;
         bool close = false;
-        if (ImGui::Button(no, ImVec2(bw, 0))) close = true;
+        if (theme::button(no, ImVec2(bw, 50 * scale), scale, false)) close = true;
         if (ImGui::IsWindowAppearing()) ImGui::SetItemDefaultFocus();
         ImGui::SameLine();
-        if (ImGui::Button(yes, ImVec2(bw, 0))) {
+        if (theme::button(yes, ImVec2(bw, 50 * scale), scale, true)) {
             reset_all();
             close = true;
         }
@@ -979,83 +1245,262 @@ static void tab_advanced(float scale) {
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
                                               UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU, UI_MENU_TAB_ADVANCED};
+static const UiTextId kPageSummary[TAB_COUNT] = {UI_MENU_PAGE_SCREEN, UI_MENU_PAGE_GAME, UI_MENU_PAGE_SOUND,
+                                                 UI_MENU_PAGE_CONTROLS, UI_MENU_PAGE_MENU, UI_MENU_PAGE_ADVANCED};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
+static uint64_t g_open_anim_ns;
 
-// ---- the window: title, tabs (L / R or Q / E switch), the page, and the bottom row with "Continue" and "Quit game".
-// B on the gamepad and Esc close it.
-static void layout_menu(uint32_t w, uint32_t h, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(0, 0, 0, 120));
-    float ww = fminf(w * 0.88f, 1400 * scale), wh = fminf(h * 0.86f, 820 * scale);
-    ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
-    ImGui::Begin("##menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                        ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(UI_MENU_TITLE));
-    // the port version and the game update, right-aligned on the title line: what a bug report needs first
-    char game[16], version[96];
-    snprintf(game, sizeof game, "%d.%d.%d", rt_game_version / 100, rt_game_version / 10 % 10, rt_game_version % 10);
-    snprintf(version, sizeof version, menu_text(UI_MENU_VERSION), rt_port_version, game);
-    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(version).x);
-    ImGui::TextDisabled("%s", version);
+static float glyph_width(const char *label, float scale) {
+    return fmaxf(28 * scale, ImGui::CalcTextSize(label).x + 14 * scale);
+}
 
-    int step = g_modal || binds_modal()                                                                  ? 0
-             : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
-             : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
-                                                                                                         : 0;
-    if (step) g_tab_request = (g_tab + step + TAB_COUNT) % TAB_COUNT;
-    if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
-
-    const ImGuiStyle &st = ImGui::GetStyle();
-    float bottom = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2;
-    if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
-        for (int k = 0; k < TAB_COUNT; k++) {
-            char label[128];
-            snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
-            if (!ImGui::BeginTabItem(label, nullptr, g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0)) continue;
-            g_tab = k;
-            if (g_focus_page == k) {
-                opt_focus_first();
-                g_focus_page = -1;
-            }
-            ImGui::Spacing();
-            // the page's rows are a NavFlattened child of this window itself: ImGui clips the items of a direct child
-            // only, so behind a second child level the rows scrolled out above the tabs won D-pad moves from the
-            // buttons and the tabs (up from "Continue" went to the tabs, down from the tabs to "Continue")
-            opt_reserve_bottom(bottom);
-            switch (k) {
-            case TAB_SCREEN: tab_screen(scale); break;
-            case TAB_GAME: tab_game(scale); break;
-            case TAB_SOUND: tab_sound(scale); break;
-            case TAB_CONTROLS: tab_controls(scale); break;
-            case TAB_MENU: tab_menu(scale); break;
-            case TAB_ADVANCED: tab_advanced(scale); break;
-            }
-            ImGui::EndTabItem();
+static float glyph(ImDrawList *dl, ImVec2 p, const char *label, float scale, bool circle, bool dpad = false, int face = 0) {
+    float fs = ImGui::GetFontSize(), height = 30 * scale;
+    float width = dpad || circle ? height : glyph_width(label, scale);
+    ImVec2 end(p.x + width, p.y + height);
+    float radius = circle || dpad ? height * .5f : 6 * scale;
+    dl->AddRectFilled(p, end, theme::surface3, radius);
+    dl->AddRect(p, end, theme::line_strong, radius, 0, 1.5f * scale);
+    if (dpad) {
+        float x = p.x + width * .5f, y = p.y + height * .5f, r = 7 * scale;
+        dl->AddLine(ImVec2(x - r, y), ImVec2(x + r, y), theme::text, 2.5f * scale);
+        dl->AddLine(ImVec2(x, y - r), ImVec2(x, y + r), theme::text, 2.5f * scale);
+    } else if (face >= PAD_LABEL_CROSS && face <= PAD_LABEL_TRIANGLE) {
+        ImU32 colour = theme::text;
+        if (input_pad_type() == 4 || input_pad_type() == 5) {
+            static const ImU32 classic[] = {IM_COL32(113,182,255,255), IM_COL32(255,119,114,255),
+                                            IM_COL32(239,152,209,255), IM_COL32(121,223,184,255)};
+            colour = classic[face - PAD_LABEL_CROSS];
         }
-        g_tab_request = -1;
-        ImGui::EndTabBar();
+        float x = p.x + width * .5f, y = p.y + height * .5f, r = 7 * scale, stroke = 2 * scale;
+        if (face == PAD_LABEL_CROSS) {
+            dl->AddLine(ImVec2(x-r,y-r), ImVec2(x+r,y+r), colour, stroke);
+            dl->AddLine(ImVec2(x+r,y-r), ImVec2(x-r,y+r), colour, stroke);
+        } else if (face == PAD_LABEL_CIRCLE) dl->AddCircle(ImVec2(x,y), r, colour, 24, stroke);
+        else if (face == PAD_LABEL_SQUARE) dl->AddRect(ImVec2(x-r,y-r), ImVec2(x+r,y+r), colour, 0, 0, stroke);
+        else dl->AddTriangle(ImVec2(x,y-r), ImVec2(x+r,y+r), ImVec2(x-r,y+r), colour, stroke);
+    } else {
+        ImU32 colour = theme::text;
+        if (circle && (input_pad_type() == 2 || input_pad_type() == 3)) {
+            if (face == PAD_LABEL_A) colour = IM_COL32(119,217,101,255);
+            if (face == PAD_LABEL_B) colour = IM_COL32(255,108,100,255);
+            if (face == PAD_LABEL_X) colour = IM_COL32(113,182,255,255);
+            if (face == PAD_LABEL_Y) colour = IM_COL32(246,214,107,255);
+        }
+        ImVec2 sz = ImGui::CalcTextSize(label);
+        dl->AddText(ImVec2(p.x + (width - sz.x) * .5f, p.y + (height - fs) * .5f), colour, label);
+    }
+    return width;
+}
+
+static void status_text(ImDrawList *dl, ImVec2 p, float width, int status, float scale) {
+    if (!status || width <= 0) return;
+    // A save failure stays until a save succeeds; the settings hold for the session.
+    UiTextId id = status == 3 ? UI_MENU_SAVE_FAILED : status == 2 ? UI_MENU_STATUS_RESTART : UI_MENU_STATUS_SAVED;
+    ImU32 c = status == 3 ? theme::err : status == 2 ? theme::warn : theme::ok;
+    float fs = ImGui::GetFontSize();
+    dl->AddCircleFilled(ImVec2(p.x + 4 * scale, p.y + fs * .5f), 4 * scale, c);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::colour(c));
+    ImGui::RenderTextEllipsis(dl, ImVec2(p.x + 14 * scale, p.y), ImVec2(p.x + width, p.y + fs),
+                              p.x + width, p.x + width, menu_text(id), nullptr, nullptr);
+    ImGui::PopStyleColor();
+}
+
+static void fade_vertices(ImDrawList *dl, int start, float alpha) {
+    for (int i = start; i < dl->VtxBuffer.Size; i++) {
+        ImU32 c = dl->VtxBuffer[i].col;
+        unsigned a = c >> IM_COL32_A_SHIFT;
+        dl->VtxBuffer[i].col = (c & ~IM_COL32_A_MASK) | ((ImU32)(a * alpha) << IM_COL32_A_SHIFT);
+    }
+}
+
+// ---- the window: rail, page column, detail strip and action bar. L / R or Q / E switch pages; B and Esc close it.
+// The rail is mouse-only; pages and action buttons remain in one controller navigation scope.
+static void layout_menu(uint32_t w, uint32_t h, float scale) {
+    ImDrawList *bg = ImGui::GetBackgroundDrawList();
+    int bg_start = bg->VtxBuffer.Size;
+    bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2((float)w, (float)h),
+                                theme::alpha(theme::bg, 150.0f / 255), theme::alpha(theme::bg, 150.0f / 255),
+                                theme::alpha(theme::bg, 205.0f / 255), theme::alpha(theme::bg, 205.0f / 255));
+    float ww = fminf(w * .92f, 1560 * scale), wh = fminf(h * .90f, 920 * scale);
+    ImVec2 origin((w - ww) * .5f, (h - wh) * .5f), end(origin.x + ww, origin.y + wh);
+    for (int i = 3; i >= 1; i--) {
+        float d = i * 4 * scale;
+        bg->AddRect(ImVec2(origin.x - d, origin.y - d), ImVec2(end.x + d, end.y + d),
+                    IM_COL32(0, 0, 0, i == 1 ? 60 : i == 2 ? 35 : 15), 20 * scale, 0, 4 * scale);
+    }
+    ImGui::SetNextWindowPos(origin, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(32 * scale, 0));
+    ImGui::Begin("##menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+    ImGui::PopStyleVar();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin, end, theme::alpha(theme::surface1, 250.0f / 255), 20 * scale);
+    dl->AddRect(origin, end, theme::line, 20 * scale);
+    float rail = 300 * scale, bar = 64 * scale, bar_y = end.y - bar;
+    dl->AddRectFilledMultiColor(ImVec2(origin.x + 1, origin.y + 20 * scale), ImVec2(origin.x + rail, bar_y),
+                                theme::surface2, theme::surface2, IM_COL32(13, 15, 19, 255), IM_COL32(13, 15, 19, 255));
+    dl->AddRectFilled(ImVec2(origin.x + 1, origin.y + 1), ImVec2(origin.x + rail, origin.y + 22 * scale),
+                      theme::surface2, 20 * scale, ImDrawFlags_RoundCornersTopLeft);
+    dl->AddLine(ImVec2(origin.x + rail, origin.y), ImVec2(origin.x + rail, bar_y), theme::line);
+    dl->AddRectFilled(ImVec2(origin.x + 1, bar_y), ImVec2(end.x - 1, end.y - 1),
+                      IM_COL32(13, 15, 19, 255), 20 * scale, ImDrawFlags_RoundCornersBottom);
+    dl->AddLine(ImVec2(origin.x, bar_y), ImVec2(end.x, bar_y), theme::line);
+
+    const char *launcher_pad = getenv("RECOMPLAUNCHER_PAD");
+    // The hints follow the device used last: a controller's own buttons, or keys while the keyboard or the mouse is
+    // in use (also with controllers connected).
+    bool pad = !input_keyboard_active() &&
+               (pad_have || (launcher_pad && (!strcmp(launcher_pad, "xbox") || !strcmp(launcher_pad, "playstation"))));
+    ImGui::PushFont(theme::fonts().brand);
+    dl->AddText(ImVec2(origin.x + 24 * scale, origin.y + 28 * scale), theme::text, "Age of Decomp");
+    ImGui::PopFont();
+    ImGui::PushFont(theme::fonts().small);
+    float hint_y = origin.y + 72 * scale;
+    const char *prev = pad ? binds_pad_hint(B_L, "L") : "Q", *next = pad ? binds_pad_hint(B_R, "R") : "E";
+    glyph(dl, ImVec2(origin.x + 24 * scale, hint_y), prev, scale, false);
+    float next_w = glyph_width(next, scale);
+    glyph(dl, ImVec2(origin.x + rail - 24 * scale - next_w, hint_y), next, scale, false);
+    const char *settings = menu_text(UI_MENU_TITLE);
+    dl->AddText(ImVec2(origin.x + (rail - ImGui::CalcTextSize(settings).x) * .5f, hint_y + 4 * scale),
+                theme::text_faint, settings);
+    ImGui::PopFont();
+
+    int step = g_modal || binds_modal() ? 0
+             : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
+             : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
+    if (step) g_tab_request = (g_tab + step + TAB_COUNT) % TAB_COUNT;
+    float item_h = 2.1f * theme::fonts().text->FontSize, item_x = origin.x + 18 * scale;
+    float item_w = rail - 36 * scale;
+    for (int k = 0; k < TAB_COUNT; k++) {
+        ImVec2 p(item_x, origin.y + 123 * scale + k * item_h);
+        ImGui::SetCursorScreenPos(p);
+        ImGui::PushID(k);
+        bool clicked = ImGui::InvisibleButton("##rail", ImVec2(item_w, item_h));
+        bool hover = ImGui::IsItemHovered();
+        if (clicked && !g_modal && !binds_modal()) g_tab_request = k;
+        bool active = k == (g_tab_request >= 0 ? g_tab_request : g_tab);
+        if (active || hover) dl->AddRectFilled(p, ImVec2(p.x + item_w, p.y + item_h),
+                                               active ? theme::focus_soft : theme::surface3, 10 * scale);
+        if (active) dl->AddRect(p, ImVec2(p.x + item_w, p.y + item_h), theme::alpha(theme::focus, 90.0f / 255),
+                                10 * scale);
+        const char *name = menu_text(kTabNames[k]);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::colour(active || hover ? theme::text : theme::text_dim));
+        ImGui::RenderTextEllipsis(dl, ImVec2(p.x + 18 * scale, p.y + (item_h - ImGui::GetFontSize()) * .5f),
+                                  ImVec2(p.x + item_w - 14 * scale, p.y + item_h),
+                                  p.x + item_w - 14 * scale, p.x + item_w - 14 * scale, name, nullptr, nullptr);
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+    if (g_tab_request >= 0) { g_tab = g_tab_request; g_focus_page = g_tab; g_tab_request = -1; }
+    if (g_focus_page == g_tab) { opt_focus_first(); g_focus_page = -1; }
+    char version[96];
+    snprintf(version, sizeof version, menu_text(UI_MENU_VERSION), rt_port_version);
+    ImGui::PushFont(theme::fonts().small);
+    // Too wide for the rail: the version goes on a line of its own (word wrap would break it at its dots).
+    char *split = strrchr(version, ' ');
+    if (split && ImGui::CalcTextSize(version).x > rail - 48 * scale) *split = '\n';
+    dl->AddText(theme::fonts().small, ImGui::GetFontSize(), ImVec2(origin.x + 24 * scale, bar_y - 52 * scale),
+                theme::text_faint, version);
+    ImGui::PopFont();
+
+    float page_x = origin.x + rail + 32 * scale, page_w = end.x - page_x - 32 * scale;
+    float y = origin.y + 28 * scale;
+    ImGui::PushFont(theme::fonts().title);
+    dl->AddText(ImVec2(page_x, y), theme::text, menu_text(kTabNames[g_tab]));
+    y += ImGui::GetFontSize() + 8 * scale;
+    ImGui::PopFont();
+    ImGui::PushFont(theme::fonts().small);
+    const char *summary = menu_text(kPageSummary[g_tab]);
+    ImVec2 summary_size = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, page_w, summary);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(page_x, y), theme::text_dim, summary, nullptr, page_w);
+    y += summary_size.y + 18 * scale;
+    ImGui::PopFont();
+    ImGui::SetCursorScreenPos(ImVec2(page_x, y));
+    float detail_h = 3 * theme::fonts().small->FontSize * 1.13f + 16 * scale;
+    opt_reserve_bottom(bar + detail_h + 22 * scale);
+    switch (g_tab) {
+    case TAB_SCREEN: tab_screen(scale); break;
+    case TAB_GAME: tab_game(scale); break;
+    case TAB_SOUND: tab_sound(scale); break;
+    case TAB_CONTROLS: tab_controls(scale); break;
+    case TAB_MENU: tab_menu(scale); break;
+    case TAB_ADVANCED: tab_advanced(scale); break;
     }
 
-    // bottom row: the save status on the left, the two buttons on the right
-    ImGui::Spacing();
-    float y = ImGui::GetCursorPosY();
-    if (!cfg_last_save_ok()) {   // stays until a save succeeds; the settings hold for the session
-        ImGui::SetCursorPosY(y + st.FramePadding.y);
-        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%s", menu_text(UI_MENU_SAVE_FAILED));
-    }
     const char *cont = menu_text(UI_MENU_CONTINUE), *quit = menu_text(UI_MENU_QUIT);
-    float bw = fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;
-    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 2 - st.ItemSpacing.x, y));
-    if (ImGui::Button(cont, ImVec2(bw, 0))) set_open(0);
-    ImGui::SameLine();
-    if (ImGui::Button(quit, ImVec2(bw, 0))) gfx_window_request_close();
+    float bh = 2.5f * ImGui::GetFontSize();
+    float cont_w = ImGui::CalcTextSize(cont).x + 40 * scale, quit_w = ImGui::CalcTextSize(quit).x + 40 * scale;
+    float cont_x = end.x - 24 * scale - cont_w, quit_x = cont_x - 12 * scale - quit_w;
+    float button_y = bar_y + (bar - bh) * .5f;
+    // Restart: while a setting read at start differs from its value at start, and the launcher that started the game
+    // starts it again (AOD_RESTART_EXIT). The pending change is written first; a failed write keeps the game running.
+    bool restart = opt_restart_needed() && gfx_restart_available();
+    const char *again = menu_text(UI_MENU_RESTART_NOW);
+    float again_w = restart ? ImGui::CalcTextSize(again).x + 40 * scale : 0;
+    float left_x = restart ? quit_x - 12 * scale - again_w : quit_x;
+    if (restart) {
+        ImGui::SetCursorScreenPos(ImVec2(left_x, button_y));
+        if (theme::button(again, ImVec2(again_w, bh), scale, false)) {
+            opt_save_tick(1);
+            if (cfg_save()) gfx_request_restart();
+        }
+    }
+    ImGui::SetCursorScreenPos(ImVec2(quit_x, button_y));
+    if (theme::button(quit, ImVec2(quit_w, bh), scale, false)) {
+        opt_save_tick(1);   // a change made a moment ago is kept
+        gfx_window_request_close();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(cont_x, button_y));
+    if (theme::button(cont, ImVec2(cont_w, bh), scale, true)) set_open(0);
+
+    ImGui::PushFont(theme::fonts().small);
+    const char *labels[] = {menu_text(UI_MENU_HINT_MOVE), menu_text(UI_MENU_HINT_CHANGE),
+                            menu_text(UI_MENU_HINT_CLOSE), menu_text(UI_MENU_HINT_PAGES)};
+    int face_labels[2] = {};
+    bool bottom = pad && input_confirm_bottom();   // the game's B confirms (pad_events)
+    const char *keys[] = {pad ? "" : "↑↓",
+                          pad ? binds_pad_hint(bottom ? B_B : B_A, bottom ? "B" : "A", &face_labels[0]) : menu_text(UI_KEY_ENTER),
+                          pad ? binds_pad_hint(bottom ? B_A : B_B, bottom ? "A" : "B", &face_labels[1]) : "Esc", prev, next};
+    float gap = 8 * scale, group_gap = 18 * scale, glyph_h = 30 * scale, total = 0;
+    for (int i = 0; i < 4; i++) {
+        bool image = pad && (i == 0 || ((i == 1 || i == 2) && face_labels[i-1]));
+        total += (image ? glyph_h : glyph_width(keys[i], scale)) + gap + ImGui::CalcTextSize(labels[i]).x;
+        if (i == 3) total += glyph_width(keys[4], scale) + gap;
+        if (i < 3) total += group_gap;
+    }
+    float hx = left_x - 20 * scale - total, hy = bar_y + (bar - glyph_h) * .5f;
+    float min_hx = origin.x + 20 * scale;
+    if (hx >= min_hx) {
+        for (int i = 0; i < 4; i++) {
+            int face = pad && (i == 1 || i == 2) ? face_labels[i-1] : 0;
+            hx += glyph(dl, ImVec2(hx, hy), keys[i], scale, face != 0, pad && i == 0, face) + gap;
+            if (i == 3) hx += glyph(dl, ImVec2(hx, hy), keys[4], scale, false) + gap;
+            dl->AddText(ImVec2(hx, hy + (glyph_h - ImGui::GetFontSize()) * .5f), theme::text_dim, labels[i]);
+            hx += ImGui::CalcTextSize(labels[i]).x + group_gap;
+        }
+    }
+    float status_width = fmaxf(0, left_x - total - 50 * scale - min_hx);
+    status_text(dl, ImVec2(min_hx, bar_y + (bar - ImGui::GetFontSize()) * .5f), status_width, opt_status(), scale);
+    ImGui::PopFont();
     bool was_modal = g_modal || binds_modal();
     if (g_tab != TAB_ADVANCED) g_modal = false;
     if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
         set_open(0);
     ImGui::End();
+    float fade = g_open_anim_ns ? fminf(1, (float)(plat_now_ns() - g_open_anim_ns) / 140000000.0f) : 1;
+    if (fade < 1) {
+        fade_vertices(bg, bg_start, fade);
+        ImGuiWindow *root = ImGui::FindWindowByName("##menu");
+        for (ImGuiWindow *window : GImGui->Windows) {
+            ImGuiWindow *parent = window;
+            while (parent && parent != root) parent = parent->ParentWindow;
+            if (parent == root && window->Active) fade_vertices(window->DrawList, 0, fade);
+        }
+    }
 }
 
 static int g_save_pending;   // a changed setting still waits for its write to totk.ini (opt_save_tick)
@@ -1070,6 +1515,10 @@ static std::atomic<int> g_perf_save;     // F10 changed the mode: totk.ini is wr
 static uint64_t g_perf_last_ns, g_perf_win_ns, g_perf_max_ns;
 static int g_perf_frames;
 static char g_perf_text[96];
+// The overlay's top edge at 1080p, times the menu scale: below the small label HWAoI keeps in the top right corner of
+// every screen (its own "NORMAL", about 18..36 px down at 1080p, anchored to the window's right edge), which the fps
+// box at 12 px used to cover.
+static const float PERF_TOP = 46;
 
 static int perf_mode_of(const char *s) { return !strcmp(s, "full") ? 2 : !strcmp(s, "fps") ? 1 : 0; }
 
@@ -1126,7 +1575,10 @@ static void perf_tick(uint64_t now, const MenuTarget *t) {
         g_perf_frames++;
         if (d > g_perf_max_ns) g_perf_max_ns = d;
         if (g_perf_win_ns >= 500000000ull) {
-            snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS), g_perf_frames * 1e9 / g_perf_win_ns);
+            // with frame generation: the frames shown, then the ones the game drew
+            double fps = g_perf_frames * 1e9 / g_perf_win_ns, gen = vk_fg_rate();
+            if (gen > 1.05) snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS_GEN), fps * gen, fps);
+            else snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS), fps);
             g_perf_win_ns = g_perf_max_ns = 0;
             g_perf_frames = 0;
         }
@@ -1179,7 +1631,7 @@ static float perf_gb(float mb) { return mb < 0 ? -1 : mb / 1024; }
 // present scales the image to the window (gfx_present.c, the last present), the frame limit and the presentation mode
 // in use.
 static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
-    char v[6][64];
+    char v[7][64];
     snprintf(v[0], sizeof v[0], menu_text(UI_MENU_OV_FMT_SIZE), t->width, t->height);
     snprintf(v[1], sizeof v[1], menu_text(UI_MENU_OV_FMT_SIZE), (unsigned)t->image_w, (unsigned)t->image_h);
     unsigned out[2], scene[2];
@@ -1198,14 +1650,21 @@ static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
     if (hz > 0) snprintf(v[4], sizeof v[4], menu_text(UI_MENU_OV_FPS), hz);
     const char *pm = present_name(gfx_window_present_mode());
     snprintf(v[5], sizeof v[5], "%s", pm ? pm : menu_text(UI_MENU_OV_NONE));
-    static const UiTextId labels[6] = {UI_MENU_OV_WINDOW, UI_MENU_OV_OUTPUT, UI_MENU_OV_SCENE,
-                                       UI_MENU_OV_SCALING, UI_MENU_OV_LIMIT, UI_MENU_OV_PRESENT};
+    // frame generation, while it is loaded: the multiplier, and the frames the screen gets per second right now
+    int rows = 6, fg = vk_fg_factor();
+    if (fg) {
+        PerfStats ps;
+        perfmon_snapshot(&ps);
+        snprintf(v[rows++], sizeof v[0], menu_text(UI_MENU_OV_FMT_FRAME_GEN), fg, ps.fps * vk_fg_rate());
+    }
+    static const UiTextId labels[7] = {UI_MENU_OV_WINDOW, UI_MENU_OV_OUTPUT, UI_MENU_OV_SCENE,   UI_MENU_OV_SCALING,
+                                       UI_MENU_OV_LIMIT,  UI_MENU_OV_PRESENT, UI_MENU_OV_FRAME_GEN};
     if (!ImGui::BeginTable("##perfp", 2, ImGuiTableFlags_SizingFixedFit)) return;
     float vw = 0;
-    for (auto &s : v) vw = fmaxf(vw, ImGui::CalcTextSize(s).x);
+    for (int i = 0; i < rows; i++) vw = fmaxf(vw, ImGui::CalcTextSize(v[i]).x);
     ImGui::TableSetupColumn("##p0", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableSetupColumn("##p1", ImGuiTableColumnFlags_WidthFixed, vw);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < rows; i++) {
         perf_label(labels[i], c);
         ImGui::TableNextColumn();
         perf_right(v[i], false);
@@ -1217,8 +1676,11 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     float w = (float)t->width;
     PerfStats s;
     perfmon_snapshot(&s);
-    ImGui::SetNextWindowPos(ImVec2(w - 12 * scale, 12 * scale), ImGuiCond_Always, ImVec2(1, 0));
-    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::SetNextWindowPos(ImVec2(w - 12 * scale, PERF_TOP * scale), ImGuiCond_Always, ImVec2(1, 0));
+    ImGui::SetNextWindowBgAlpha(204.0f / 255);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10 * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1 * scale);
+    ImGui::PushStyleColor(ImGuiCol_Border, theme::colour(theme::line));
     ImGui::Begin("##perf", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
@@ -1226,8 +1688,8 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     if (g_open.load(std::memory_order_relaxed)) ImGui::BringWindowToDisplayBack(ImGui::GetCurrentWindow());
     else ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
     ImGui::SetWindowFontScale(0.72f);
-    const ImVec4 gpu_c(0.55f, 0.83f, 0.31f, 1), cpu_c(0.18f, 0.59f, 0.80f, 1), ram_c(0.80f, 0.45f, 0.70f, 1),
-        fps_c(0.95f, 0.95f, 0.95f, 1), wait_c(0.93f, 0.76f, 0.33f, 1), pic_c(0.62f, 0.70f, 0.95f, 1);
+    const ImVec4 gpu_c = theme::colour(theme::text_dim), cpu_c = gpu_c, ram_c = gpu_c,
+                 fps_c = theme::colour(theme::text), wait_c = gpu_c, pic_c = gpu_c;
     if (ImGui::BeginTable("##perft", 4, ImGuiTableFlags_SizingFixedFit)) {
         static const UiTextId labels[] = {UI_MENU_OV_GPU, UI_MENU_OV_VRAM, UI_MENU_OV_CPU, UI_MENU_OV_RAM};
         static const PerfCol c0[] = {{UI_MENU_OV_FPS, 888}};
@@ -1291,6 +1753,8 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     if (s.gpu_name[0]) ImGui::TextDisabled("%s", s.gpu_name);
     if (s.cpu_name[0]) ImGui::TextDisabled("%s", s.cpu_name);
     ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 static void perf_draw(const MenuTarget *t, float scale) {
@@ -1301,14 +1765,18 @@ static void perf_draw(const MenuTarget *t, float scale) {
     ImDrawList *dl = g_open.load(std::memory_order_relaxed) ? ImGui::GetBackgroundDrawList() : ImGui::GetForegroundDrawList();
     ImVec2 sz = ImGui::CalcTextSize(g_perf_text);
     float pad = 6 * scale;
-    ImVec2 p(w - 12 * scale - sz.x - pad * 2, 12 * scale);   // the top right corner: the game's HUD leaves it empty
-    dl->AddRectFilled(p, ImVec2(p.x + sz.x + pad * 2, p.y + sz.y + pad * 2), IM_COL32(0, 0, 0, 150), 4 * scale);
-    dl->AddText(ImVec2(p.x + pad, p.y + pad), IM_COL32(255, 255, 255, 235), g_perf_text);
+    ImVec2 p(w - 12 * scale - sz.x - pad * 2, PERF_TOP * scale);   // the top right corner, under the game's label
+    dl->AddRectFilled(p, ImVec2(p.x + sz.x + pad * 2, p.y + sz.y + pad * 2),
+                      theme::alpha(theme::surface1, 200.0f / 255), 6 * scale);
+    dl->AddText(ImVec2(p.x + pad, p.y + pad), theme::text, g_perf_text);
 }
 
 extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot) {
     *shot = NULL;
-    if (!g_test.parsed) test_parse();
+    if (!g_test.parsed) {
+        opt_restart_needed();   // the first frame: the settings read at start are still as the game started
+        test_parse();
+    }
     if (g_test.next_set < g_test.n_sets && frame >= g_test.sets[g_test.next_set].frame) test_apply_sets(frame);
     if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
@@ -1350,6 +1818,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         io.ClearInputKeys();
         io.ClearInputMouse();
         g_last_ns = 0;
+        g_open_anim_ns = open ? t0 : 0;
         g_focus_page = g_tab_request >= 0 ? g_tab_request : g_tab;   // opening: the first row has the cursor
         if (GImGui->OpenPopupStack.Size) ImGui::ClosePopupToLevel(0, false);   // a confirmation left open on closing
         g_modal = false;
@@ -1366,6 +1835,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         plat_mutex_lock(&ev_lock);
         ev_n = 0;
         plat_mutex_unlock(&ev_lock);
+        pad_events(io, 1);
     }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();

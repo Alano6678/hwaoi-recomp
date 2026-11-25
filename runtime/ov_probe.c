@@ -835,13 +835,14 @@ static void probe_fonts(void) {
 // Check catalog coverage, description bounds, keyboard strings and live menu language changes.
 static void probe_menu_text(void) {
     static const char *const langs[] = {"en", "ja", "fr", "de", "it", "es", "nl", "pt", "ru", "zh-Hans", "zh-Hant", "ko"};
-    static const char *const menu_langs[] = {"en", "ru", "zh-Hans"};
+    static const char *const menu_langs[] = {"en", "ru", "it", "zh-Hans"};
     for (size_t i = 0; i < sizeof menu_langs / sizeof *menu_langs; i++)
         for (int id = UI_MENU_FIRST; id <= UI_MENU_LAST_ID; id++) {
             const char *lang = menu_langs[i];
             CHECK(ui_text_defined(lang, (UiTextId)id), "menu text id %d lacks %s", id, lang);
+            // The detail strip keeps the whole text and a note after it (option_rows.cpp desc_set).
             CHECK(strlen(ui_text_in(lang, (UiTextId)id)) + 256 < UI_DESC_BYTES,
-                  "menu text id %d is too long for the description pane in %s", id, lang);
+                  "menu text id %d is too long for the detail strip in %s", id, lang);
         }
     CHECK(!ui_text_defined("en", UI_TEXT_COUNT) && !*ui_text_in("ru", UI_TEXT_COUNT), "an id past the catalog gives text");
     // other languages fall back to English for the menu, and keep their own keyboard texts
@@ -861,15 +862,18 @@ static void probe_menu_text(void) {
     CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in("ru", UI_MENU_CONTINUE), "menu_text ignores MENU_LANG=ru");
     cfg_set("TOTK_MENU_LANG", "zh-Hans");
     CHECK(!strcmp(menu_text(UI_MENU_CONTINUE), "继续游戏"), "menu_text did not follow MENU_LANG=zh-Hans");
+    cfg_set("TOTK_MENU_LANG", "it");
+    CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in("it", UI_MENU_CONTINUE) && strcmp(menu_text(UI_MENU_CONTINUE), "Continue"),
+          "menu_text ignores MENU_LANG=it");
     cfg_set("TOTK_MENU_LANG", "en");
     CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in("en", UI_MENU_CONTINUE), "menu_text did not follow MENU_LANG=en");
     cfg_set("TOTK_MENU_LANG", "");
     const char *sys = plat_ui_language();
-    int ru = !strcmp(sys, "ru") || !strncmp(sys, "ru-", 3);
     int chinese = !strcmp(sys, "zh") || !strcmp(sys, "zh-CN") || !strcmp(sys, "zh-SG") ||
                   !strcmp(sys, "zh-Hans") || !strncmp(sys, "zh-Hans-", 8);
-    CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in(ru ? "ru" : chinese ? "zh-Hans" : "en", UI_MENU_CONTINUE),
-          "menu_text auto ignores the system language");
+    const char *auto_lang = !strcmp(sys, "ru") || !strncmp(sys, "ru-", 3) ? "ru"
+                          : !strcmp(sys, "it") || !strncmp(sys, "it-", 3) ? "it" : chinese ? "zh-Hans" : "en";
+    CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in(auto_lang, UI_MENU_CONTINUE), "menu_text auto ignores the system language");
 }
 
 static void probe_main(Cpu *c) {

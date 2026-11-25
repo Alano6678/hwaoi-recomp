@@ -21,6 +21,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "hud_prompts.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_rgba8_compare.h"
@@ -58,6 +59,8 @@ typedef struct Tex {
     uint8_t listed;               // in owned[]
     uint8_t *snap;                // a texture that fills no page: its storage bytes when the GPU write was recorded
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
+    uint8_t prompts;              // the last upload was the game's button-picture atlas (hud_prompts.c)
+    uint32_t prompts_gen;         // ... drawn for this hud_prompts_gen()
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
 } Tex;
 
@@ -703,6 +706,12 @@ static void upload(Tex *e) {
             }
             free(tmp);
         }
+    // The game's button pictures, as one BC3 texture of one level: the copy on its way to the GPU gets the buttons
+    // of the device in use (hud_prompts.c). The storage keeps the game's bytes.
+    e->prompts = 0;
+    if (n == 1 && !astc && !rgb && !is3d && e->f.vk == VK_FORMAT_BC3_UNORM_BLOCK && bw == 4 && bh == 4)
+        e->prompts = (uint8_t)hud_prompts_patch(stg + rg[0].bufferOffset, (size_t)(d->width / 4) * (d->height / 4) * 16,
+                                                d->width, d->height, &e->prompts_gen);
     uint8_t *raw_copy = acheck ? malloc(total) : NULL;
     if (raw_copy) memcpy(raw_copy, stg, total);
     barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -780,6 +789,9 @@ static int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     return 0;
 }
 
+// The button-picture atlas is uploaded again when the pictures to show changed (another device, another binding).
+static int prompts_stale(const Tex *e) { return e->prompts && e->prompts_gen != hud_prompts_gen(); }
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
 static void make_fresh(Tex *e) {
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
@@ -793,7 +805,7 @@ static void make_fresh(Tex *e) {
     int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
     e->wgen = now;
     e->last_ch = ch;
-    if (ch) upload(e);   // 1 written, -1 not tracked: both upload again
+    if (ch || prompts_stale(e)) upload(e);   // 1 written, -1 not tracked: both upload again
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
@@ -807,7 +819,7 @@ static void make_fresh_snap(Tex *e) {
     e->wgen = now;
     if (!e->uploaded) { upload(e); return; }
     e->last_ch = ch;
-    if (ch) upload(e);
+    if (ch || prompts_stale(e)) upload(e);
 }
 
 // ---------------------------------------------------------------- aliases (TOTK_TEX_ALIAS)

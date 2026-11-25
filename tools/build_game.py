@@ -6,7 +6,9 @@ recompiled only when it, a header it includes or its flags change.
 On Linux the same steps make build/<version>/totk with the clang, lld and ninja on PATH (or the clang and lld in --toolchain DIR/bin): the
 runtime's *_sdl.* and platform/linux.c take the place of its *_win.*, platform/win32.c and totk.rc, the libraries are
 the system's (Vulkan, SDL3, Opus, libvpx, zstd; libstdc++ static), and the executable finds a libSDL3.so.0 beside it
-first (rpath $ORIGIN). docs/building.md lists the packages.
+first (rpath $ORIGIN). docs/building.md lists the packages. A release (--toolchain, --sysroot and --deps from the
+bundle) needs none of them: Opus, libvpx and zstd go into the executable, and deps/lib's libSDL3.so.0 is copied
+beside it.
 
     .venv\\Scripts\\python tools\\build_game.py                     # generated/v121 -> build/v121/totk.exe
     .venv\\Scripts\\python tools\\build_game.py --modules subsdk0   # one module (links if it has no calls into others)
@@ -80,7 +82,10 @@ ROOT = Path(__file__).resolve().parent.parent
 MAIN_ROOT = (ROOT / 'build').resolve().parent
 UCRT = Path(r'F:\MSYS2\ucrt64\bin')
 EXE = 'hwaoi.exe' if WIN else 'hwaoi'
-ICON = None   # --icon: the game's cover as an .ico (tools/hwaoi_icon.py), embedded as icon resource 1
+# Icon resource 1 of the executable, which the game window loads: --icon (the game's cover from the player's own
+# NUP, tools/hwaoi_icon.py) when the NUP carries one, else Age of Decomp's own game mark.
+DEFAULT_ICON = ROOT / 'runtime' / 'ui' / 'aod_game.ico'
+ICON = DEFAULT_ICON if DEFAULT_ICON.is_file() else None
 
 
 def on_path(name):
@@ -158,16 +163,25 @@ GiB = 1 << 30
 # Peak commit of one compile, 1.2.1 at -O1 (2026-10-20): 120-180 MiB per ~3 MiB chunk, 568 MiB for main_table.c
 # (295k-entry tables). 768 MiB leaves headroom for the largest file.
 JOB_MEM = 768 << 20
+# A generated unit of 4 MiB or more is one huge game function or a table. HWAoI 1.0.3's main_0163.c is a single function
+# of 100,473 lines: at -O1 clang spent 278 s on it alone (loop rotation 91 s, machine sinking 46 s, block placement
+# 28 s), the whole compile waited for it, and more workers changed nothing. These passes are turned down for such
+# units only: 107 s, an object of nearly the same size (6.4 MiB against 6.7; -O0 makes 101 MiB), and the function had
+# no sample in a profile of 30 s of play (2026-11-23). The code does the same; only how it is optimised changes.
+LARGE_UNIT = 4 << 20
+LARGE_UNIT_FLAGS = ('-mllvm', '-rotation-max-header-size=0', '-mllvm', '-disable-machine-sink',
+                    '-mllvm', '-disable-block-placement')
 MEM_BUDGET = 50 * GiB  # total for all compile jobs
 
 
 def compile_jobs(requested, cpus, available):
-    """One large HWAoI compile can use 2.2 GiB; budget for it and the small workers."""
+    """One large HWAoI compile can use 2.2 GiB; budget for it and the small workers. Automatic (0): every logical
+    processor but one in eight (hostmem.build_threads), as far as the memory goes; 1..8 caps it."""
     if requested < 0 or requested > 8:
         raise ValueError('jobs must be 0 (automatic) or 1..8')
     budget = max(0, available - GiB)
     safe = max(1, 1 + (budget - (2560 << 20)) // (512 << 20))
-    return max(1, min(requested or 8, cpus, safe))
+    return max(1, min(requested or hostmem.build_threads(cpus), cpus, safe))
 
 
 def below_root(p):
@@ -385,7 +399,11 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     # Start expensive units early without changing the canonical link order.
     for size, f, o in sorted(compile_edges, key=lambda e: (-e[0], e[1].as_posix())):
         lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}{stamp}')
-        lines.append('  pool = large_gen' if size >= 4 << 20 else '  pool = gen')
+        if size >= LARGE_UNIT:
+            lines.append('  pool = large_gen')
+            lines.append('  genflags = $genflags ' + ' '.join(LARGE_UNIT_FLAGS))
+        else:
+            lines.append('  pool = gen')
     rt = []
     sources = runtime_sources(skip)
     if make_lib:
@@ -406,7 +424,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         rt.append(o)
     if ICON and WIN and not make_lib:
         # Icon group 1, which the game window class loads (gfx_window_win.c). The .rc lives in the build
-        # folder because the icon is the user's own game artwork, never part of the source tree.
+        # folder because the icon may be the user's own game artwork, which is never part of the source tree.
         rc = out / 'game_icon.rc'
         text = '1 ICON "' + Path(ICON).resolve().as_posix().replace('"', '') + '"\n'
         if not rc.is_file() or rc.read_bytes() != text.encode('utf-8'):   # unchanged: no rebuild of the icon object
@@ -798,7 +816,7 @@ def main():
         WINDRES = TOOLCHAIN_BIN / 'llvm-windres.exe'
     if args.toolchain and WIN or args.deps and (args.toolchain or not WIN):   # Linux: --deps only, never deps-mingw
         DEPS = (args.deps or DEFAULT_DEPS).resolve()
-        dlls = sorted((DEPS / 'bin').glob('*.dll')) if WIN else []
+        dlls = sorted((DEPS / 'bin').glob('*.dll')) if WIN else sorted((DEPS / 'lib').glob('*.so.*'))
     if DEPS and not WIN:
         # A release (--deps): Opus, libvpx and zstd go into the executable, so it needs no more than libc, Vulkan and
         # the libSDL3.so.0 beside it
@@ -903,7 +921,7 @@ def main():
     if args.make_runtime_lib:
         print(f'{below_root(exe)}: {mib(exe.stat().st_size)}')
         return
-    for dll in dlls:   # dynamic SDL3 (zlib) and its libiconv (LGPL, unmodified DLL), found next to totk.exe
+    for dll in dlls:   # dynamic SDL3 (zlib) and its libiconv (LGPL, unmodified DLL), found next to totk.exe; Linux: libSDL3.so.0
         shutil.copy2(dll, exe.parent / dll.name)
     sections, image = pe_sections(exe) if WIN else elf_sections(exe)
     print(f'{below_root(exe)}: file {mib(exe.stat().st_size)}, '

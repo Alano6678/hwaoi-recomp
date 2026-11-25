@@ -145,7 +145,7 @@ static void free_targets(VkCtx *c) {
 static int ensure_targets(VkCtx *c, uint32_t w, uint32_t h) {
     if (S.target[COLOR].img && S.w == w && S.h == h) return 1;
     vk_queue_lock();   // vkDeviceWaitIdle needs every queue left alone, and the replay submits from its own thread
-    vkDeviceWaitIdle(c->device);
+    vk_device_idle(c->device);
     vk_queue_unlock();
     free_targets(c);
     const VkImageUsageFlags work = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;

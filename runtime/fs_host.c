@@ -11,6 +11,8 @@
 //   <profile>/save-backup/<time>/      the three committed saves before the current one
 //   <profile>/temp/                    emptied at start
 //   <profile>/cache/<index>/           cache storage
+//   <profile>/linked/<title id>/       another game's save data, read-only, for the data-link bonuses (only with
+//                                      TOTK_LINKED_SAVES=1; empty unless the player put that game's save there)
 //
 // The save mount is journaled as on Horizon: changes go to a working copy and become the committed save atomically at
 // Commit; a crash or an Unmount before Commit leaves the previous committed save. Commit returns at once and the copy
@@ -20,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "fs.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -714,9 +717,41 @@ static uint32_t mount_save(const char *name, const uint64_t *uid) {
     return r;
 }
 
+// ---- other games' save data (data-link bonuses)
+// The game reads three other titles' save data: main.npdm grants read access to them, and the game's own table of them
+// (main+0x235a728, its save kinds 6..8) holds 0100B2F01111C000, Hyrule Warriors: Age of Calamity (01002B00111A2000)
+// and The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000). This host has none of them, so by default they do
+// not exist. TOTK_LINKED_SAVES=1 is the player saying they have them: IsSaveDataExisting answers yes and
+// MountSaveDataReadOnly mounts <profile>/linked/<title id>/, empty unless the player put that game's save there.
+#if RT_TARGET_HWAOI
+static const uint64_t linked_titles[] = {0x0100B2F01111C000ull, 0x01002B00111A2000ull, 0x0100F2C0115B6000ull};
+#else
+static const uint64_t linked_titles[] = {0};
+#endif
+static volatile int32_t linked_logged;   // two bits per linked title: its "no" and its "yes" answer were logged
+
+static int linked_present(uint64_t application, const uint64_t *uid, const char *call) {
+    int i = 0, n = (int)(sizeof linked_titles / sizeof *linked_titles);
+    while (i < n && (!linked_titles[i] || linked_titles[i] != application)) i++;
+    if (i == n) return 0;
+    int yes = my_uid(uid) && cfg_bool("TOTK_LINKED_SAVES");
+    int32_t bit = (int32_t)1 << (2 * i + yes), old = plat_cas32(&linked_logged, 0, 0);
+    while (!(old & bit)) {
+        int32_t seen = plat_cas32(&linked_logged, old | bit, old);   // (p, new value, expected): the value it found
+        if (seen == old) {
+            rt_log("fs: %s for another game's save data %016llx: %s", call, (unsigned long long)application,
+                   yes ? "present (linked_saves=1)" : "absent");
+            break;
+        }
+        old = seen;
+    }
+    return yes;
+}
+
 static uint8_t save_exists(uint64_t application, const uint64_t *uid) {
     ready();
-    return application == TOTK_APPLICATION_ID && my_uid(uid);
+    if (application == TOTK_APPLICATION_ID) return my_uid(uid);
+    return (uint8_t)linked_present(application, uid, "IsSaveDataExisting");
 }
 
 // The local directory backend has no per-title reserved save image or journal.
@@ -739,10 +774,16 @@ static uint32_t get_save_size(int64_t *data, int64_t *journal, const uint64_t *u
     return 0;
 }
 
-// Other titles' save data (data-link bonuses) is not present on this host.
+// The game's own save, or another game's (data-link bonuses, see linked_present) when the player says they have it.
 static uint32_t mount_save_ro(const char *name, uint64_t application, const uint64_t *uid) {
-    if (!save_exists(application, uid)) return FS_R_TARGET_NOT_FOUND;
-    return mount_add(name, M_SAVE_RO, save_root);
+    ready();
+    if (application == TOTK_APPLICATION_ID)
+        return my_uid(uid) ? mount_add(name, M_SAVE_RO, save_root) : FS_R_TARGET_NOT_FOUND;
+    if (!linked_present(application, uid, "MountSaveDataReadOnly")) return FS_R_TARGET_NOT_FOUND;
+    char p[PATH_CAP];
+    snprintf(p, sizeof p, "%s/linked/%016llx", profile, (unsigned long long)application);
+    make_dirs(p);
+    return mount_add(name, M_SAVE_RO, p);
 }
 
 static uint32_t mount_temp(const char *name) {

@@ -25,14 +25,14 @@ class HwaoiRateTests(unittest.TestCase):
 const int rt_game_version=0;
 uint64_t rt_guest_start_ns;unsigned rt_trace;
 static uint8_t page[4096];static unsigned version=1;static const char *rate="60";
-static int has_step=1,rate_on=1;
+static int has_step=1,rate_on=1,player=0;
 const char *cfg_get(const char *key){
- if(!strcmp(key,"TOTK_RATE_UNLOCK"))return "1";
+ if(!strcmp(key,"TOTK_RATE_UNLOCK"))return player?NULL:"1";
  if(!strcmp(key,"TOTK_FPS_LIMIT"))return rate;
  return NULL;
 }
 unsigned cfg_version(void){return version;}
-int rt_patch_set(const char *name){return !strcmp(name,"hwaoi_rate")?0:!strcmp(name,"hwaoi_step")&&has_step?1:-1;}
+int rt_patch_set(const char *name){if(player)return -1;return !strcmp(name,"hwaoi_rate")?0:!strcmp(name,"hwaoi_step")&&has_step?1:-1;}
 int rt_patch_enabled(int set){return set==0?rate_on:set==1;}
 void *rt_patch_page(void){return page;}
 void rt_patch_disable(int set){(void)set;assert(0);}
@@ -45,7 +45,16 @@ void rt_fatal(const char *fmt,...){(void)fmt;exit(73);}
 int main(int argc,char **argv){
  assert(argc==2);if(!strcmp(argv[1],"stale"))has_step=0;
  if(!strcmp(argv[1],"step_only"))rate_on=0;
- memset(page,0xa5,sizeof page);frame_step_init();assert(has_step&&rate_on);
+ if(!strcmp(argv[1],"player"))player=1;
+ memset(page,0xa5,sizeof page);frame_step_init();
+ if(player){ // no developer experiment: 30 or 60; older or unknown values play at 60 without stopping the game
+  assert(!frame_step_native_rate());
+  const char *in[]={"30","60","90","120","45","30"};const uint64_t cap[]={33333333,16666667,16666667,16666667,16666667,33333333};
+  for(unsigned r=0;r<6;r++){rate=in[r];version++;assert(frame_step_cap_ns()==cap[r]);}
+  for(unsigned i=0;i<sizeof page;i++)assert(page[i]==0xa5);
+  puts("player rates passed");return 0;
+ }
+ assert(has_step&&rate_on);
  assert(!frame_step_realtime()&&frame_step_native_rate()); // node clock, no borrowed host/TotK clock
  uint64_t now=1000000000;frame_step_present(now,1);
  const char *rates[]={"30","60","90","120","60"};
@@ -70,7 +79,7 @@ int main(int argc,char **argv){
                 exe=folder/"fixture.exe"
                 result=subprocess.run([str(CC),opt,"-march=x86-64-v3","-I",str(ROOT/"runtime"),"-I",str(folder),str(path),"-o",str(exe)],capture_output=True,text=True)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                for mode,code in (("good",0),("stale",73),("step_only",73)):
+                for mode,code in (("good",0),("stale",73),("step_only",73),("player",0)):
                     result=subprocess.run([str(exe),mode],capture_output=True,text=True,timeout=10)
                     self.assertEqual(result.returncode,code,result.stdout+result.stderr)
 
@@ -106,7 +115,8 @@ int main(int argc,char **argv){
   assert(present_period(&window)==(game>16666667?game:16666667));}
  realtime=1;window.interval=1;assert(present_period(&window)==16666667); // no borrowed TotK step
  value="30";assert(present_period(&window)==33333333);
- value="120";assert(present_period(&window)==16666666); // unqualified high rates stay bounded
+ value="120";assert(present_period(&window)==16666667); // without an experiment faster values play at 60
+ value="45";assert(present_period(&window)==16666667);value="144";assert(present_period(&window)==16666667);
  experiment=1;
  const char *rates[]={"30","60","90","120"};uint64_t periods[]={33333333,16666667,11111111,8333333};
  for(int i=0;i<4;i++){value=rates[i];assert(present_period(&window)==periods[i]);}

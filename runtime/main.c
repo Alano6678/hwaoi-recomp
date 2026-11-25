@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "platform/platform.h"
 #include "sha256.h"
@@ -404,16 +405,20 @@ static void crash_handler(const PlatCrash *x) {
     if (plat_xchg32(&busy, 1)) plat_exit(71);
     char d[160];
     uintptr_t rip = x->rip;
-    rt_logf("FATAL: %s (%#x) at host %p (totk+%#llx)", x->what, x->code, (void *)rip, (unsigned long long)x->offset);
+    rt_logf("FATAL: %s (%#x) at host %p (%s+%#llx)", x->what, x->code, (void *)rip, x->module ? x->module : "totk",
+            (unsigned long long)x->offset);
     if (x->access >= 0)
         rt_logf(", %s address %#llx", x->access == 1 ? "writing" : x->access == 8 ? "executing" : "reading",
                 (unsigned long long)x->addr);
+    if (x->thread) rt_logf(", thread '%s'", x->thread);
     rt_log_raw("\n", 1);
-    uint64_t f = lifted_function(rip);
+    if (x->module) rt_logf("  outside the game's code: in %s, called from the frames below\n", x->module);
+    uint64_t f = x->module ? 0 : lifted_function(rip);
     if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
-    for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it
+    uintptr_t base = x->base ? x->base : rip - x->offset;
+    for (int i = 0; i < x->nframes; i++) {   // abort, invalid parameter, a fault outside: the host code's frames
         uint64_t g = lifted_function(x->frames[i]);
-        rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));
+        rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - base));
         if (g) rt_logf(" in lifted function f_%llx", (unsigned long long)g);
         rt_log_raw("\n", 1);
     }
@@ -435,6 +440,72 @@ static void crash_handler(const PlatCrash *x) {
     }
     fflush(stderr);
     plat_exit(71);
+}
+
+// ---- hang report. The game presented frames and then none for TOTK_HANG_SECONDS (20; 0 turns the report off): the
+// log gets every thread's name and call stack, once per stall and three times a run at most. Nothing else changes:
+// the game is left as it is, and a stall that ends (a long load) costs only those lines. Addresses in the game's
+// executable are offsets, the same in every build of one version, with the lifted function they lie in.
+static void hang_thread(const PlatThreadStack *t, void *arg) {
+    int *n = arg;
+    (*n)++;
+    rt_logf("hang: thread %u '%s':", t->id, t->name);
+    if (!t->nframes) rt_logf(" no stack read");
+    for (int i = 0; i < t->nframes; i++) {
+        char module[96];
+        uintptr_t base = 0;
+        if (!plat_module_of(t->frames[i], module, sizeof module, &base)) {
+            rt_logf("%s %p", i ? " <" : "", (void *)t->frames[i]);
+            continue;
+        }
+        rt_logf("%s %s+%#llx", i ? " <" : "", module, (unsigned long long)(t->frames[i] - base));
+        uint64_t g = lifted_function(t->frames[i]);
+        if (g) rt_logf(" (f_%llx)", (unsigned long long)g);
+    }
+    rt_log_raw("\n", 1);
+}
+
+static void hang_watch(void *arg) {
+    (void)arg;
+    const char *e = cfg_get("TOTK_HANG_SECONDS");
+    uint64_t limit = (uint64_t)(e && *e ? atoi(e) : 20) * 1000000000ull, last = 0, since = plat_now_ns();
+    int reported = 0, reports = 0;
+    // TOTK_HANG_TEST=<frame> (developer): one report once that frame was presented, to check the report on a healthy game
+    const char *t = cfg_get("TOTK_HANG_TEST");
+    uint64_t test_at = t && *t ? strtoull(t, NULL, 10) : 0;
+    if (!limit) return;
+    for (;;) {
+        plat_sleep_ms(1000);
+        uint64_t frames = gfx_stats().frames, now = plat_now_ns();
+        if (test_at && frames >= test_at) {
+            test_at = 0;
+            rt_log("hang: test report at frame %llu (TOTK_HANG_TEST); where every thread is now:", (unsigned long long)frames);
+            int n = 0;
+            plat_threads_report(hang_thread, &n);
+            rt_log("hang: %d threads listed; the game was left running", n);
+        }
+        if (frames != last) {
+            if (reported) rt_log("hang: frames again after %.0f s without one", (double)(now - since) / 1e9);
+            last = frames, since = now, reported = 0;
+            continue;
+        }
+        // With "keep running in the background" off (ASSUME_FOCUS=0) the game may stop drawing on purpose behind another
+        // window: a silence then counts only while its window is in front.
+        if (!cfg_bool("TOTK_ASSUME_FOCUS") && !gfx_window_focused()) since = now;
+        if (reported || reports >= 3 || now - since < limit) continue;
+        reported = 1, reports++;
+        rt_log("hang: no frame for %.0f s after frame %llu; where every thread is now (report %d of 3 at most):",
+               (double)(now - since) / 1e9, (unsigned long long)frames, reports);
+        int n = 0;
+        if (!plat_threads_report(hang_thread, &n)) rt_log("hang: thread stacks cannot be read on this system");
+        else rt_log("hang: %d threads listed; the game was left running", n);
+    }
+}
+
+void rt_hang_watch_start(void) {
+    static volatile int32_t started;
+    if (plat_xchg32(&started, 1)) return;
+    plat_thread_spawn(hang_watch, NULL, "hang watch", 256 << 10);
 }
 
 // ---- self-test: layout, dispatch table, host-function registry, without game files

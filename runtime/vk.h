@@ -57,10 +57,11 @@ typedef struct {
     int gpl;                           // VK_EXT_graphics_pipeline_library enabled with fast linking (TOTK_GPL=0: off)
     int amd;                           // an AMD GPU (vendor 0x1002), any driver
     int amd_sc;                        // AMD's Windows driver branch for RDNA 1 and 2 ("AMD proprietary shader compiler")
-    int amd_rdna3;                     // a discrete RDNA 3 GPU (Navi 31/32/33, device 0x7440-0x749f) on AMD's own driver
+    int amd_own;                       // an AMD GPU on AMD's own driver (Adrenalin on Windows), both branches: not RADV
+    int intel_win;                     // Intel's Windows driver (igvk64): the pipeline cache copy waits for builds
 } VkCaps;
 extern VkCaps vk_caps;
-void vk_caps_driver(VkPhysicalDevice p);             // first, before vkCreateDevice: vk_caps.amd, amd_sc
+void vk_caps_driver(VkPhysicalDevice p);             // first, before vkCreateDevice: vk_caps.amd, amd_sc, amd_own
 void vk_caps_features(VkPhysicalDeviceFeatures *f);   // before vkCreateDevice (TOTK_VK_NO_FLOAT64 clears shaderFloat64)
 // Before vkCreateDevice, with the driver's graphics pipeline library feature and properties: sets vk_caps.gpl,
 // 1 = enable the extensions (VK_KHR_pipeline_library, VK_EXT_graphics_pipeline_library) and the feature.
@@ -68,6 +69,8 @@ int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
                 const VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *p);
 void vk_caps_init(VkCtx *c);                          // after it: pretend limits, fallbacks, the boot report
 
+// The device-local memory (MiB) of the card vk_init would take, before the device exists; 0: no usable device.
+int vk_probe_memory(uint64_t *mib, int *discrete);
 VkCtx *vk_ctx(void);                        // NULL until vk_init() succeeded
 int vk_init(void);                          // idempotent; 1 on success, 0 on failure (reason logged with rt_log)
 void vk_shutdown(void);
@@ -81,13 +84,25 @@ void vk_device_fault_report(VkResult r);
 // twice, when the command processor reaches it and when all work before it has finished. After a lost device the two
 // codes bracket the work that hung. Without the extension every call returns at once.
 enum { VK_CRUMB_SUBMIT = 1, VK_CRUMB_SUBMIT_END, VK_CRUMB_UPLOAD, VK_CRUMB_UPLOAD_END, VK_CRUMB_ASTC, VK_CRUMB_PRESENT,
-       VK_CRUMB_PRESENT_END };
+       VK_CRUMB_PRESENT_END, VK_CRUMB_DRAW };
 void vk_crumbs_init(VkCtx *c);       // after the allocator exists
 void vk_crumbs_release(void);
 // Records crumb kind with number n (a timeline value, a batch number; the low 28 bits are kept) into cb. Only the
 // thread that records cb may call it: never into a replay part while the recorder thread owns it (vk_rec.h).
 void vk_crumb(VkCommandBuffer cb, int kind, uint64_t n);
-void vk_crumbs_report(void);         // logs the two codes and what they name
+void vk_crumbs_report(void);         // logs the two codes and what they name, and with draw crumbs the draws between
+// A crumb per draw (TOTK_DRAW_CRUMBS=1): what one draw is, kept for that report.
+typedef struct {
+    uint32_t no;                     // the draw's number (vk_crumbs_draw sets it)
+    uint32_t sub;                    // the submission it is recorded into (its VK_CRUMB_SUBMIT number)
+    uint32_t vertices;
+    uint16_t w, h;                   // the pass's render area
+    uint16_t fmt[9];                 // VkFormat of the colour targets 0-7 and of the depth target; 0: none
+    uint64_t frame;                  // the frame being drawn
+    uint64_t vs, fs;                 // the NVN 2 names of the vertex and the fragment stage (nvn2_origin); 0: not NVN 2
+} VkDrawNote;
+int vk_crumbs_draws(void);                       // 1: draws are marked too
+uint32_t vk_crumbs_draw(const VkDrawNote *n);    // keeps the note and returns the number for the draw's VK_CRUMB_DRAW
 
 // ---- window and present (gfx_present.c). Host threads only.
 // vk_present_image: blits the crop rectangle {x, y, w, h} of src (NULL, or w/h <= 0: the whole w x h image), scaled
@@ -127,12 +142,19 @@ int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceForm
 void vk_hdr_metadata(VkSwapchainKHR sc, int new_sc);
 void vk_hdr_set_active(int on);
 int vk_hdr_active(void);
+int vk_hdr_offered(void);   // the window's surface offers HDR10 (whatever TOTK_HDR says): 1, 0, -1 before a swapchain
 VkImage vk_hdr_encode(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, int srgb, const int crop[4]);
 VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h);
 void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
 void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
 void vk_hdr_release(void);   // before the device goes away
 void vk_present_flip(void);
+// Before vk_present_image or vk_present_blit: the game's frame that call shows, as aod_fg_frame_end numbered it
+// (aod_dlss.h), so frame generation finds the scene that belongs to the picture. 0, or no call: none of the game's.
+void vk_present_frame(uint32_t fg_frame);
+// vkDeviceWaitIdle for the runtime (vk_device.c): through Streamline while frame generation runs, whose own thread
+// presents on queues of its own (aod_dlss.h). The caller holds the queue lock, as for vkDeviceWaitIdle.
+VkResult vk_device_idle(VkDevice device);
 // Every submission to ctx->gfx_queue (and xfer_queue when shared) takes this lock; vk_present_image and the swapchain
 // rebuild do. Recursive.
 void vk_queue_lock(void);

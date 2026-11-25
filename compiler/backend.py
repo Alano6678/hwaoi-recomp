@@ -1,4 +1,8 @@
-"""Local NUP-to-native build workflow used by the portable compiler window."""
+"""Local NUP-to-native build workflow: the setup step of Age of Decomp's launcher (apps/launcher prepare.rs) runs it.
+
+Both systems build with the bundle's own tools: Windows x64 with Python, llvm-mingw, deps and Ninja; Linux x86-64 with
+Python, LLVM's clang and lld, the Steam Runtime sniper sysroot (glibc 2.31) in llvm/sysroot, deps (SDL3, Opus,
+libvpx, zstd, Vulkan) and Ninja, so the player's PC needs no development packages (docs/hwaoi/linux.md)."""
 from __future__ import annotations
 import argparse
 import contextlib
@@ -24,7 +28,15 @@ if str(SOURCE) not in sys.path:
 from compiler import cache
 
 STATE = "hwaoi-compiler.json"
-RESOLUTIONS = ("1280x720", "1920x1080", "2560x1440", "3840x2160")
+# auto: the game takes its screen's size at each start (runtime/resolution.c) and the build leaves the setting alone
+RESOLUTIONS = ("auto", "1280x720", "1920x1080", "2560x1440", "3840x2160")
+WINDOWS = os.name == "nt"
+LINUX = sys.platform.startswith("linux")
+# What a bundle must hold besides the sources: its whole compiler on both systems.
+REQUIRED = (("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe", "bin/zlib1.dll", "translator/totk_xlate.exe",
+             "translator/totk_xlate.id", "deps/include/vma/vk_mem_alloc.h") if WINDOWS else
+            ("python/bin/python3", "llvm/bin/clang", "llvm/bin/ld.lld", "bin/ninja", "translator/totk_xlate",
+             "translator/totk_xlate.id", "deps/include/vma/vk_mem_alloc.h", "deps/lib/libSDL3.so.0"))
 
 
 def require(ok, message):
@@ -49,14 +61,17 @@ def bundle_check(bundle, *, defer_materialized=False):
         critical_source = relative.startswith(("source/compiler/", "source/tools/hwrecomp/", "source/config/games/")) or relative in (
             "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py", "source/tools/hwaoi_aoc.py")
         deferred = defer_materialized and not critical_source and (relative.startswith(("source/", "llvm/", "deps/", "translator/")) or
-                                           relative in ("bin/ninja.exe", "bin/zlib1.dll"))
+                                           relative in ("bin/ninja.exe", "bin/zlib1.dll", "bin/ninja"))
         if not deferred:
             require(hwaoi.sha256(path) == expected, f"Bundle file changed: {relative}. Extract the ZIP again.")
-    for relative in ("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe",
-                     "bin/zlib1.dll", "translator/totk_xlate.exe", "translator/totk_xlate.id",
-                     "deps/include/vma/vk_mem_alloc.h", "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py"):
+    for relative in (*REQUIRED, "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py"):
         require(relative in manifest["files"], f"Incomplete bundle: {relative}")
     return manifest
+
+
+def bundle_python(bundle):
+    """The bundle's interpreter."""
+    return Path(bundle) / ("python/python.exe" if WINDOWS else "python/bin/python3")
 
 
 def nup_profile():
@@ -166,14 +181,65 @@ def clean_environment(bundle):
            if not k.startswith(("HWAOI_", "DKB_", "TOTK_", "PYTHON"))}
     env["PYTHONUTF8"] = "1"
     env["PYTHONNOUSERSITE"] = "1"
-    # No dependency on tools installed on the build author's PC or on the user's PATH.
-    env["PATH"] = os.pathsep.join(str(p) for p in (
-        bundle / "llvm/bin", bundle / "bin", Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32"))
+    if WINDOWS:
+        # No dependency on tools installed on the build author's PC or on the user's PATH.
+        env["PATH"] = os.pathsep.join(str(p) for p in (
+            bundle / "llvm/bin", bundle / "bin", Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32"))
+    else:
+        # Linux: the bundle's tools first; the system's folders after them for /bin/sh, which Ninja runs commands with.
+        env["PATH"] = os.pathsep.join([str(bundle / "llvm/bin"), str(bundle / "bin"),
+                                       os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin"])
     return env
 
 
+SHADER_LINES = ("gfx_shader: prepare", "gfx_shader: prepared", "preparation done", "prepare-shaders:")
+
+
+def prepare_shaders(bundle, game):
+    """Prepares, before the game starts, the shader variants it met in earlier play: hwaoi --prepare-shaders
+    (runtime/vk_pipeline.c) translates each one into the build's shader cache and builds its stage library into the
+    graphics driver's own disk cache, so the first start after a build, an update or a move does not do it while the
+    player plays. The game records what it meets in shader-answers.bin and shader-programs.bin next to it, kept across
+    builds; they are the seed (seed-*.bin, removed afterwards). A first build has none yet. A failure leaves the build
+    as it is: the game then prepares them at its start, as before."""
+    recorded = [(game / f"shader-{kind}.bin", game / f"seed-{kind}.bin") for kind in ("answers", "programs")]
+    if not all(source.is_file() and source.stat().st_size > 16 for source, _ in recorded):
+        print("  No shaders met in play yet: the game prepares each one when it first needs it.", flush=True)
+        return
+    translator = game / "xlate-managed-irbanks" / ("totk_xlate.exe" if WINDOWS else "totk_xlate")
+    env = clean_environment(bundle)
+    env.update(HWAOI_GPU="vulkan", HWAOI_IR_BANKS="1", HWAOI_XLATE=str(translator))
+    if WINDOWS:
+        env["HWAOI_ZLIB_DLL"] = str(game / "zlib1.dll")
+    began = time.perf_counter()
+    try:
+        for source, seed in recorded:
+            shutil.copyfile(source, seed)
+        completed = subprocess.run([str(game / hwaoi.GAME_EXE), "--prepare-shaders"], cwd=game, env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=3600,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0)
+        said = set()   # the runtime says some lines on both of its outputs
+        for line in (completed.stdout + completed.stderr).decode("utf-8", "replace").splitlines():
+            line = line.removeprefix("[host] ")
+            if any(key in line for key in SHADER_LINES) and line not in said:
+                said.add(line)
+                print("  " + line[:240], flush=True)
+        if completed.returncode:
+            print(f"  The shaders could not be prepared now (exit code {completed.returncode}): the game prepares "
+                  "them at its start.", flush=True)
+        else:
+            print(f"  Shaders met in play prepared in {time.perf_counter() - began:.1f}s.", flush=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"  The shaders could not be prepared now ({error}): the game prepares them at its start.", flush=True)
+    finally:
+        for _, seed in recorded:
+            with contextlib.suppress(OSError):
+                seed.unlink()
+
+
 def run_tool(bundle, output, *arguments):
-    command = [str(bundle / "python/python.exe"), "-E", "-s", str(output / "tools/hwaoi.py"), *map(str, arguments)]
+    # -X utf8: -E leaves PYTHONUTF8 out, and this process reads the tool's output as UTF-8
+    command = [str(bundle_python(bundle)), "-E", "-s", "-X", "utf8", str(output / "tools/hwaoi.py"), *map(str, arguments)]
     print("+ " + subprocess.list2cmdline(command), flush=True)
     process = subprocess.Popen(command, cwd=output, env=clean_environment(bundle), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
@@ -203,9 +269,10 @@ class Tee:
         self.log.flush()
 
 
-def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False, update_nup=None, dlc_nup=None):
+def build(bundle, nup, output, jobs=0, resolution="auto", unlock=False, update_nup=None, dlc_nup=None):
     started = time.perf_counter()
-    require(os.name == "nt" and platform.machine().lower() in ("amd64", "x86_64"), "Windows x64 is required")
+    require((WINDOWS or LINUX) and platform.machine().lower() in ("amd64", "x86_64"),
+            "Windows x64 or Linux x86-64 is required")
     require(0 <= jobs <= 8 and resolution in RESOLUTIONS, "Invalid build settings")
     bundle = Path(bundle).resolve(strict=True)
     nup = Path(nup).resolve(strict=True)
@@ -225,9 +292,12 @@ def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False, upd
     if existing is None:
         output = fresh_output(output, bundle, nup, allow_lock=True, extra_nups=(update_nup, dlc_nup))
     else:
-        require(isinstance(existing, dict) and existing.get("format") == "hwaoi-local-build-v1" and existing.get("nup_identity") == identity and
-                Path(existing.get("nup", "")).resolve() == nup,
+        # The same copy (identity: header, TOC, size, update) may have moved since the last build: the state and the
+        # resource cache then follow it (the cache is made again from the new place).
+        require(isinstance(existing, dict) and existing.get("format") == "hwaoi-local-build-v1" and existing.get("nup_identity") == identity,
                 "This output belongs to a different source NUP or update NUP. Choose a new output folder.")
+        if Path(existing.get("nup", "")).resolve() != nup:
+            print(f"  The source NUP moved since the last build: now {nup}", flush=True)
         require(not output.is_relative_to(bundle) and not bundle.is_relative_to(output) and not nup.is_relative_to(output),
                 "Choose an output folder outside the compiler and source NUP")
         require(shutil.disk_usage(output).free >= 2 << 30, "Updating needs at least 2 GiB free")
@@ -236,8 +306,7 @@ def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False, upd
         # Recheck after acquiring the lock, before replacing managed source files.
         if marker.is_file():
             current = json.loads(marker.read_text(encoding="utf-8"))
-            require(current.get("nup_identity") == identity and current.get("format") == "hwaoi-local-build-v1" and
-                    Path(current.get("nup", "")).resolve() == nup,
+            require(current.get("nup_identity") == identity and current.get("format") == "hwaoi-local-build-v1",
                     "Output identity changed while waiting for its lock")
             existing = current
         else:
@@ -251,6 +320,7 @@ def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False, upd
                 raise ValueError("Close the compiled game before updating this output folder") from error
         state = dict(existing or {})
         state.update(format="hwaoi-local-build-v1", status="incomplete", source_revision=manifest["source_revision"],
+                     aod_prepare_version=manifest.get("aod_prepare_version"),
                      nup=str(nup), nup_identity=identity, resolution=resolution, rate_unlock=bool(unlock),
                      update_nup=str(update_nup) if update_nup else None, dlc_nup=str(dlc_nup) if dlc_nup else None)
         save(marker, state)
@@ -328,23 +398,28 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             state["generation_key"] = generation_key
             state["generated_files"] = cache.generated_files(generated)
         done("generation", began)
-        print("[5/6] Compiling and linking the native Windows game (this can take a while)...", flush=True)
+        print(f"[5/6] Compiling and linking the native {'Windows' if WINDOWS else 'Linux'} game "
+              "(this can take a while)...", flush=True)
         began = time.perf_counter()
         icon = output / "work/game/icon.ico"   # the cover from the user's own NUP; never shipped with the source
-        try:
-            has_icon = hwaoi_icon.write_icon(nup, icon, state.get("update_nup"))
-        except (OSError, ValueError, subprocess.SubprocessError) as error:
-            print(f"  The game icon could not be prepared ({error}); building without it.", flush=True)
-            has_icon = False
+        has_icon = False
+        if WINDOWS:   # an icon resource of the executable; a Linux executable has none
+            try:
+                has_icon = hwaoi_icon.write_icon(nup, icon, state.get("update_nup"))
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f"  The game icon could not be prepared ({error}); building without it.", flush=True)
         if not has_icon and icon.is_file():
             icon.unlink()
-        run_tool(bundle, output, *common, "build", "--romfs", "work/game/romfs", "--deps", output / "work/toolchain/deps",
-                 "--toolchain", output / "work/toolchain/llvm", "--ninja", output / "work/toolchain/ninja.exe",
+        tools = ["--deps", output / "work/toolchain/deps", "--toolchain", output / "work/toolchain/llvm",
+                 "--ninja", output / "work/toolchain" / ("ninja.exe" if WINDOWS else "ninja")]
+        if not WINDOWS:   # every compile and the link read the sniper sysroot: the game needs glibc 2.31, no more
+            tools += ["--sysroot", output / "work/toolchain/llvm/sysroot"]
+        run_tool(bundle, output, *common, "build", "--romfs", "work/game/romfs", *tools,
                  "--toolchain-stamp", toolchain_stamp, "--jobs", jobs, *(["--icon", icon] if has_icon else []))
         game = output / "work/build/hwaoi196608"
         require((game / hwaoi.GAME_EXE).is_file(), "The linker did not produce the game executable")
         done("compile_link", began)
-        print("[6/6] Installing the shader translator and launch settings...", flush=True)
+        print("[6/6] Installing the shader translator and launch settings, preparing shaders...", flush=True)
         game = output / "work/build/hwaoi196608"
         delivery = {p: sha for p, sha in manifest["files"].items() if p.startswith("translator/") or p == "bin/zlib1.dll"}
         def destination(relative):
@@ -354,9 +429,9 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
                           state.get("delivery_files"))
         state["delivery_files"] = delivery
         if not (game / "hwaoi.ini").is_file():
-            (game / "hwaoi.ini").write_text("[settings]\noutput_res=" + resolution +
-                                           "\nrender_scale=100\nfps_limit=60\n", encoding="utf-8")
-        else:
+            asked = "" if resolution == "auto" else "output_res=" + resolution + "\n"
+            (game / "hwaoi.ini").write_text("[settings]\n" + asked + "render_scale=100\nfps_limit=60\n", encoding="utf-8")
+        elif resolution != "auto":   # a size asked for with this build; otherwise the player's own setting stays
             lines = (game / "hwaoi.ini").read_text(encoding="utf-8").splitlines(keepends=True)
             found = False
             for i, line in enumerate(lines):
@@ -367,13 +442,14 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             if not found:
                 lines.append(f"\n[display]\noutput_res={resolution}\n")
             cache.write_changed(game / "hwaoi.ini", "".join(lines).encode("utf-8"))
+        prepare_shaders(bundle, game)
         after = nup.stat()
         require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "Source NUP changed during build")
         state.update(status="complete", executable_sha256=hwaoi.sha256(game / hwaoi.GAME_EXE))
         state["timings"]["stages_total"] = round(time.perf_counter() - started, 3)
         state["timings"]["total"] = round(time.perf_counter() - total_started, 3)
         save(output / STATE, state)
-        print("BUILD COMPLETE. Use Open compiled game in the compiler window.\n"
+        print("BUILD COMPLETE.\n"
               "Keep the NUP at its original location: the game reads resources from it.\n"
               "This local output contains game-derived files and is not for redistribution.", flush=True)
     except Exception:
@@ -394,7 +470,7 @@ def launch(bundle, output):
     require(hwaoi.sha256(game) == state["executable_sha256"], "Compiled executable has changed; rebuild in a fresh folder")
     env = clean_environment(bundle)
     env["HWAOI_RATE_UNLOCK"] = "1" if state["rate_unlock"] else "0"
-    command = [str(bundle / "python/python.exe"), "-E", "-s", str(output / "tools/hwaoi.py"), "launch",
+    command = [str(bundle_python(bundle)), "-E", "-s", str(output / "tools/hwaoi.py"), "launch",
                "--exe", str(game), "--zlib", str(game.parent / "zlib1.dll"), "--no-captures"]
     completed = subprocess.run(command, cwd=output, env=env)
     require(completed.returncode == 0, "Game launch failed; see the launch report under work/reports")
@@ -409,7 +485,7 @@ def main():
     parser.add_argument("--dlc-nup", type=Path, help="optional NUP holding the game's DLC")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--jobs", type=int, default=0)
-    parser.add_argument("--resolution", choices=RESOLUTIONS, default="1920x1080")
+    parser.add_argument("--resolution", choices=RESOLUTIONS, default="auto")
     parser.add_argument("--unlock", action="store_true")
     args = parser.parse_args()
     try:

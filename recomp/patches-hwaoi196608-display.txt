@@ -81,3 +81,61 @@ site hwaoi_ui_canvas main 00af42e4 a9402448 ad400440 @page:x9 bd40b922 4f829000 
 site hwaoi_ui_canvas main 00af42e8 a9412c4a d503201f
 site hwaoi_ui_canvas main 00af42ec a9012c2a d503201f
 site hwaoi_ui_canvas main 00af42f0 a9002428 d503201f
+# The recorder's other two shapes with positions in canvas units. A quad given as a rectangle (x0 y0 x1 y1; main+af3788
+# and af3d7c through main+af43d0, which for a batch with a target copies the four numbers into four corners): each
+# number is scaled as it is read (s2 = page +0xb8; x9 and s2 are free there, and both callers load them again). A line
+# (main+af3b24: two points, colour and width in s0..s4, kept in s12..s8): scaled where the batch has a target, the
+# width too. Without them these shapes stay at their 1080p place above 1080p, towards the upper left: the enemy dots
+# of the zoomed minimap fall outside it and are clipped away, while the whole-map view, which draws quads, shows them.
+site hwaoi_ui_canvas main 00af43d8 bd400040 @page:x9 bd40b922 bd400040 1e220800
+site hwaoi_ui_canvas main 00af43e0 bd400440 bd400440 1e220800
+site hwaoi_ui_canvas main 00af43e8 bd400840 bd400840 1e220800
+site hwaoi_ui_canvas main 00af43f0 bd400440 bd400440 1e220800
+site hwaoi_ui_canvas main 00af43f8 bd400040 bd400040 1e220800
+site hwaoi_ui_canvas main 00af4400 bd400c40 bd400c40 1e220800
+site hwaoi_ui_canvas main 00af4408 bd400840 bd400840 1e220800
+site hwaoi_ui_canvas main 00af4410 bd400c40 bd400c40 1e220800
+site hwaoi_ui_canvas main 00af3b74 f94202a8 @page:x9 bd40b930 1e30098c 1e30096b 1e30094a 1e300929 1e300908 f94202a8
+
+# Menus confirm with the bottom button (set hwaoi_confirm; Age of Decomp). The game's button table (data table #46 of
+# its table registry at [main+2942708]+dd70, eight bytes a row: the pad button in byte 0, as an index into the key codes
+# at main+235a950) binds action 9 to A (confirm in every menu) and action 10 to B (back), apart from the battle's
+# actions (17..26: X A B Y L R ZL ZR and the stick clicks). main+141debc(input, action, mode) answers whether an
+# action is pressed, held or released from that row; its first instruction is replaced by one that asks for action 10
+# when the game asks for 9 and for 9 when it asks for 10 (w1, read only for the row). So while the set is on, the menus
+# confirm with B (the bottom button on every pad's Switch layout) and go back with A (the right one), and battle keeps
+# every button. The runtime switches the set while the game runs (input.c input_confirm_bottom: TOTK_CONFIRM_BUTTON
+# and the device in use); TOTK_CONFIRM_SWAP is only its starting value.
+set hwaoi_confirm TOTK_CONFIRM_SWAP 0
+# Flag-free, as the generator wants (the original writes no flags): 1 in w8 only for 9 and 10 through clz of
+# (action - 9) >> 1, then w1 ^= 3.
+site hwaoi_confirm main 0141ded4 51000428 12001c28 51002508 53017d08 5ac01108 53057d08 2a080508 4a080021 51000428
+# The menus' button guide follows (same set). main+15d52c0 writes a guide's text ("\u3000<label>^NN", NN the icon:
+# ^00 = A, ^01 = B in every text of the game, battle's too) from three data tables: the guide's row (16 bytes: icon
+# ids in bytes 1..6, item ids in 7..12), the item's row (8 bytes: its label in byte 0) and the icon's row (4 bytes:
+# the icon code in byte 0). At main+15d641c it reads the icon code, with the label in w28 and w9..w11 free. The
+# replacement swaps ^00 and ^01 except for the two battle labels the guides show with them, 16 (dodge, B) and 62
+# (special attack, A): so "Choose^00 Back^01" become "Choose^01 Back^00" and the pictures (hud_prompts.c: the device's
+# buttons bound to A and B) show the bottom button for confirm. Flag-free.
+site hwaoi_confirm main 015d641c 39400108 39400108 53017d09 5ac01129 53057d29 521c038a 5ac0114a 53057d4a 521f138b 5ac0116b 53057d6b 2a0b014a 0a2a0129 4a090108
+
+# The Sync Strike close-up (set hwaoi_display; Age of Decomp). The close-up draws two characters' hands into targets of
+# its own whose size comes from the game's data: 1600x900, the console's scene. With a larger scene its post-processing
+# (main+1c96c44's view, and the render graph's nodes) scales every region by close-up / scene size, so its exposure and
+# tone map read only the top-left 1000x562 of the 1600x900 picture: dark, wrong hands and arms. On the console both are
+# 1600x900. These three sites give the close-up the scene's size, so every ratio is 1 again.
+# The view's own targets (two RGBA16F, two D32S8; created by main+1c97b78 from the view's +0x174/+0x178): the locals at
+# x29-8 (width, height) are read from data and stored there at main+1c971e8. At main+1c9718c and main+1c97190 a 1600x900
+# view takes the scene size from the patch page (+0x80) instead. Flag-free (the flags of main+1c97188's call are dead
+# until main+1c971ac); w9, w11, w12, x16 and x17 are free (overwritten at main+1c97194 and main+1c971a0, unused by the
+# function): w12 = 1 only for 1600x900 through clz of (w - 1600) | (h - 900), then each size moves to the scene's by w12
+# times the difference.
+site hwaoi_display main 01c9718c 297e23aa 297e23aa 297f2fa9 5119012c 510e1170 2a10018c 5ac0118c 53057d8c
+site hwaoi_display main 01c97190 52841942 52841942 @page:x16 29504610 4b090210 1b0c2609 4b0b0231 1b0c2e2b 293f2fa9
+# The render targets the game's data define (main+19d3f20: every target of a render graph, the close-up's final picture
+# too) read their width and height as parameters (locals x29-0xc, x29-0x10, through main+1c900): 0 is the scene's size
+# (the renderer's +0x664/+0x668), -n the scene's divided by 2^n, anything else is used as it is. Right after the read a
+# 1600x900 target becomes 0x0, the scene's size, as on the console; no other target the game creates at start is
+# 1600x900 (2560x1440 traced: scene-sized, 1280x720, 640x360, shadow maps, 2x1, 1x1). Flag-free (main+1c900's flags are
+# dead); x9..x12 are dead after the call and written before any read.
+site hwaoi_display main 019d4234 f9407b57 b85f43a9 b85f03aa 5119012b 510e114c 2a0c016b 5ac0116b 53057d6b 1b0ba529 1b0ba94a b81f43a9 b81f03aa f9407b57

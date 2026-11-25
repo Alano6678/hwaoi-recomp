@@ -34,7 +34,7 @@ def source(recorded=False):
 static VkCtx context;
 VkCtx *vk_ctx(void){return &context;}
 void rt_fatal(const char *fmt,...){va_list a;va_start(a,fmt);vfprintf(stderr,fmt,a);va_end(a);fputc('\n',stderr);fflush(stderr);TerminateProcess(GetCurrentProcess(),73);_Exit(73);}
-void rt_log(const char *fmt,...){(void)fmt;}
+void rt_log(const char *fmt,...){va_list a;va_start(a,fmt);vprintf(fmt,a);va_end(a);putchar('\n');fflush(stdout);}
 void plat_mutex_lock(PlatMutex *m){(void)m;}
 void plat_mutex_unlock(PlatMutex *m){(void)m;}
 typedef struct {VkDeviceMemory memory;void *map;} Allocation;
@@ -80,6 +80,7 @@ static HANDLE consumer_gate;
 unsigned rt_trace;
 VkCaps vk_caps;
 const char *cfg_get(const char *key){(void)key;return NULL;}
+const char *cfg_value(const char *key){(void)key;return "auto";}   // TOTK_VK_RECORDER: the default
 int cfg_int(const char *key){(void)key;return 0;}
 uint32_t plat_cpu_usable(void){return 1;}
 int vk_memx_mode=1;
@@ -182,7 +183,10 @@ int main(int argc,char **argv){
 #endif
   VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&cb};
   VK(vkQueueSubmit(queue,1,&submit,VK_NULL_HANDLE));VK(vkQueueWaitIdle(queue));
-  if(invalid){for(unsigned i=0;i<ncallbacks;i++)callbacks[i].fn(callbacks[i].arg);CHECK(0);}
+  // A refused record is logged and draws nothing (its zeroed header), the game goes on (GitHub #16)
+  if(invalid){for(unsigned i=0;i<ncallbacks;i++)callbacks[i].fn(callbacks[i].arg);
+   uint32_t *h=(uint32_t *)(blocks[0]->mapped+slots[0]*Q.stride);CHECK(!h[0] && !h[1] && h[8]);
+   puts("GPU QUADS: the refused record drew nothing");fflush(stdout);TerminateProcess(GetCurrentProcess(),0);return 0;}
   for(unsigned i=0;i<2;i++){
    uint32_t *h=(uint32_t *)(blocks[i]->mapped+slots[i]*Q.stride),count=args[i][0]&~3u;
    int active=count && args[i][1];CHECK(h[0]==(active?(count/4)*6:0) && h[1]==(active?args[i][1]:0));
@@ -216,14 +220,16 @@ class GpuQuadTests(unittest.TestCase):
                        str(path), "-L", str(DEPS / "lib"), "-lvulkan-1", "-o", str(exe)]
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            env = dict(os.environ); env["VK_LAYER_PATH"] = "F:/VulkanValidationLayers/ucrt64/bin"
-            for mode, expected in (("good", 0), ("bad", 73)):
+            env = dict(os.environ); env.setdefault("VK_LAYER_PATH", "F:/VulkanValidationLayers/ucrt64/bin")
+            for mode, expected in (("good", 0), ("bad", 0)):
                 try:
                     result = subprocess.run([str(exe), mode], cwd=folder, env=env, capture_output=True, text=True, timeout=20)
                 except subprocess.TimeoutExpired as error:
                     self.fail(f"GPU fixture timeout: {error.stdout!r} {error.stderr!r}")
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                self.assertIn("no validation errors" if mode == "good" else "GPU QUADS indirect validation failed", result.stdout + result.stderr)
+                self.assertIn("no validation errors" if mode == "good" else "GPU QUADS indirect conversion refused",
+                              result.stdout + result.stderr)
+                if mode == "bad": self.assertIn("the refused record drew nothing", result.stdout)
 
     def test_production_recorder_owns_push_and_transfer_payloads(self):
         with tempfile.TemporaryDirectory(prefix="hwaoi-quad-recorder-") as tmp:
@@ -234,7 +240,7 @@ class GpuQuadTests(unittest.TestCase):
                 "-L", str(DEPS / "lib"), "-lvulkan-1", "-o", str(exe)], capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            env = dict(os.environ); env["VK_LAYER_PATH"] = "F:/VulkanValidationLayers/ucrt64/bin"
+            env = dict(os.environ); env.setdefault("VK_LAYER_PATH", "F:/VulkanValidationLayers/ucrt64/bin")
             result = subprocess.run([str(exe), "good"], cwd=folder, env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("no validation errors", result.stdout)

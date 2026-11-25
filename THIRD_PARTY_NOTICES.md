@@ -134,3 +134,13 @@ folder's `licenses/` and in each component's own folder.
 | AppImage type-2 runtime (static; includes libfuse and squashfuse), the AppImage's first part; appimagetool packs the folder and is not distributed | https://github.com/AppImage/type2-runtime | MIT; libfuse LGPL-2.1; squashfuse BSD-2-Clause | the AppImage header |
 | MacNativeGames shader variant list | as in the installer release row above | MIT | `data/shader_list.tsv` |
 | SMAA (`SMAA.hlsl` and `SearchTex.h` unmodified, `AreaTex.h` with its bytes written as decimal numbers so the header stays under the content check's size limit; licence text in `runtime/shaders/smaa/LICENSE.txt`) | https://github.com/iryoku/smaa @ `71c806a838bdd7d517df19192a20f0c61b3ca29d`, Copyright (c) 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez | MIT | `runtime/shaders/smaa/`, `runtime/shaders/smaa_*.comp` (compiled into `runtime/smaa_*_spv.h`), `runtime/vk_smaa.c` |
+## Age of Decomp engine adaptations
+
+The engine changes in this working tree were adapted from [Age of Decomp](https://github.com/iCosiSenpai/age-of-decomp), tag `v0.3.0`, commit `db6ea51`, whose engine was imported from HWAoI Recomp commit `c6c96e61b935fa610adf626c299553a568908fef`. Age of Decomp and these engine adaptations are GPL-3.0-or-later. The original HWAoI, DKB Recomp and contributor attributions remain above and in the source files.
+
+| Component | Source and licence | Used by |
+| --- | --- | --- |
+| NVIDIA Streamline SDK v2.14.16 headers | https://github.com/NVIDIA-RTX/Streamline, release asset `streamline-sdk-v2.14.16.zip`, MIT. The runtime DLLs and player-owned NVIDIA DLSS files are loaded separately and are not included here. | `runtime/third_party/streamline/`, `runtime/aod_dlss.cpp`, `runtime/vk_dlss.c` |
+| Inter variable font | https://github.com/google/fonts, `ofl/inter`, OFL-1.1, Copyright 2020 The Inter Project Authors. | `runtime/ui/fonts/Inter-Variable.ttf` and `runtime/ui/menu.cpp` |
+| Cinzel variable font | https://github.com/NDISCOVER/Cinzel, OFL-1.1, Copyright 2020 The Cinzel Project Authors. | `runtime/ui/fonts/Cinzel-Variable.ttf` and `runtime/ui/menu.cpp` |
+| MKW Recomp recorder publication fence finding | https://github.com/adriadam10/mkw-recomp pull request #281, MIT. The implementation here is written for this runtime. | `runtime/vk_rec.c` |

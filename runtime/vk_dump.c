@@ -19,7 +19,8 @@
 // PNGs are opaque (alpha dropped). Integer formats are scaled by the image maximum, depth by its min..max range, SNORM
 // as x/2+1/2, UNORM and sRGB bytes written as stored. Caps: MAX_PASSES passes copied, PNG_CAP bytes of PNGs.
 // TOTK_DUMP_TEX=<id>|<w>x<h>[,...]: those texture slots, or 2D textures of that size, are copied where first sampled,
-// whatever their format.
+// whatever their format. A block-compressed one is written as ..._blocks.png (one texel per block, scaled) and as
+// ..._blocks.bin, the blocks' own bytes in row order.
 // TOTK_DUMP_UBO=1: each listed pipeline also prints the first 16 vec4 of its user uniform blocks (c3 and up), read from
 // guest memory when the entry is listed. A block the submission rewrites with UpdateUniformBuffer shows its value from
 // before the submission (vk_exec_draw.c upd_note).
@@ -27,6 +28,9 @@
 // (the terrain decals draw one pass each into the G-buffer and would use up both caps).
 // TOTK_DUMP_TRIGGER=<file>: instead of a fixed frame, wait for a strictly increasing decimal token in that file,
 // then capture the next complete frame once. The startup token is a baseline, never a replayed capture command.
+// TOTK_DUMP_ON_TARGET=<w>x<h>[:<vkformat>][+<frames>]: instead of a fixed frame or a token, capture once the frame
+// <frames> (default 1) after the first render pass of that size with a colour target (of that Vulkan format) ends, for a
+// short scene with its own targets (the Sync Strike close-up draws into its own RGBA16F (97) colour + depth pair).
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
@@ -51,7 +55,9 @@
 
 int vk_dump_armed;
 int vk_dump_polling;
+int vk_dump_watching;                   // TOTK_DUMP_ON_TARGET: waiting for a render pass of that size
 static uint64_t dump_frame, log_from;   // log_from: TOTK_DUMP_LOG, first frame logged to passes.txt without images
+static uint32_t watch_w, watch_h, watch_fmt, watch_delay;
 static const char *trigger_file;
 static uint64_t trigger_sequence, trigger_next_ns;
 static char dir[400];
@@ -101,6 +107,8 @@ static const Fmt fmts[] = {
     F(D16_UNORM, "d16", 2, 1, 16, K_D16), F(D16_UNORM_S8_UINT, "d16s8", 2, 1, 16, K_D16),
     F(X8_D24_UNORM_PACK32, "d24", 4, 1, 24, K_D24), F(D24_UNORM_S8_UINT, "d24s8", 4, 1, 24, K_D24),
     F(D32_SFLOAT, "d32f", 4, 1, 32, K_D32F), F(D32_SFLOAT_S8_UINT, "d32fs8", 4, 1, 32, K_D32F),
+    // the stencil aspect, one byte a texel: the PNG's grey is the stencil value itself
+    F(S8_UINT, "s8", 1, 1, 8, K_UNORM),
 };
 #undef F
 
@@ -226,6 +234,12 @@ static uint8_t u8(float x) { return x > 0 ? x < 1 ? (uint8_t)(x * 255.f + .5f) :
 static void write_images(const Job *j) {
     uint32_t pw = j->w * j->d, ph = j->h;
     uint64_t n = (uint64_t)pw * ph;
+    if (strstr(j->name, "_blocks")) {   // the PNG scales the blocks' words to 8 bits: their bytes, for a tool to decode
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s.bin", dir, j->name);
+        FILE *f = fopen(path, "wb");
+        if (f) fwrite(j->map, j->f->bytes, n, f), fclose(f);
+    }
     float *px = malloc(n * 16);
     uint8_t *out = malloc(n * 4), *nanm = calloc(n, 1);
     if (!px || !out || !nanm) rt_fatal("vk_dump: out of memory for %s", j->name);
@@ -310,7 +324,8 @@ static const char *copy_region(VkExec *ex, VkImage image, VkFormat vf, VkImageAs
     if (!f) return "format not decoded";
     if (__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1 != dump_frame && (uint64_t)w * h * d > 65536)
         return "logged frame, large image";
-    if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && vf == VK_FORMAT_S8_UINT) {}   // target_line's stencil plane
+    else if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     else if (aspect != VK_IMAGE_ASPECT_COLOR_BIT) return "stencil only";
     uint64_t bytes = (uint64_t)w * h * d * f->bytes;
     uint64_t est = ((uint64_t)h * (1 + 4ull * w * d) + 128) * (mode_of(f) == M_FLOAT ? 2 : 1);
@@ -629,7 +644,8 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
         int st = nvn_stage(bd->stage), img = bd->kind == GFX_RES_IMG;
         char dt[24], fn[16];
         if (bd->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || bd->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
-            sp(b, "    %s %s slot %d: buffer texture (zero view bound)\n", stn[st], img ? "img" : "tex", r->slot);
+            // bound as a texel buffer view of its storage, or the zero view when it has none (vk_exec_draw.c texel_view)
+            sp(b, "    %s %s slot %d: buffer texture\n", stn[st], img ? "img" : "tex", r->slot);
             continue;
         }
         for (uint32_t k = 0; k < (bd->count ? bd->count : 1u); k++) {
@@ -749,6 +765,12 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
        (unsigned)s->ds.dt, (unsigned)s->ds.dw, (unsigned)s->ds.df, (unsigned)s->ds.st,
        (unsigned)s->poly.cull, (unsigned)s->poly.front, s->raster_discard,
        (unsigned)s->color.blend_en, s->chmask.mask);
+    if (s->ds.st)   // which bits a draw tests and writes (front face; the back's when it differs): who marks what
+        sp(&b, "    stencil: func %u ref %#x test-mask %#x write-mask %#x fail/zfail/zpass %u/%u/%u%s\n",
+           (unsigned)s->ds.sf_f, ex->st_ref[0], ex->st_vmask[0], ex->st_wmask[0], (unsigned)s->ds.fail_f,
+           (unsigned)s->ds.zfail_f, (unsigned)s->ds.zpass_f,
+           ex->st_ref[1] != ex->st_ref[0] || ex->st_wmask[1] != ex->st_wmask[0] || s->ds.zpass_b != s->ds.zpass_f
+               ? " (back differs)" : "");
     if (dump_ubo) {
         // NVN2 inline root words feed synthesized c0, outside the ordinary UBO list.
         // Keep the exact bit pattern; guessing which words are floats loses addresses.
@@ -791,6 +813,15 @@ static void target_line(VkExec *ex, const VkExecTarget *t, const char *tag, int 
             t->layers, t->samples, (unsigned long long)(uintptr_t)t->tex->mem,
             (unsigned long long)(uintptr_t)t->image, name, why ? " skipped: " : "",
             why ? why : "");
+    // A depth target with stencil: its stencil plane too (which pixels the game marks, e.g. characters)
+    if (!why && (t->format == VK_FORMAT_D32_SFLOAT_S8_UINT || t->format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                 t->format == VK_FORMAT_D16_UNORM_S8_UINT)) {
+        char sname[176];
+        snprintf(sname, sizeof sname, "%s_st", name);
+        const char *swhy = copy_out(ex, t->image, VK_FORMAT_S8_UINT, VK_IMAGE_ASPECT_STENCIL_BIT, t->level,
+                                    t->base_layer, t->width, t->height, 1, sname);
+        fprintf(passes_f, "  %s stencil -> %s.png%s%s\n", tag, sname, swhy ? " skipped: " : "", swhy ? swhy : "");
+    }
 }
 
 static uint64_t targets_sig(const VkExec *ex) {
@@ -989,16 +1020,63 @@ static void dump_trigger_poll(uint64_t frame) {
            (unsigned long long)dump_frame, dir);
 }
 
+// TOTK_DUMP_ON_TARGET's value: <w>x<h>[:<vkformat>][+<frames>], frames 1 when left out. 0 for anything else.
+static int watch_parse(const char *s, uint32_t *w, uint32_t *h, uint32_t *fmt, uint32_t *delay) {
+    char *q;
+    if (*s < '1' || *s > '9') return 0;
+    *w = (uint32_t)strtoul(s, &q, 10);
+    if (*q != 'x' || q[1] < '1' || q[1] > '9') return 0;
+    *h = (uint32_t)strtoul(q + 1, &q, 10);
+    *fmt = 0;
+    if (*q == ':') {
+        if (q[1] < '1' || q[1] > '9') return 0;
+        *fmt = (uint32_t)strtoul(q + 1, &q, 10);
+    }
+    *delay = 1;
+    if (*q == '+') {
+        if (q[1] < '1' || q[1] > '9') return 0;
+        *delay = (uint32_t)strtoul(q + 1, &q, 10);
+    }
+    return !*q && *w && *h && *delay;
+}
+
+// The watched pass: its area and, when one was given, its first colour target's format.
+static int watch_match(uint32_t w, uint32_t h, uint32_t ncolor, int has_color0, uint32_t format0) {
+    return w == watch_w && h == watch_h && ncolor && (!watch_fmt || (has_color0 && format0 == watch_fmt));
+}
+
+void vk_dump_watch_pass(const VkExec *ex) {
+    if (!watch_match(ex->pass_w, ex->pass_h, ex->pass_ncolor, ex->color[0].image != VK_NULL_HANDLE,
+                     (uint32_t)ex->color[0].format))
+        return;
+    plat_mutex_lock(&rec_lock);
+    if (vk_dump_watching) {
+        dump_frame = frame_now() + watch_delay;
+        vk_dump_watching = 0;
+        vk_dump_armed = 1;
+        rt_log("vk_dump: a %ux%u pass ended in frame %llu: frame %llu goes to %s", watch_w, watch_h,
+               (unsigned long long)frame_now(), (unsigned long long)dump_frame, dir);
+    }
+    plat_mutex_unlock(&rec_lock);
+}
+
 void vk_dump_init(void) {
     const char *e = cfg_get("TOTK_DUMP");
     trigger_file = cfg_get("TOTK_DUMP_TRIGGER");
+    const char *on_target = cfg_get("TOTK_DUMP_ON_TARGET");
     if (e && *e) dump_frame = strtoull(e, NULL, 10);
-    if (!dump_frame && (!trigger_file || !*trigger_file)) return;
+    if (on_target && *on_target) {
+        if (!watch_parse(on_target, &watch_w, &watch_h, &watch_fmt, &watch_delay))
+            rt_fatal("vk_dump: DUMP_ON_TARGET is <w>x<h>[:<vkformat>][+<frames>]");
+        if (dump_frame || (trigger_file && *trigger_file))
+            rt_fatal("vk_dump: DUMP_ON_TARGET excludes DUMP and DUMP_TRIGGER");
+    }
+    if (!dump_frame && (!trigger_file || !*trigger_file) && !watch_w) return;
     if (dump_frame && trigger_file && *trigger_file)
         rt_fatal("vk_dump: DUMP and DUMP_TRIGGER are mutually exclusive");
     const char *lf = cfg_get("TOTK_DUMP_LOG");
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
-    if (trigger_file && *trigger_file && log_from)
+    if (((trigger_file && *trigger_file) || watch_w) && log_from)
         rt_fatal("vk_dump: DUMP_LOG requires a fixed DUMP frame");
     const char *sr = cfg_get("TOTK_DUMP_SKIP_RUNS");
     skip_runs = sr && *sr && *sr != '0';
@@ -1036,7 +1114,10 @@ void vk_dump_init(void) {
         snprintf(path, sizeof path, "%s/bufs.txt", dir);
         if (bd_size && !(bufs_f = fopen(path, "w"))) bd_size = 0;
     }
-    if (trigger_file && *trigger_file) {
+    if (watch_w) {
+        vk_dump_watching = 1;
+        rt_log("vk_dump: waiting for a %ux%u render pass, then frame +%u goes to %s", watch_w, watch_h, watch_delay, dir);
+    } else if (trigger_file && *trigger_file) {
         dump_trigger_read(trigger_file, &trigger_sequence);
         vk_dump_polling = 1;
         rt_log("vk_dump: waiting for a new token in %s (baseline %llu)", trigger_file,

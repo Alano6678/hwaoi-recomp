@@ -16,43 +16,55 @@ typedef enum {
     UI_MENU_TITLE = UI_MENU_FIRST,
     UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU,
     UI_MENU_TAB_ADVANCED,
-    UI_MENU_CONTINUE, UI_MENU_QUIT,
-    UI_MENU_ON, UI_MENU_OFF, UI_MENU_AUTO, UI_MENU_DEFAULT_MARK,      // "default" beside the default value
-    UI_MENU_AFTER_RESTART,    // note on a setting that is read at start
+    UI_MENU_CONTINUE, UI_MENU_QUIT, UI_MENU_RESTART_NOW,   // the action bar's buttons
+    UI_MENU_ON, UI_MENU_OFF, UI_MENU_AUTO,
     UI_MENU_SET_BY_ENV,       // note on a setting an environment variable fixes
     UI_MENU_SAVE_FAILED,
-    UI_MENU_VERSION,          // "TotK Recomp %s, game %s": the port version and the game update, beside the title
+    UI_MENU_VERSION,          // Project title and compiler version, beside the title
+    UI_MENU_PAGE_SCREEN, UI_MENU_PAGE_GAME, UI_MENU_PAGE_SOUND, UI_MENU_PAGE_CONTROLS, UI_MENU_PAGE_MENU,
+    UI_MENU_PAGE_ADVANCED,
+    UI_MENU_HINT_MOVE, UI_MENU_HINT_CHANGE, UI_MENU_HINT_CLOSE, UI_MENU_HINT_PAGES,
+    UI_MENU_STATUS_SAVED, UI_MENU_STATUS_RESTART,
+    UI_MENU_APPLIES_NOW, UI_MENU_APPLIES_RESTART, UI_MENU_DEFAULT_IS, UI_MENU_BADGE_RESTART,
 
     // Screen
     UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC, UI_MENU_WINDOWED, UI_MENU_FULLSCREEN_MODE,
-    UI_MENU_WINDOW_SIZE, UI_MENU_WINDOW_SIZE_DESC, UI_MENU_WINDOW_SIZE_CUSTOM,
+    UI_MENU_WINDOW_SIZE, UI_MENU_WINDOW_SIZE_DESC,
+    UI_MENU_WINDOW_SIZE_WINDOWED_ONLY,   // the note of the row greyed in fullscreen
     UI_MENU_PRESENT, UI_MENU_PRESENT_DESC, UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE,
     UI_MENU_PRESENT_IN_USE,   // "in use: %s" under the value when the swapchain got another mode than the setting
     UI_MENU_GPU, UI_MENU_GPU_DESC, UI_MENU_GPU_AUTO,
     UI_MENU_PERF_OVERLAY, UI_MENU_PERF_OVERLAY_DESC, UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL,
     UI_PERF_LINE_FPS,
+    UI_PERF_LINE_FPS_GEN,     // with frame generation: the frames shown, then the ones the game drew
     UI_MENU_GRAPHICS,         // group heading over the resolution rows
     UI_MENU_OUTPUT_RES, UI_MENU_OUTPUT_RES_DESC,
+    UI_MENU_OUTPUT_RES_AUTO,   // "Automatic (%u × %u)": the size the automatic choice gives on this PC
     UI_MENU_RENDER_SCALE, UI_MENU_RENDER_SCALE_DESC, UI_MENU_RENDER_SCALE_GAME,
     UI_MENU_UPSCALER, UI_MENU_UPSCALER_DESC, UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR,
-    // HWAoI scaling selector and its FSR 4 rows
-    UI_MENU_SCALE_OFF, UI_MENU_SCALE_FSR1, UI_MENU_UPSCALER_FSR4, UI_MENU_UPSCALER_FSR4_DESC, UI_MENU_NEEDS_FSR4,
+    // The rows only AMD FSR has
     UI_MENU_SCENE_SHARP, UI_MENU_SCENE_SHARP_DESC, UI_MENU_SCENE_SHARP_AUTO, UI_MENU_SCENE_SHARP_GAME,
     UI_MENU_FFX_MISSING, UI_MENU_FFX_DOWNLOAD, UI_MENU_FSR_VERSION, UI_MENU_FSR_VERSION_DESC, UI_MENU_FSR_V_AUTO,
     UI_MENU_FSR_V_31,
-    UI_MENU_FSR_QUALITY, UI_MENU_FSR_QUALITY_DESC, UI_MENU_FSR_Q_NATIVE, UI_MENU_FSR_Q_QUALITY, UI_MENU_FSR_Q_BALANCED,
+    UI_MENU_FSR_Q_NATIVE, UI_MENU_FSR_Q_QUALITY, UI_MENU_FSR_Q_BALANCED,
     UI_MENU_FSR_Q_PERFORMANCE,
+    // The upscaler of the 3D scene (TEMPORAL: off, AMD FSR, NVIDIA DLSS) and its quality row
+    UI_MENU_TEMPORAL, UI_MENU_TEMPORAL_DESC, UI_MENU_TEMPORAL_OFF, UI_MENU_TEMPORAL_FSR, UI_MENU_TEMPORAL_DLSS,
+    UI_MENU_TEMPORAL_QUALITY, UI_MENU_TEMPORAL_QUALITY_DESC, UI_MENU_DLSS_Q_NATIVE, UI_MENU_NEEDS_UPSCALING,
+    UI_MENU_FRAME_GEN, UI_MENU_FRAME_GEN_DESC,   // NVIDIA DLSS frame generation (FRAME_GEN)
     UI_MENU_ASPECT, UI_MENU_ASPECT_DESC, UI_MENU_ASPECT_FIT, UI_MENU_ASPECT_STRETCH,
     UI_MENU_AA, UI_MENU_AA_DESC, UI_MENU_AA_OFF, UI_MENU_AA_SMAA,   // SMAA row (HWAoI)
     UI_MENU_FOV, UI_MENU_FOV_DESC,
     UI_MENU_SHARPNESS, UI_MENU_SHARPNESS_DESC,
     UI_MENU_COLOR,            // group heading over the colour rows
     UI_MENU_COLOR_PRESET, UI_MENU_COLOR_PRESET_DESC, UI_MENU_COLOR_DEFAULT, UI_MENU_COLOR_VIVID, UI_MENU_COLOR_CLARITY,
+    UI_MENU_COLOR_OLED,
     UI_MENU_COLOR_CUSTOM,
     UI_MENU_COLOR_BRIGHTNESS, UI_MENU_COLOR_BRIGHTNESS_DESC, UI_MENU_COLOR_CONTRAST, UI_MENU_COLOR_CONTRAST_DESC,
     UI_MENU_COLOR_SATURATION, UI_MENU_COLOR_SATURATION_DESC, UI_MENU_COLOR_GAMMA, UI_MENU_COLOR_GAMMA_DESC,
     UI_MENU_HDR_GROUP, UI_MENU_HDR, UI_MENU_HDR_DESC, UI_MENU_HDR_PEAK, UI_MENU_HDR_PEAK_DESC, UI_MENU_HDR_GAME,
     UI_MENU_HDR_GAME_DESC, UI_MENU_HDR_UI, UI_MENU_HDR_UI_DESC,   // HDR rows (HWAoI)
+    UI_MENU_HDR_NO_SCREEN, UI_MENU_NEEDS_HDR,   // notes of the HDR rows greyed: no HDR10 screen, HDR output off
 
     // Game
     UI_MENU_FPS_LIMIT, UI_MENU_FPS_LIMIT_DESC, UI_MENU_FPS_30, UI_MENU_FPS_40, UI_MENU_FPS_45, UI_MENU_FPS_60, UI_MENU_FPS_90,
@@ -67,15 +79,25 @@ typedef enum {
 
     // Sound
     UI_MENU_VOLUME, UI_MENU_VOLUME_DESC,
+    UI_MENU_MUTE_UNFOCUSED, UI_MENU_MUTE_UNFOCUSED_DESC,
+    UI_MENU_AUDIO_LATENCY, UI_MENU_AUDIO_LATENCY_DESC, UI_MENU_AUDIO_LATENCY_LOW, UI_MENU_AUDIO_LATENCY_NORMAL,
+    UI_MENU_AUDIO_LATENCY_HIGH,
 
     // Controls
     UI_MENU_MOTION, UI_MENU_MOTION_DESC,
+    UI_MENU_MOTION_NONE,       // the motion row greyed: no connected gamepad has a gyro the game can read
     UI_MENU_RUMBLE_STRENGTH, UI_MENU_RUMBLE_STRENGTH_DESC,
     UI_MENU_RUMBLE_CURVE, UI_MENU_RUMBLE_CURVE_DESC,
     UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC,
-    UI_MENU_PAD_LAYOUT, UI_MENU_PAD_LAYOUT_DESC, UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO,
-    UI_MENU_PAD_LAYOUT_XBOX, UI_MENU_PAD_LAYOUT_XBOX_PROMPTS, UI_MENU_PAD_LAYOUT_IN_USE,
-    UI_MENU_PAD_LAYOUT_PROMPTS_MISSING, UI_MENU_PAD_LAYOUT_PROMPTS_RESTART,
+    UI_MENU_PAD_LAYOUT_AUTO,   // "Automatic": the Buttons shown row's first choice (the Button layout row is gone)
+    // BUTTON_PROMPTS: whose buttons the game's own pictures show (hud_prompts.c); its automatic choice uses
+    // UI_MENU_PAD_LAYOUT_AUTO.
+    UI_MENU_BUTTON_PROMPTS, UI_MENU_BUTTON_PROMPTS_DESC,
+    UI_MENU_BUTTON_PROMPTS_XBOX, UI_MENU_BUTTON_PROMPTS_PLAYSTATION, UI_MENU_BUTTON_PROMPTS_SWITCH,
+    UI_MENU_BUTTON_PROMPTS_GAME,
+    // CONFIRM_BUTTON: the button the game's menus confirm with (input.c input_confirm_bottom); its choices are
+    // UI_MENU_PAD_LAYOUT_AUTO, UI_PAD_SOUTH and UI_PAD_EAST.
+    UI_MENU_CONFIRM_BUTTON, UI_MENU_CONFIRM_BUTTON_DESC,
     UI_MENU_STICK_DEADZONE, UI_MENU_STICK_DEADZONE_DESC,
     UI_MENU_MOUSE_SENS, UI_MENU_MOUSE_SENS_DESC,
 
@@ -84,6 +106,14 @@ typedef enum {
     UI_MENU_PLAYER1_DEVICE, UI_MENU_PLAYER2_DEVICE, UI_MENU_PLAYER_DEVICE_DESC,
     UI_MENU_PLAYER1_TYPE, UI_MENU_PLAYER2_TYPE, UI_MENU_PLAYER_TYPE_DESC,
     UI_MENU_DEVICE_AUTO, UI_MENU_DEVICE_KEYBOARD, UI_MENU_DEVICE_NONE, UI_MENU_DEVICE_MISSING,
+    // The connected devices of the Controls page: a row per device, what SDL reports of each gamepad
+    UI_MENU_DEVICES, UI_MENU_DEVICES_NONE, UI_MENU_DEVICE_KEYBOARD_DESC, UI_MENU_DEVICE_UNUSED, UI_MENU_DEVICE_WIRED,
+    UI_MENU_DEVICE_WIRELESS, UI_MENU_DEVICE_GENERIC,
+    UI_MENU_DEVICE_DESC,       // "%s controller. It has: %s. Buttons: %s." family, features, layout in use
+    UI_MENU_DEVICE_IDENTIFY,   // added to it when the gamepad has rumble motors
+    UI_MENU_CAP_RUMBLE, UI_MENU_CAP_TRIGGER_RUMBLE, UI_MENU_CAP_MOTION, UI_MENU_CAP_LIGHT, UI_MENU_CAP_BACK_BUTTONS,
+    UI_MENU_CAP_NONE,
+    UI_MENU_USED_BY,           // "For: %s." the connected devices a row's setting is for
     UI_MENU_TYPE_PRO, UI_MENU_TYPE_DUAL, UI_MENU_PLAYER2_OFF_NOTE,
 
     // Controls tab: the remapping rows (ui/binds_page.cpp)
@@ -179,6 +209,7 @@ typedef enum {
     UI_MENU_OV_FMT_GB_OF, UI_MENU_OV_GAME_GB, UI_MENU_OV_FMT_MS, UI_MENU_OV_PER_FRAME,
     // the picture lines: window, game image and 3D scene sizes, the scaling to the window, frame limit and presentation
     UI_MENU_OV_WINDOW, UI_MENU_OV_OUTPUT, UI_MENU_OV_SCENE, UI_MENU_OV_SCALING, UI_MENU_OV_LIMIT, UI_MENU_OV_PRESENT,
+    UI_MENU_OV_FRAME_GEN, UI_MENU_OV_FMT_FRAME_GEN,   // "Frame generation", "4x, 240 FPS shown"
     UI_MENU_OV_FMT_SIZE,      // "%ux%u"
     UI_MENU_OV_FMT_SCENE,     // "%ux%u, %.0f%%": the scene and its share of the game image's width
     UI_MENU_OV_FMT_FSR,       // "AMD FSR 1, sharpness %d%%"
@@ -188,7 +219,7 @@ typedef enum {
     UI_TEXT_COUNT
 } UiTextId;
 
-// Bytes of the menu's description pane (ui/option_rows.cpp, struct Desc): a description plus the note appended to it
+// Bytes of the menu's detail strip (ui/option_rows.cpp, struct Desc): a description plus the note appended to it
 // ("after restart", "set by environment variable", a disabled row's note). UTF-8 Cyrillic takes two bytes a letter, so
 // the longest Russian description is about 850 bytes; the probe checks every menu text leaves room for a note.
 enum { UI_DESC_BYTES = 2048 };
@@ -203,6 +234,6 @@ int ui_text_defined(const char *lang, UiTextId id);
 // The catalog language for a Switch language code ("en-GB" -> "en", "zh-CN" -> "zh-Hans", ...).
 const char *ui_text_lang(const char *switch_code);
 
-// Menu text follows live changes to TOTK_MENU_LANG ("en", "ru", "zh-Hans").
-// When unset, the menu uses a supported system UI language or defaults to English.
+// Menu text: ui_text_in(menu language, id). TOTK_MENU_LANG chooses en, ru, it or zh-Hans; unset follows the system UI
+// language when it is Russian, Italian or Simplified Chinese, else English. Follows a live change of the setting.
 const char *menu_text(UiTextId id);

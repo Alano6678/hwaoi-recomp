@@ -11,4 +11,4 @@ Unmodified copies from https://github.com/ly05010419/MacNativeGames at `b75be8cf
 
 `tools/data/expected-v*.json` come from `games/totk/assets/` at the same commit.
 
-Keep these files byte-identical to upstream so they can be updated by copying. Windows-specific behaviour lives in `tools/extract.py` and `tools/extract_fonts.py`.
+Keep these files byte-identical to upstream so they can be updated by copying. Windows-specific behaviour lives in `tools/extract.py`.

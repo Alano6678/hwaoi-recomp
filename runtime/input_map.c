@@ -13,12 +13,15 @@
 #define DIAGONAL 23170   // STICK_MAX / sqrt(2)
 #define MOUSE_FULL_CPS 3000.0
 
+// The game's actions (its own button guide): Y normal attack, X strong attack, A special move, B dodge, ZL guard,
+// R held for the special actions, the d-pad changes the character, + the menu. On a PC: the two mouse buttons attack
+// (left normal, right strong), Space dodges, Left Shift guards. A button's first key is the one its pictures show.
 #define DEFAULT_KEYS \
     {KEY_W, B_SL_UP}, {KEY_A, B_SL_LEFT}, {KEY_S, B_SL_DOWN}, {KEY_D, B_SL_RIGHT},                  /* move */ \
     {KEY_UP, B_SR_UP}, {KEY_LEFT, B_SR_LEFT}, {KEY_DOWN, B_SR_DOWN}, {KEY_RIGHT, B_SR_RIGHT},       /* camera, second source */ \
-    {KEY_MOUSE_L, B_Y}, {KEY_MOUSE_R, B_ZL}, {KEY_Z, B_ZL}, {KEY_F, B_ZR}, {KEY_X, B_ZR}, \
-    {KEY_SPACE, B_X}, {KEY_LSHIFT, B_B}, {KEY_E, B_A}, {KEY_Q, B_L}, {KEY_R, B_R}, \
-    {KEY_LCTRL, B_STICK_L}, {KEY_C, B_STICK_R}, \
+    {KEY_MOUSE_L, B_Y}, {KEY_MOUSE_R, B_X}, {KEY_SPACE, B_B}, {KEY_E, B_A}, \
+    {KEY_LSHIFT, B_ZL}, {KEY_Z, B_ZL}, {KEY_F, B_ZR}, {KEY_X, B_ZR}, {KEY_Q, B_L}, {KEY_R, B_R}, \
+    {KEY_LCTRL, B_STICK_L}, {KEY_MOUSE_M, B_STICK_R}, {KEY_C, B_STICK_R}, \
     {KEY_1, B_LEFT}, {KEY_2, B_UP}, {KEY_3, B_RIGHT}, {KEY_4, B_DOWN}, \
     {KEY_TAB, B_PLUS}, {KEY_M, B_MINUS}, {KEY_ESCAPE, B_MENU}
 
@@ -32,7 +35,7 @@
 #define NINTENDO_PADS DEFAULT_PADS(B_B, B_A, B_Y, B_X)
 #define XBOX_PADS DEFAULT_PADS(B_A, B_B, B_X, B_Y)
 // Open menu (B_MENU) is Esc only: no gamepad button by default; the remapping rows can give it one (input.c).
-enum { DEFAULT_KEY_COUNT = 27, DEFAULT_PAD_COUNT = 16 };
+enum { DEFAULT_KEY_COUNT = 28, DEFAULT_PAD_COUNT = 16 };
 _Static_assert(sizeof (Binding[]){DEFAULT_KEYS} / sizeof (Binding) == DEFAULT_KEY_COUNT, "DEFAULT_KEY_COUNT");
 
 static const InputMap defaults = {{DEFAULT_KEYS}, DEFAULT_KEY_COUNT, {{NINTENDO_PADS}, {XBOX_PADS}},
@@ -200,6 +203,9 @@ void input_map_configure(void) {
 int input_map_set_key(InputMap *m, int action, int slot, int key) {
     uint8_t list[INPUT_BINDING_MAX];
     int n = input_map_keys_of(m, action, list, INPUT_BINDING_MAX), lost = -1;
+    // The key this slot has already: nothing changes (taking it out first would shift the other keys into its place
+    // and drop the last one)
+    if (key != KEY_NONE && slot < n && list[slot] == key) return -1;
     if (key != KEY_NONE) {
         for (int i = 0; i < m->nkeys; i++)
             if (m->keys[i].key == key && m->keys[i].action != action) lost = m->keys[i].action;
@@ -306,10 +312,9 @@ void input_map_line(const InputMap *m, int action, char *out, size_t n) {
 #undef PUT
 }
 
-int input_pad_layout_pick(const char *setting, int east_labelled_a) {
-    if (setting && (!strcasecmp(setting, "nintendo") || !strcasecmp(setting, "xbox_prompts"))) return PAD_LAYOUT_NINTENDO;
-    if (setting && !strcasecmp(setting, "xbox")) return PAD_LAYOUT_XBOX;
-    return east_labelled_a ? PAD_LAYOUT_NINTENDO : PAD_LAYOUT_XBOX;
+int input_pad_layout_pick(const char *setting) {
+    (void)setting;   // every value: the Nintendo layout (input_map.h)
+    return PAD_LAYOUT_NINTENDO;
 }
 
 uint64_t input_map_pad_buttons_m(const InputMap *m, const uint8_t down[PAD_COUNT], int layout) {

@@ -901,6 +901,9 @@ static uint64_t present_period(const win_t *o) {
     {
         uint64_t period;
         const char *value = cfg_value("TOTK_FPS_LIMIT");
+        // Players get 30 or 60 (frame_rate.c); faster targets need a developer rate experiment.
+        if (!frame_step_native_rate() && (!rate_experiment || strcmp(rate_experiment, "1")) && strcmp(value, "30"))
+            value = "60";
         if (!hwaoi_rate_period(value, &period))
             rt_fatal("HWAoI requires FPS_LIMIT 30, 60, 90 or 120");
         int experimental = period < 1000000000ull / 60;

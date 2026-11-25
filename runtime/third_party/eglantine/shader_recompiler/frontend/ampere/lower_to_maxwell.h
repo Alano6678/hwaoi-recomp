@@ -501,6 +501,16 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
                  (u64{insn.Bits(63, 1)} << 45));
             break;
         }
+        // Age of Decomp: the same conversion from a constant (0xb04) or a uniform register (0xd04, bit 91 set), in
+        // 22 fragment shaders of the game; the source goes through a scratch register with its .ABS/.NEG applied.
+        case 0xb04: case 0xd04: {
+            if (insn.words[2] != (opcode == 0xd04 ? 0x08200800U : 0x00200800U) || insn.Bits(24, 8) ||
+                (opcode == 0xb04 ? insn.Bits(32, 6) || insn.Bits(59, 3) : (insn.words[1] & ~0xc000003fU) != 0))
+                return fail(index, "native scalar float conversion source");
+            const u32 source = operand(1);
+            emit(base(0x5ca8000000000000ULL) | (u64{1} << 8) | (u64{2} << 10) | (u64{source} << 20));
+            break;
+        }
         case 0x23e: case 0xa3e: { // F2FP.PACK_AB / MERGE_C, round-to-nearest
             if (insn.Bits(62, 2) || insn.Bits(73, 5) || insn.Bits(79, 2) ||
                 insn.Bits(81, 10) || insn.Bits(91, 1)) {
@@ -1028,13 +1038,14 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
             break;
         }
         case 0x822: { // FSWZADD: per lane 0 = a+b, 1 = a-b, 2 = b-a, 3 = b (nvdisasm PP/PN/NP/ZP).
+            // Age of Decomp: bit 77 is .NDV (Maxwell bit 38), set in the quad-shuffle blocks of GitHub #13's shaders.
             const u32 swizzle = insn.words[1];
-            if (swizzle > 0xff || insn.words[2] > 255)
+            if (swizzle > 0xff || (insn.words[2] & ~0x20ffU))
                 return fail(index, "native swizzled add mode");
             // Maxwell's lane codes 1 and 2 are the other way round (1 = b-a, 2 = a-b).
             const u32 maxwell = ((swizzle & 0x55) << 1) | ((swizzle & 0xaa) >> 1);
             emit(base(0x50f8000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
-                 (u64{insn.Bits(64, 8)} << 20) | (u64{maxwell} << 28));
+                 (u64{insn.Bits(64, 8)} << 20) | (u64{maxwell} << 28) | (u64{insn.Bits(77, 1)} << 38));
             break;
         }
         case 0xb6c: { // TXD 2D or ARRAY_2D, enabled channels packed into two destination groups.
@@ -1943,7 +1954,9 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
                 constexpr std::array<u32, 8> coordinate_count{1, 2, 3, 3, 2, 3, 0, 4};
                 constexpr std::array<u32, 8> maxwell_type{0, 2, 4, 6, 1, 3, 0, 7};
                 const bool offsets = insn.Bits(76, 1) != 0;
-                if (dimension == 6 || insn.Bits(77, 1) || insn.Bits(81, 3) != 7 || insn.Bits(59, 1) ||
+                // Age of Decomp: bit 77, .NDV, goes to Maxwell TEX's bit 35 as in the array-cube form above (GitHub
+                // #13's shaders sample a 3D texture with it inside their quad-shuffle blocks).
+                if (dimension == 6 || insn.Bits(81, 3) != 7 || insn.Bits(59, 1) ||
                     insn.Bits(40, 14) > 0x1fff || insn.Bits(54, 5) >= 18 || (lod > 3 && lod != 6 && lod != 7) ||
                     (depth_compare && mask != 1) || mask == 0)
                     return false;
@@ -1974,7 +1987,7 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
                 if (depth_compare) copy(meta++, value(next++));
                 emit(0xc000000000000000ULL | predicate | 250 | (u64{250} << 8) |
                      (u64{meta == 246 ? 255U : 246U} << 20) | (u64{maxwell_type[dimension]} << 28) |
-                     (u64{mask} << 31) | (u64{insn.Bits(40, 14)} << 36) |
+                     (u64{mask} << 31) | (u64{insn.Bits(77, 1)} << 35) | (u64{insn.Bits(40, 14)} << 36) |
                      (u64{insn.Bits(90, 1)} << 49) | (u64{depth_compare} << 50) | (u64{7} << 51) |
                      (u64{offsets} << 54) | (u64{lod} << 55));
                 const u32 components = static_cast<u32>(std::popcount(mask));
@@ -2096,6 +2109,21 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
             mov_imm(static_cast<u32>(dest) + 1, 0);
             break;
         }
+        // Age of Decomp: a warp state register (index 26 in bits 24-31) saved into a GPR (0xf55), then written
+        // (0xf56 with bit 84 right after the save, 0xf56 without it to put the saved value back), around a fragment
+        // shader's block of quad shuffles. Seen only in that form, in four fragment shaders of one effect (a mission
+        // at about 70% of the campaign stopped there, GitHub #13). The lowered program keeps no warp state: the save
+        // reads 0 and only the matching writes read it back, so the writes have nothing to do.
+        case 0xf55:
+            if (insn.Bits(24, 8) != 26 || insn.words[1] || insn.words[2] || native_predicate != 7 || dest >= 250)
+                return fail(index, "native warp state read mode");
+            mov_imm(static_cast<u32>(dest), 0);
+            break;
+        case 0xf56:
+            if (insn.Bits(24, 8) != 26 || insn.words[1] || (insn.words[2] & ~0x00100000U) || native_predicate != 7 ||
+                dest >= 250)
+                return fail(index, "native warp state write mode");
+            break;
         case 0x357: // Takes the LEPC-derived address in geometry shader prologues; no Maxwell counterpart.
             if (insn.Bits(16, 8) || insn.Bits(32, 32) || insn.words[2] || native_predicate != 7)
                 return fail(index, "native geometry prologue mode");
@@ -2161,6 +2189,24 @@ inline LoweredProgram LowerToMaxwellWithUniforms(std::span<const Instruction> co
         case 0x202: // MOV register
         case 0x802: // MOV immediate
         case 0xa02: { // MOV constant buffer
+            // Age of Decomp: a register MOV with a quad lane mask writes only the lanes of each quad whose bit is set
+            // (GitHub #13's shaders put one lane's result in place after each quad block). Ryujinx's MOV ignores
+            // Maxwell's quad mask, so the lanes are chosen here: R247 = all ones where (laneid & 3) is in the mask,
+            // then dest = (source & R247) | (dest & ~R247).
+            if (opcode == 0x202 && insn.Bits(72, 4) != 15 && insn.Bits(72, 4) && !insn.Bits(76, 16)) {
+                const u32 lanes = insn.Bits(72, 4), source = insn.Bits(32, 8);
+                if (insn.Bits(40, 24) || dest >= 246 || source >= 246) return fail(index, "native MOV lane mask mode");
+                emit(0xf0c8000000000000ULL | predicate | 246);                                       // laneid
+                emit(0x0400000000000000ULL | predicate | 246 | (u64{246} << 8) | (u64{3} << 20));   // & 3
+                mov_imm(247, lanes);
+                emit(0x5c28000000000000ULL | predicate | 247 | (u64{247} << 8) | (u64{246} << 20)); // >> lane
+                emit(0x3848000000000000ULL | predicate | 247 | (u64{247} << 8) | (u64{31} << 20));  // << 31
+                emit(0x3828000000000000ULL | predicate | 247 | (u64{247} << 8) | (u64{31} << 20) |
+                     (u64{1} << 48));                                                                // >> 31, signed
+                emit(0x5be0000000000000ULL | predicate | dest | (u64{source} << 8) | (u64{dest} << 20) |
+                     (u64{0xe4} << 28) | (u64{247} << 39) | (u64{7} << 48));                         // a&c | b&~c
+                break;
+            }
             if (insn.Bits(72, 4) != 15 || (insn.Bits(76, 16) & ~(opcode == 0xc02 ? 0x8000U : 0U))) return fail(index, "native MOV modifiers");
             if (opcode == 0x802) {
                 result.instructions.push_back(base(0x0100000000000000ULL) | (u64{15} << 12) |

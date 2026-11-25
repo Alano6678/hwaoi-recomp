@@ -51,13 +51,21 @@ static void block_free(QuadBlock *b) {
 
 static void block_done(void *arg) {
     QuadBlock *b = arg;
+    // Age of Decomp: a record the conversion refused (status) or never wrote (marker) has drawn nothing, since its
+    // header slot was zeroed before the dispatch: logged, not fatal. A player's RX 9070 XT stopped with code 70 on one
+    // such record (marker 0) while fighting Beta Elite Constructs (GitHub #16); one missing draw beats a lost battle.
+    static volatile int64_t failures;
     for (uint32_t i = 0; i < b->used; i++) {
         if (!b->submitted[i]) continue;
         const volatile uint32_t *w = (const volatile uint32_t *)(b->mapped + i * Q.stride);
-        if (w[13] != 0x51554144u || w[8])
-            rt_fatal("vk: GPU QUADS indirect validation failed: source=%#llx status=%#x marker=%#x "
-                     "vertices=%u instances=%u first=%u base=%u",
-                     (unsigned long long)b->address[i], w[8], w[13], w[9], w[10], w[11], w[12]);
+        if (w[13] != 0x51554144u || w[8]) {
+            int64_t n = plat_inc64(&failures);
+            if (n <= 8 || !(n & (n - 1)))
+                rt_log("vk: GPU QUADS indirect conversion %s (%lld so far): source=%#llx status=%#x marker=%#x "
+                       "vertices=%u instances=%u first=%u base=%u; that draw drew nothing",
+                       w[13] != 0x51554144u ? "not written" : "refused", (long long)n,
+                       (unsigned long long)b->address[i], w[8], w[13], w[9], w[10], w[11], w[12]);
+        }
     }
     plat_mutex_lock(&quad_lock);
     int keep = spare_count < QUAD_SPARES;

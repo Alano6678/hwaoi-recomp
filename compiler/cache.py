@@ -48,8 +48,12 @@ def inside(root, relative):
 
 @contextmanager
 def workspace_lock(output):
-    """An OS lock survives neither crashes nor cancellation; the file may remain."""
-    import msvcrt
+    """An OS lock survives neither crashes nor cancellation; the file may remain. Windows: a byte-range lock; Linux:
+    flock, held by the open file and released when the process ends."""
+    if os.name == "nt":
+        import msvcrt
+    else:
+        import fcntl
     path = inside(output, ".hwaoi-compiler.lock")
     with path.open("a+b") as lock:
         if not path.stat().st_size:
@@ -57,14 +61,20 @@ def workspace_lock(output):
             lock.flush()
         lock.seek(0)
         try:
-            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             raise ValueError("This output folder is already being compiled") from error
         try:
             yield
         finally:
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def synchronize(bundle, output, files, destination, backup, previous=None):
@@ -100,11 +110,15 @@ def synchronize(bundle, output, files, destination, backup, previous=None):
 
 
 def prepare_tools(bundle, output, manifest, backup):
-    files = {p: sha for p, sha in manifest["files"].items()
-             if p.startswith(("llvm/", "deps/")) or p == "bin/ninja.exe"}
-    require(files and "llvm/bin/clang.exe" in files and "bin/ninja.exe" in files, "Missing compiler inputs")
+    """The bundle's compiler (llvm/, deps/, Ninja) copied into work/toolchain: the build reads its own copy, so a newer
+    release unpacked over the bundle does not change the tools under a running build. The stamp is an input of every
+    compile: another compiler rebuilds the objects."""
+    exe = ".exe" if os.name == "nt" else ""
+    ninja = f"bin/ninja{exe}"
+    files = {p: sha for p, sha in manifest["files"].items() if p.startswith(("llvm/", "deps/")) or p == ninja}
+    require(files and f"llvm/bin/clang{exe}" in files and ninja in files, "Missing compiler inputs")
     def destination(relative):
-        return Path("work/toolchain") / ("ninja.exe" if relative == "bin/ninja.exe" else relative)
+        return Path("work/toolchain") / (f"ninja{exe}" if relative == ninja else relative)
     stamp = inside(output, "work/toolchain/identity.json")
     try:
         previous = json.loads(stamp.read_text(encoding="utf-8"))

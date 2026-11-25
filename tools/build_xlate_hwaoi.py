@@ -199,15 +199,22 @@ def build(args):
     output = target_path(args.out, ROOT / "work/build/hwaoi196608")
     require(output.name.startswith("xlate"), "translator deployment folder must start with xlate")
     # Windows: beside the .NET folder (HWAOI_TOOLS, default F:/). Linux: the system dotnet's folder is not writable.
-    cache = dotnet.parent.parent / "NuGet" if WINDOWS else ROOT / "work/toolchain/NuGet"
-    fallback = dotnet.parent / "nuget" if WINDOWS else cache / "empty-feed"
+    # HWAOI_NUGET_CACHE moves it anywhere writable (a system-wide SDK under Program Files is read-only).
+    override = os.environ.get("HWAOI_NUGET_CACHE")
+    cache = Path(override) if override else dotnet.parent.parent / "NuGet" if WINDOWS else ROOT / "work/toolchain/NuGet"
+    fallback = dotnet.parent / "nuget" if WINDOWS and (dotnet.parent / "nuget").is_dir() else cache / "empty-feed"
     for folder in (cache / "packages", cache / "http", cache / "plugins", cache / "cli-home", cache / "empty-feed"):
         folder.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update({"NUGET_PACKAGES": str(cache / "packages"), "NUGET_HTTP_CACHE_PATH": str(cache / "http"),
                 "NUGET_PLUGINS_CACHE_PATH": str(cache / "plugins"), "DOTNET_CLI_HOME": str(cache / "cli-home"),
                 "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
-                "DOTNET_NOLOGO": "1", "DOTNET_MULTILEVEL_LOOKUP": "0", "DOTNET_ROOT": str(dotnet.parent)})
+                "DOTNET_NOLOGO": "1", "DOTNET_MULTILEVEL_LOOKUP": "0", "DOTNET_ROOT": str(dotnet.parent),
+                # The patches below are applied with `git apply` to plain folders under work/. This tree may sit inside
+                # a larger repository (Age of Decomp keeps it in engine/source): there git would take the patch paths
+                # from that repository's top and skip them all. Stopping its search for a repository at this tree's
+                # parent makes it apply them from the folder it runs in, as it does outside any repository.
+                "GIT_CEILING_DIRECTORIES": ROOT.parent.as_posix()})
     sdk = subprocess.run([str(dotnet), "--version"], env=env, check=True, capture_output=True,
                          text=True, encoding="utf-8", timeout=30).stdout.strip()
     # --no-vendor-reference: no pinned DKB clone to compare with; the manifest records that the check did not run.

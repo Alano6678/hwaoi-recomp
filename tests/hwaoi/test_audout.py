@@ -11,7 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CLANG = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
-SDL_INCLUDE = Path("F:/TotKDependencies/runtime/deps/include")
+# SDL3 headers: HWAOI_SDL_INCLUDE, else the Age of Decomp toolchain beside this checkout
+# (<project>/engine/source -> <project>/.cache/toolchain/windows/deps/include), else the older layout.
+SDL_CANDIDATES = [Path(p) for p in (os.environ.get("HWAOI_SDL_INCLUDE"),) if p] + [
+    ROOT.parent.parent / ".cache" / "toolchain" / "windows" / "deps" / "include",
+    Path("F:/TotKDependencies/runtime/deps/include")]
+SDL_INCLUDE = next((p for p in SDL_CANDIDATES if (p / "SDL3/SDL.h").is_file()), SDL_CANDIDATES[-1])
 
 
 @unittest.skipUnless(os.name == "nt" and CLANG.is_file()
@@ -75,6 +80,12 @@ class AudioOutTests(unittest.TestCase):
 
     def test_flush_volume_and_command_failure_paths(self):
         self.run_case("controls")
+
+    def test_player_volume_and_background_mute_scale_the_game_volume(self):
+        self.run_case("player-volume")
+
+    def test_audio_latency_sets_the_device_period(self):
+        self.run_case("latency")
 
 
 if __name__ == "__main__":

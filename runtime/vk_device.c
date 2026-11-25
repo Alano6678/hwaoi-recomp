@@ -6,16 +6,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aod_dlss.h"
 #include "cfg.h"
 #include "host.h"
 #include "memx.h"
 #include "vk.h"
+#include "vk_dlss.h"
 #include "vk_ffx.h"
 #include "platform/platform.h"
 
 static VkCtx g_vk;
 static int g_ready;
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
+// The features Streamline started for (aod_dlss_init, AOD_SL_*): their extensions go into the instance and the device,
+// their queues into the device.
+static int g_dlss;
+
+// DLSS (TEMPORAL=dlss or dlaa) and frame generation (FRAME_GEN) need Streamline before the instance exists. Its DLLs
+// are in the streamline folder beside the executable (TOTK_DLSS_DIR overrides, vk_dlss_dir), with the player's own
+// nvngx_dlss.dll and nvngx_dlssg.dll. A feature that cannot start says why in the log (aod_dlss.cpp).
+static void dlss_start(void) {
+    int sr = vk_dlss_wanted(), fg = vk_fg_wanted();
+    vk_dlss_started(sr), vk_fg_started(fg);   // the menu says so when one was asked for and does not run
+    if (!sr && !fg) return;
+    char dir[PLAT_PATH_MAX * 2], ngx[PLAT_PATH_MAX * 6];
+    if (!vk_dlss_dir(dir, sizeof dir)) return;
+    g_dlss = aod_dlss_init(dir, vk_dlss_ngx_dir(ngx, sizeof ngx) ? ngx : NULL, (sr ? AOD_SL_DLSS : 0) | (fg ? AOD_SL_FG : 0),
+                           fg);
+}
+
+static void dlss_stop(const char *why) {
+    if (!g_dlss) return;
+    aod_dlss_stop(why);
+    g_dlss = 0;
+}
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
@@ -68,7 +92,7 @@ static void mesa_cache_beside_exe(void) {
 
 static int create_instance(void) {
     mesa_cache_beside_exe();
-    const char *ext[9];
+    const char *ext[24];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("TOTK_VK_VALIDATION");
@@ -81,8 +105,28 @@ static int create_instance(void) {
         g_vk.has_swapchain_colorspace = 1;
         ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
     }
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "TotK Recomp",
-                             .pEngineName = "TotK Recomp", .apiVersion = VK_API_VERSION_1_3};
+    dlss_start();
+    if (g_dlss) {   // every instance extension DLSS lists must be there, else it stays off
+        uint32_t na = 0;
+        vkEnumerateInstanceExtensionProperties(NULL, &na, NULL);
+        VkExtensionProperties *av = calloc(na ? na : 1, sizeof *av);
+        vkEnumerateInstanceExtensionProperties(NULL, &na, av);
+        const char *want[12];
+        int nw = aod_dlss_instance_extensions(want, 12), add = n_ext;
+        for (int i = 0; i < nw && g_dlss; i++) {
+            int dup = 0;
+            for (int j = 0; j < add; j++) dup |= !strcmp(ext[j], want[i]);
+            if (dup) continue;
+            if (has_ext(av, na, want[i]) && add < 24) { ext[add++] = want[i]; continue; }
+            char why[160];
+            snprintf(why, sizeof why, "this PC's Vulkan lacks the instance extension %s", want[i]);
+            dlss_stop(why);
+        }
+        if (g_dlss) n_ext = (uint32_t)add;
+        free(av);
+    }
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = RT_GAME_TITLE,
+                             .pEngineName = RT_GAME_TITLE, .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -138,6 +182,45 @@ static int name_has(const char *s, const char *sub) {
     for (size_t n = strlen(sub); *s; s++)
         if (!strncasecmp(s, sub, n)) return 1;
     return 0;
+}
+
+// Before the device exists (the automatic game resolution, resolution.c): the device-local memory of the card the
+// runtime would take, by pick_device's preference (TOTK_GPU_INDEX, TOTK_GPU_NAME, a discrete card first), through a
+// short-lived instance without extensions. 0 when Vulkan lists no usable device.
+int vk_probe_memory(uint64_t *mib, int *discrete) {
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = RT_GAME_TITLE,
+                             .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
+    VkInstance inst;
+    if (vkCreateInstance(&ci, NULL, &inst) != VK_SUCCESS) return 0;
+    VkPhysicalDevice pd[16];
+    uint32_t n = 16;
+    VkResult r = vkEnumeratePhysicalDevices(inst, &n, pd);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) n = 0;
+    const char *e = cfg_get("TOTK_GPU_INDEX"), *name = cfg_get("TOTK_GPU_NAME");
+    int want = e && *e ? atoi(e) : -1, best = -1, best_score = -1;
+    for (uint32_t i = 0; i < n; i++) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(pd[i], &p);
+        if ((want >= 0 && (int)i != want) || (name && *name && !name_has(p.deviceName, name)) ||
+            p.apiVersion < VK_API_VERSION_1_3)
+            continue;
+        int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3
+                  : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
+        if (score > best_score) best_score = score, best = (int)i;
+    }
+    if (best >= 0) {
+        VkPhysicalDeviceMemoryProperties m;
+        vkGetPhysicalDeviceMemoryProperties(pd[best], &m);
+        uint64_t local = 0;
+        for (uint32_t h = 0; h < m.memoryHeapCount; h++)
+            if ((m.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && m.memoryHeaps[h].size > local)
+                local = m.memoryHeaps[h].size;
+        *mib = local >> 20;
+        *discrete = best_score == 3;
+    }
+    vkDestroyInstance(inst, NULL);
+    return best >= 0;
 }
 
 // First discrete GPU with Vulkan 1.3, the required extensions and a graphics+present queue; TOTK_GPU_INDEX (index) or
@@ -224,6 +307,8 @@ typedef struct {
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;   // FSR 4 (vk_ffx.c)
     VkPhysicalDeviceDescriptorBufferFeaturesEXT dbuf;    // fsr4-vk keeps its descriptors in descriptor buffers (vk_ffx.c)
+    VkPhysicalDeviceOpticalFlowFeaturesNV flow;          // DLSS frame generation's optical flow queue (aod_dlss.cpp)
+    VkPhysicalDevicePresentIdFeaturesKHR present_id;     // ... and what Reflex's VK_NV_low_latency2 depends on
 #ifdef VK_EXT_SHADER_FLOAT8_EXTENSION_NAME
     VkPhysicalDeviceShaderFloat8FeaturesEXT f8;          // FSR 4 (vk_ffx.c)
 #endif
@@ -234,7 +319,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[40];
+    const char *ext[64];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
 
@@ -291,6 +376,67 @@ static int create_device(void) {
     }
     // GPU breadcrumbs for a lost device (vk_crumbs.c): AMD's drivers and RADV report it.
     if (has_ext(ep, ne, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) { g_vk.has_buffer_marker = 1; ext[n_ext++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME; }
+    // Streamline (DLSS, frame generation): the device extensions its features list, except buffer device address
+    // (Vulkan 1.2's bufferDeviceAddress feature of the chain stands for it; VK_EXT_buffer_device_address may not be
+    // enabled with that feature). A missing one turns Streamline off. Before the pipeline library pair, which has to
+    // stay last.
+    uint32_t sl_gfx = 0, sl_compute = 0, sl_flow = 0;   // the queues Streamline's features take for themselves
+    int flow_family = -1;                               // the family of its optical flow queue, when it gets one
+    if (g_dlss) {
+        const char *want[24];
+        int nw = aod_dlss_device_extensions(want, 24);
+        uint32_t add = n_ext;
+        for (int i = 0; i < nw && g_dlss; i++) {
+            if (!strcmp(want[i], VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) ||
+                !strcmp(want[i], VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+                continue;
+            int dup = 0;
+            for (uint32_t j = 0; j < add; j++) dup |= !strcmp(ext[j], want[i]);
+            if (dup) continue;
+            if (has_ext(ep, ne, want[i]) && add < 58) { ext[add++] = want[i]; continue; }
+            char why[160];   // frame generation's on a card that is not NVIDIA's, or older than the RTX 40 series
+            snprintf(why, sizeof why, "the graphics card in use lacks %s", want[i]);
+            dlss_stop(why);
+        }
+        if (g_dlss) n_ext = add;
+        // Reflex's VK_NV_low_latency2 depends on VK_KHR_present_id, which Streamline's list leaves out
+        int ll2 = 0, pid = 0;
+        for (uint32_t j = 0; j < n_ext; j++)
+            ll2 |= !strcmp(ext[j], VK_NV_LOW_LATENCY_2_EXTENSION_NAME), pid |= !strcmp(ext[j], VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        if (g_dlss && ll2 && !pid && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+            ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+            CHAIN(present_id, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
+        }
+    }
+    if (g_dlss) {
+        // Frame generation presents from queues of its own, which follow ours in the graphics family, and measures the
+        // motion between two frames on an optical flow queue: the first queue of the first family that has the
+        // optical flow bit, when that is not a family of ours (the SDK's ProgrammingGuideManualHooking.md, 5.2.1).
+        aod_dlss_queues(&sl_gfx, &sl_compute, &sl_flow);
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
+        VkQueueFamilyProperties *qp = calloc(nq ? nq : 1, sizeof *qp);
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
+        if (qp[g_vk.gfx_family].queueCount < 1 + sl_gfx + sl_compute) {
+            rt_log("vk: the graphics queue family has %u queues, Streamline needs %u beside ours",
+                   qp[g_vk.gfx_family].queueCount, sl_gfx + sl_compute);
+            dlss_stop("the graphics card has too few queues");
+            sl_gfx = sl_compute = sl_flow = 0;
+        }
+        for (uint32_t i = 0; i < nq && sl_flow && flow_family < 0; i++)
+            if (qp[i].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV) {
+                if (i != g_vk.gfx_family && i != g_vk.xfer_family && has_ext(ep, ne, VK_NV_OPTICAL_FLOW_EXTENSION_NAME))
+                    flow_family = (int)i;
+                break;   // only the first such family will do
+            }
+        free(qp);
+        if (flow_family >= 0) {
+            int dup = 0;
+            for (uint32_t j = 0; j < n_ext; j++) dup |= !strcmp(ext[j], VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
+            if (!dup) ext[n_ext++] = VK_NV_OPTICAL_FLOW_EXTENSION_NAME;
+            CHAIN(flow, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV);
+        }
+    }
     // Graphics pipeline library: chained last so it can be dropped again when vk_caps_gpl declines it.
     void **gpl_link = NULL;
     if (has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
@@ -346,16 +492,21 @@ static int create_device(void) {
                has_fbl && c->fbl.attachmentFeedbackLoopLayout, has_lr && c->lr.dynamicRenderingLocalRead);
     }
 
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi[2] = {
-        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = 1,
-         .pQueuePriorities = &prio}};
+    if (flow_family >= 0 && !c->flow.opticalFlow) flow_family = -1;   // the extension without its feature: no queue
+    // Ours is the first queue of the graphics family; Streamline's own (frame generation's, none for DLSS) follow it.
+    float prio[16] = {1.0f};   // the rest 0, as Streamline gives its own queues
+    if (1 + sl_gfx + sl_compute > 16) sl_gfx = sl_compute = 0, dlss_stop("Streamline asks for more than 15 queues");
+    VkDeviceQueueCreateInfo qi[3] = {
+        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family,
+         .queueCount = 1 + (g_dlss ? sl_gfx + sl_compute : 0), .pQueuePriorities = prio}};
     uint32_t nqi = 1;
-    if (g_vk.xfer_family != g_vk.gfx_family) {
-        qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                                          .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = &prio};
-        nqi = 2;
-    }
+    if (g_vk.xfer_family != g_vk.gfx_family)
+        qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                              .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = prio};
+    if (g_dlss && flow_family >= 0)
+        qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                              .queueFamilyIndex = (uint32_t)flow_family, .queueCount = 1,
+                                              .pQueuePriorities = prio + 1};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
@@ -364,6 +515,7 @@ static int create_device(void) {
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
+    if (g_dlss) g_dlss = aod_dlss_device(g_vk.instance, g_vk.phys, g_vk.device, g_vk.gfx_family, 1, flow_family);
 
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
@@ -392,11 +544,14 @@ static int create_device(void) {
     return 1;
 }
 
+VkResult vk_device_idle(VkDevice device) { return aod_fg_wait_idle(device); }
+
 static long g_errors_total;     // outlives the device so the probe can print it after vk_shutdown
 
 static void destroy_all(void) {
     gfx_window_release_vk();
-    if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
+    if (g_vk.device) vk_device_idle(g_vk.device);
+    if (g_dlss) aod_dlss_shutdown(), g_dlss = 0;   // Streamline goes before the device it was given
     if (g_vk.device) vk_clear_shutdown(g_vk.device);
     if (g_vk.device) vk_astc_release();
     if (g_vk.device) vk_crumbs_release();

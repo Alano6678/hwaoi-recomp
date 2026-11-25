@@ -1435,7 +1435,13 @@ static int mirror_commit_room(uint64_t bytes, double *available_mb) {
     double process_mb = 0, used_mb = 0, limit_mb = 0;
     plat_commit_info(&process_mb, &used_mb, &limit_mb);
     if (!isfinite(used_mb) || !isfinite(limit_mb) || used_mb < 0 || limit_mb <= 0) return 1;
-    *available_mb = limit_mb > used_mb ? limit_mb - used_mb : 0;
+    // Age of Decomp: device-local memory is charged to Windows' commit like private memory (4 GiB on an RTX 5070 Ti
+    // raised it by 4,104 MiB), so the mirror is weighed against it; but a page file Windows may still enlarge raises the
+    // limit when the commit reaches it, and the mirror's charge is a reservation written to it only if the card's
+    // memory is evicted. GitHub #15: 16 GB of RAM, 2.4 GB of commit left at the decision, the pool read over PCIe at
+    // 136 ms of GPU time per frame. The room the page files have on their disks counts (plat_commit_growth_mb).
+    double growth = plat_commit_growth_mb();
+    *available_mb = (limit_mb > used_mb ? limit_mb - used_mb : 0) + (isfinite(growth) && growth > 0 ? growth : 0);
     return *available_mb >= (double)bytes / 1048576.0 + 3072.0;
 #else
     (void)bytes;
@@ -1470,8 +1476,8 @@ static void mirror_create(PoolRec *r) {
     double commit_available;
     if (!mirror_commit_room(n, &commit_available)) {
         char why[176];
-        snprintf(why, sizeof why, "system commit budget: %.0f MiB available; a %.0f MiB mirror needs 3072 MiB headroom; "
-                 "using the existing host import", commit_available, (double)n / 1048576.0);
+        snprintf(why, sizeof why, "system commit budget: %.0f MiB available (page file growth included); a %.0f MiB "
+                 "mirror needs 3072 MiB headroom; using the existing host import", commit_available, (double)n / 1048576.0);
         return refuse(r, MR_BUDGET, why);
     }
     plat_mutex_lock(&gen_lock);
@@ -2297,7 +2303,7 @@ void vk_mem_shutdown(void) {
     if (!c) return;
     vk_upload_flush(1);
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_idle(c->device);
     vk_queue_unlock();
     vk_texture_shutdown();
     vk_vertex_cache_shutdown();

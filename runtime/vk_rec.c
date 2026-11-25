@@ -50,6 +50,18 @@ static uint64_t now_ns(void) { return plat_now_ns(); }
 
 static void exec_packet(uint32_t op, void *p);
 
+// The recorder's calls write the driver's command buffer memory, which a driver may map write-combined, and x86 does
+// not order write-combined stores with ordinary ones: the store of tail (a plain MOV) can reach the submitting thread
+// while this core still holds the part's last commands in its write-combining buffers. That thread then ends and
+// submits a command buffer whose end the GPU reads as what the memory held before: an illegal command, and a lost
+// device with no faulting address. SFENCE writes those buffers out before tail is published. Found and measured in
+// MKW Recomp (https://github.com/adriadam10/mkw-recomp pull request #281, MIT): an RX 9070 XT under RADV hung after
+// 7 s without the fence and ran four times 150 s with it. Not measured on AMD's Windows driver; the code is ours.
+static inline void publish_tail(uint64_t t) {
+    _mm_sfence();
+    __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+}
+
 static void rec_main(void *arg) {
     (void)arg;
     plat_thread_priority(rec_prio);
@@ -83,9 +95,9 @@ static void rec_main(void *arg) {
             uint32_t op = (uint32_t)(w & 0xffff), n = (uint32_t)(w >> 32);
             if (op != R_PAD) exec_packet(op, &ring[t % RING_WORDS + 1]);
             t += n;
-            if ((k & 63) == 63) __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+            if ((k & 63) == 63) publish_tail(t);
         }
-        __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+        publish_tail(t);
     }
     return;
 }
@@ -141,16 +153,18 @@ void rec_drain(void) {
 void rec_begin(VkCommandBuffer cb) {
     static int mode = -1;
     if (mode < 0) {
-        // Default on for every GPU. AMD drivers once lost the device with the recorder (issues #5 and #40); after
-        // vk_mem_note_recording kept objects alive until their submission completed and the recorder began ending
-        // its own parts (rec_end_cb), RDNA 1 and 2 cards ran with it on and off without a loss or a white scene.
-        // Discrete RDNA 3 still loses the device with it: an RX 7800 XT (driver 26.10.1, LLPC) lost it within seconds
-        // of the window taking focus on every run with the recorder on, and ran with it off. The default is off
-        // there only; RDNA 4 (RX 9070) runs with it and gains from it. TOTK_VK_RECORDER=1 still forces it on.
-        mode = rt_knob("VK_RECORDER", vk_caps.amd_rdna3 ? "0" : "1");
-        const char *forced = cfg_get("TOTK_VK_RECORDER");
-        if (!mode && vk_caps.amd_rdna3 && !(forced && *forced))
-            rt_log("vk_rec: recorder thread off by default on AMD RDNA 3; TOTK_VK_RECORDER=1 forces it");
+        // TOTK_VK_RECORDER = auto (the default): on, except on AMD's own driver. An RX 7800 XT (driver 26.10.1, LLPC)
+        // lost the device within seconds of the window taking focus on every run with the recorder, and ran without
+        // it (hwaoi-recomp pull request #20, which turned it off for discrete RDNA 3). The RX 9070 XT loses it too:
+        // two players' logs here have the recorder on (one lost at the third submission), and in DKB Recomp, where
+        // this engine comes from, turning it off ended the losses of five RX 9070 XT owners, a Radeon 610M and a ROG
+        // Xbox Ally X (its issues #142, #84, #155). So it is off for every card on that driver, as there; publish_tail
+        // above closes the one cause found since, but nobody has run it on that driver yet. 1 and 0 force it.
+        const char *asked = cfg_value("TOTK_VK_RECORDER");
+        int own = !strcmp(asked, "auto");
+        mode = own ? !vk_caps.amd_own : rt_knob("VK_RECORDER", "1");
+        if (own && !mode)
+            rt_log("vk_rec: the recorder thread is off on AMD's own driver; vk_recorder = 1 in " RT_GAME_INI " turns it on");
         if (mode) {
             plat_event_init(&wake_ev, 0, 0);
             rec_prio = plat_thread_priority_get();

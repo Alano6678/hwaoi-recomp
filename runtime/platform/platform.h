@@ -221,8 +221,23 @@ typedef struct {
     uint64_t addr;             // its address when access >= 0
     int nframes;               // abort and invalid parameter: return addresses in this executable, innermost first
     uintptr_t frames[16];      // (rip is frames[0]); 0 for a fault, whose rip is exact
+    // A fault outside this executable (Windows: an unhandled one in a driver or a library): the module's file name and
+    // offset holds the offset in it, frames the callers in this executable, base this executable's load address.
+    const char *module;        // NULL: this executable
+    const char *thread;        // the faulting thread's name, NULL when it has none or it is not known
+    uintptr_t base;            // 0: rip - offset
 } PlatCrash;
 void plat_crash_hook(void (*fn)(const PlatCrash *c));
+// A hang report (main.c): every other thread of the process as it is now, its name ("" when it has none) and the
+// addresses of its call stack, innermost first (the first is where it executes or waits). fn is called once per
+// thread, after that thread runs again. Returns how many threads were reported; 0 where the platform cannot.
+typedef struct {
+    uint32_t id;
+    char name[64];
+    int nframes;
+    uintptr_t frames[24];
+} PlatThreadStack;
+int plat_threads_report(void (*fn)(const PlatThreadStack *t, void *arg), void *arg);
 int plat_mem_read(uint64_t addr, void *out, size_t n);    // copies n bytes, 0 instead of faulting on unmapped memory
 int plat_mem_readable(uint64_t addr, uint64_t n);         // every page of [addr, addr + n) can be read; no fault
 void *plat_aligned_alloc(size_t size, size_t align);      // free with plat_aligned_free; NULL on failure
@@ -350,6 +365,8 @@ static inline char *plat_last_sep(const char *path) {
 }
 // Environment variable as UTF-8 into out; its length, or 0 when unset, empty or too long for cap.
 size_t plat_getenv(const char *name, char *out, size_t cap);
+// The primary display's size in pixels, before any window exists; 0 when the system gives none.
+int plat_display_size(int *w, int *h);
 // The user's UI language as a BCP-47 tag ("ru-RU", "en-US"); "" when the system gives none. Valid for the process.
 const char *plat_ui_language(void);
 // The user's regional format (locale) as a BCP-47 tag; "" when the system gives none. Valid for the process.
@@ -391,6 +408,10 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 // Commit charge in MB: this process's private bytes, the system's commit in use and its limit (RAM plus page files).
 // An allocation fails when the system's reaches the limit, however much physical memory is free. -1 when unknown.
 void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb);
+// How far that limit can still grow, in MB: what the page files may still add up to their maximum size (one Windows
+// manages itself reports the most it may grow to, three times the RAM), each no more than its disk's free space less
+// 2 GB. 0 when none can grow or it is unknown (Linux: the commit limit does not grow).
+double plat_commit_growth_mb(void);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);

@@ -38,8 +38,10 @@
 #include "game_target.h"
 #include "host.h"
 #include "hwaoi_display.h"
+#include "vk_dlss.h"
 #include "vk_ffx.h"
 #include "vk_ffx_fetch.h"
+#include "platform/platform.h"
 
 #define BASE_W 1920
 #define BASE_H 1080
@@ -56,12 +58,45 @@ static struct {
     int on;                    // res_init switched the patch sets on
 } R;
 
+// HWAoI: what OUTPUT_RES=auto gives on this PC: the preset of the screen's size, held back by the graphics card's
+// memory, since the render targets and the texture pool grow with the picture (2560x1440 with DLAA used about
+// 8.4 GiB of video memory on a 16 GiB card). 2560x1440 wants a discrete card with 12 GiB, 3840x2160 one with
+// 16 GiB; a screen smaller than 1920x1080 gets 1280x720; everything else 1920x1080, the game's own. Found once: the
+// allocations are made at start.
+static const char *auto_output(void) {
+    static char pick[16];
+    if (pick[0]) return pick;
+    int w = 0, h = 0, discrete = 0, screen = plat_display_size(&w, &h);
+    uint64_t mib = 0;
+    int card = vk_probe_memory(&mib, &discrete);
+    const char *p = "1920x1080";
+    if (screen && (w < 1920 || h < 1080)) p = "1280x720";
+    else if (screen && w >= 3840 && h >= 2160 && card && discrete && mib >= 15000) p = "3840x2160";
+    else if (screen && w >= 2560 && h >= 1440 && card && discrete && mib >= 11000) p = "2560x1440";
+    snprintf(pick, sizeof pick, "%s", p);
+    if (!screen) rt_log("resolution: automatic game resolution: the screen's size is unknown: %s", pick);
+    else if (!card) rt_log("resolution: automatic game resolution: screen %dx%d, no graphics card listed: %s", w, h, pick);
+    else rt_log("resolution: automatic game resolution: screen %dx%d, %s graphics card with %llu MiB of its own: %s", w,
+                h, discrete ? "discrete" : "integrated", (unsigned long long)mib, pick);
+    return pick;
+}
+
+// The output preset in effect: OUTPUT_RES, or auto's (the default).
+static const char *output_setting(void) {
+    const char *value = cfg_value("TOTK_OUTPUT_RES");
+    return strcmp(value, "auto") ? value : auto_output();
+}
+
+void res_auto_size(unsigned out[2]) {
+    if (!hwaoi_display_size(auto_output(), out)) out[0] = 1920, out[1] = 1080;
+}
+
 static void decide(void) {
     if (R.decided) return;
     R.decided = 1;
     R.ow = BASE_W;
     R.oh = BASE_H;
-    const char *o = cfg_value("TOTK_OUTPUT_RES");
+    const char *o = RT_TARGET_HWAOI ? output_setting() : cfg_value("TOTK_OUTPUT_RES");
     unsigned w = 0, h = 0;
     char tail;
     if (sscanf(o, "%ux%u%c", &w, &h, &tail) == 2 && w >= 1280 && h >= 720 && w <= 7680 && h <= 4320) {
@@ -108,9 +143,9 @@ uint64_t res_heap_extra_bytes(void) {
         // Only application capacity changes here. HWAoI never uses TotK's BYML
         // HeapDef paths or heap-size formula (res_heap_extra_kib remains zero).
         const char *on = cfg_get("TOTK_NATIVE_1080");
-        if (rt_patch_set("hwaoi_display") < 0 || (on && !strcmp(on, "0"))) return 0;
+        if (rt_patch_set("hwaoi_display") < 0 || !hwaoi_native_wanted(on, cfg_value("TOTK_RENDER_SCALE"))) return 0;
         unsigned out[2], scene[2]; uint64_t child, parent, extra;
-        if (!hwaoi_display_dimensions(cfg_value("TOTK_OUTPUT_RES"), cfg_get("TOTK_SCENE_RES"), out, scene))
+        if (!hwaoi_display_dimensions(output_setting(), cfg_get("TOTK_SCENE_RES"), out, scene))
             rt_fatal("resolution: invalid HWAoI native output/diagnostic scene preset");
         if (!hwaoi_display_pool_plan(scene, cfg_get("TOTK_DISPLAY_POOL_TEST"), &child, &parent, &extra))
             rt_fatal("resolution: DISPLAY_POOL_TEST must be 0, 1 or pool MiB in 4655..7680");
@@ -217,13 +252,29 @@ void res_init(void) {
         int display = rt_patch_set("hwaoi_display");
         if (rt_patch_enabled(display)) {
             unsigned size[2], scene[2];
-            const char *value = cfg_value("TOTK_OUTPUT_RES");
+            const char *value = output_setting();
             if (!hwaoi_display_dimensions(value, cfg_get("TOTK_SCENE_RES"), size, scene))
-                rt_fatal("resolution: HWAoI OUTPUT_RES=%s unsupported; choose 1280x720, 1920x1080, 2560x1440 or 3840x2160", value);
+                rt_fatal("resolution: HWAoI OUTPUT_RES=%s unsupported; choose auto, 1280x720, 1920x1080, 2560x1440 or "
+                         "3840x2160", value);
             // Temporal upscaling: the scene below the output by HWAOI_FSR_QUALITY, scaled back by FSR in place of the
             // game's FSR 1 EASU (vk_temporal.c). An explicit SCENE_RES wins. The pool plan stays the output's
             // (res_heap_extra_bytes), which a smaller scene never exceeds.
             const char *quality = cfg_value("TOTK_FSR_QUALITY");
+            // DLSS Super Resolution takes the same place with the same ratios (vk_dlss.c). Without its files the scene
+            // stays at the output size; on a card that turns out not to run DLSS the game's own upscale takes over.
+            if (!cfg_get("TOTK_SCENE_RES") && vk_dlss_wanted() && strcmp(vk_dlss_quality(), "native")) {
+                const char *dq = vk_dlss_quality();
+                if (!hwaoi_display_fsr_scene(size, dq, scene))
+                    rt_fatal("resolution: DLSS_QUALITY=%s unsupported; choose native, quality, balanced or performance", dq);
+                if (!vk_dlss_files_present()) {
+                    scene[0] = size[0], scene[1] = size[1];
+                    rt_log("resolution: DLSS_QUALITY=%s needs Streamline's DLLs and nvngx_dlss.dll; the scene stays at "
+                           "the output size", dq);
+                } else {
+                    rt_log("resolution: DLSS_QUALITY=%s: scene %ux%u for DLSS to scale to %ux%u", dq, scene[0], scene[1],
+                           size[0], size[1]);
+                }
+            }
             if (!cfg_get("TOTK_SCENE_RES") && !strcmp(cfg_value("TOTK_TEMPORAL"), "fsr") && strcmp(quality, "native")) {
                 if (!hwaoi_display_fsr_scene(size, quality, scene))
                     rt_fatal("resolution: FSR_QUALITY=%s unsupported; choose native, quality, balanced or performance", quality);
@@ -271,12 +322,24 @@ void res_init(void) {
                    R.ow, R.oh, R.sw, R.sh);
             return;
         }
+        // Set hwaoi_ui_canvas reads the canvas and its scale from the page whatever the 3D resolution is: at the game's
+        // own 1920x1080 picture the canvas is the output and a canvas unit a pixel, as in the original code.
+        uint8_t *own_page = rt_patch_page();
+        if (own_page) {
+            uint64_t canvas = pack(1920, 1080);
+            float canvas_scale = 1.0f;
+            memcpy(own_page + 0xa8, &canvas, sizeof canvas);
+            memcpy(own_page + 0xb8, &canvas_scale, sizeof canvas_scale);
+        }
         int native = rt_patch_set("hwaoi_native1080");
         const char *requested = cfg_get("TOTK_NATIVE_1080");
         if (native < 0 && requested && !strcmp(requested, "1"))
             rt_fatal("resolution: native 1080p requires the exact-build HWAoI code profile; regenerate first");
-        if (strcmp(cfg_value("TOTK_OUTPUT_RES"), "1920x1080"))
-            rt_fatal("resolution: configurable native output requires the HWAoI display-settings profile; regenerate first");
+        // Off with the game's own 3D resolution (RENDER_SCALE=game) or TOTK_NATIVE_1080=0: the game draws its own 1080p
+        // picture and the present fits it to the window, so another OUTPUT_RES only applies with the native one.
+        if (strcmp(cfg_value("TOTK_OUTPUT_RES"), "1920x1080") && strcmp(cfg_value("TOTK_OUTPUT_RES"), "auto"))
+            rt_log("resolution: the game's own 3D resolution draws at 1920x1080; OUTPUT_RES=%s applies with the native one",
+                   cfg_value("TOTK_OUTPUT_RES"));
         rt_log("resolution: HWAoI %s", rt_patch_enabled(native)
                ? "native 1920x1080 scene profile enabled; allocation limits and dynamic scale patched"
                : "original scene allocation and dynamic-resolution policy");

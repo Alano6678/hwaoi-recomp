@@ -7,7 +7,16 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
+def _compiler():
+    """AOD_TEST_CC, the project's toolchain (Age of Decomp), or the upstream layout."""
+    named = os.environ.get("AOD_TEST_CC")
+    if named:
+        return Path(named)
+    own = ROOT.parent.parent / ".cache/toolchain/windows/llvm/bin/clang.exe"
+    return own if own.is_file() else Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
+
+
+CC = _compiler()
 sys.path.insert(0, str(ROOT / "tests"))
 from nvn2_compute_c0_test import function
 
@@ -73,6 +82,49 @@ class GpuDumpTriggerTests(unittest.TestCase):
                 run = subprocess.run([str(exe), str(Path(folder) / "trigger.txt")], cwd=folder,
                                      capture_output=True, text=True, timeout=10)
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+
+def watch_source():
+    """TOTK_DUMP_ON_TARGET (Age of Decomp): the value's parser and the pass match."""
+    text = (ROOT / "runtime/vk_dump.c").read_text(encoding="utf-8")
+    return r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#define CHECK(x) do {if(!(x)){fprintf(stderr,"check %d: %s\n",__LINE__,#x);exit(1);}}while(0)
+static uint32_t watch_w,watch_h,watch_fmt;
+""" + function(text, "static int watch_parse(") + function(text, "static int watch_match(") + r"""
+int main(void){
+ uint32_t w=7,h=7,f=7,d=7;
+ CHECK(watch_parse("1600x900",&w,&h,&f,&d)&&w==1600&&h==900&&f==0&&d==1);
+ CHECK(watch_parse("2560x1440:97+40",&w,&h,&f,&d)&&w==2560&&h==1440&&f==97&&d==40);
+ CHECK(watch_parse("1600x900+6",&w,&h,&f,&d)&&f==0&&d==6);
+ const char *bad[]={"","x900","1600","1600x","1600x900x","1600X900","0x900","1600x0","1600x900+0","1600x900+",
+                    "1600x900:","1600x900:97+","-1600x900","1600x-900","1600x900 ","1600x900+6:97"};
+ for(unsigned i=0;i<sizeof bad/sizeof *bad;i++) CHECK(!watch_parse(bad[i],&w,&h,&f,&d));
+ watch_w=2560;watch_h=1440;watch_fmt=97;
+ CHECK(watch_match(2560,1440,1,1,97));
+ CHECK(!watch_match(2560,1440,1,1,122)&&!watch_match(2560,1440,0,0,0)&&!watch_match(2560,1440,1,0,97));
+ CHECK(!watch_match(1600,900,1,1,97)&&!watch_match(2560,1080,1,1,97));
+ watch_fmt=0;
+ CHECK(watch_match(2560,1440,1,1,122)&&watch_match(2560,1440,2,0,0)&&!watch_match(2560,1440,0,0,0));
+ puts("GPU dump watch checks passed");return 0;
+}
+"""
+
+
+@unittest.skipUnless(os.name == "nt" and CC.is_file(), "Windows Clang required")
+class GpuDumpWatchTests(unittest.TestCase):
+    def test_on_target_value_and_pass_match(self):
+        with tempfile.TemporaryDirectory(prefix="hwaoi-dump-watch-") as folder:
+            path = Path(folder) / "watch.c"
+            path.write_text(watch_source(), encoding="utf-8")
+            exe = path.with_suffix(".exe")
+            built = subprocess.run([str(CC), "-O2", "-Wall", "-Wextra", "-Werror", str(path), "-o", str(exe)],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            run = subprocess.run([str(exe)], cwd=folder, capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
 
 if __name__ == "__main__":

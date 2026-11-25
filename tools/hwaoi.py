@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -21,7 +22,8 @@ DEFAULT_EXEFS = ROOT / "work/game/exefs"
 DEFAULT_GENERATED = ROOT / "work/generated/hwaoi196608"
 MODULES = ("main", "subsdk0", "sdk")
 BUILD_NAME = "hwaoi196608"
-GAME_EXE = "hwaoi.exe"   # tools/build_game.py EXE
+WINDOWS = os.name == "nt"
+GAME_EXE = "hwaoi.exe" if WINDOWS else "hwaoi"   # tools/build_game.py EXE
 
 
 def need(condition, message):
@@ -104,14 +106,14 @@ def display_profile(exefs):
         fields = line.split("#", 1)[0].split()
         if not fields or fields[0] == "set":
             continue
-        need(6 <= len(fields) <= 11 and fields[0] == "site" and fields[1] in ("hwaoi_display", "hwaoi_ui_canvas")
+        need(6 <= len(fields) <= 18 and fields[0] == "site" and fields[1] in ("hwaoi_display", "hwaoi_ui_canvas", "hwaoi_confirm")
              and fields[2] == "main", "display profile: unexpected patch entry")
         address, original = int(fields[3], 16), int(fields[4], 16)
         need(address not in sites, "display profile: duplicate site")
         need(struct.unpack("<I", module.code(address, 4))[0] == original,
              f"display profile: instruction mismatch at main+{address:#x}")
         sites.add(address)
-    need(len(sites) == 40, "display profile must contain the 40 verified sites")
+    need(len(sites) == 54, "display profile must contain the 54 verified sites")
     return patch
 
 
@@ -410,9 +412,14 @@ def build_parser():
     build.add_argument("--generated", type=Path, default=ROOT / "work/generated/hwaoi196608-full")
     build.add_argument("--out", type=Path, default=ROOT / "work/build/hwaoi196608")
     build.add_argument("--romfs", type=Path, required=True, help="Prepared romfs.bin/index.json directory; not the NUP")
-    build.add_argument("--deps", type=Path, required=True, help="Existing include/lib/bin runtime dependency tree")
-    build.add_argument("--toolchain", type=Path, default=Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw"))
-    build.add_argument("--ninja", type=Path, default=Path("F:/Ninja/ninja.exe"))
+    # Linux: the system's clang, lld, Ninja and libraries unless --toolchain/--deps/--sysroot name others (the release
+    # bundle's, tools/build_game.py)
+    build.add_argument("--deps", type=Path, required=WINDOWS, help="Existing include/lib/bin runtime dependency tree")
+    build.add_argument("--sysroot", type=Path, help="Linux: the glibc and libstdc++ to compile and link against")
+    build.add_argument("--toolchain", type=Path,
+                       default=Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw") if WINDOWS else None)
+    build.add_argument("--ninja", type=Path,
+                       default=Path("F:/Ninja/ninja.exe") if WINDOWS else Path(shutil.which("ninja") or "/usr/bin/ninja"))
     build.add_argument("--jobs", type=int, default=0, help="0 selects workers from available RAM/commit; 1..8 sets a ceiling")
     build.add_argument("--toolchain-stamp", type=Path, help="compiler/dependency identity for incremental builds")
     build.add_argument("--icon", type=Path, help="the game's .ico (tools/hwaoi_icon.py) to embed in the executable")
@@ -507,14 +514,18 @@ def dispatch(args):
                 need(storage.get("exefs_sha256") == identity["exefs_sha256"], "RomFS belongs to another ExeFS build")
                 need((args.romfs / ("cache.bin" if storage.get("storage") == "nup-cache-v1" else "romfs.bin")).is_file(),
                      "prepared HWAoI RomFS storage is missing")
-                need(args.deps.is_dir() and args.ninja.is_file(), "runtime dependency tree or Ninja missing")
+                need((args.deps is None or args.deps.is_dir()) and args.ninja.is_file(),
+                     "runtime dependency tree or Ninja missing")
                 need(0 <= args.jobs <= 8, "build jobs must be 0 (automatic) or in 1..8")
                 out = local_output(args.out, "build")
                 command = [sys.executable, ROOT / "tools/build_game.py", "--version", BUILD_NAME,
                      "--gen", generated, "--out", out, "--expected", generated / "expected.json",
                      "--exefs", args.exefs.resolve(), "--romfs", args.romfs.resolve(),
-                     "--profile", ROOT / "work/saves/hwaoi196608", "--toolchain", args.toolchain,
-                     "--ninja", args.ninja, "--deps", args.deps, "--jobs", args.jobs, "--full-build"]
+                     "--profile", ROOT / "work/saves/hwaoi196608", "--ninja", args.ninja,
+                     "--jobs", args.jobs, "--full-build"]
+                for option, value in (("--toolchain", args.toolchain), ("--deps", args.deps), ("--sysroot", args.sysroot)):
+                    if value is not None:
+                        command += [option, value]
                 if args.toolchain_stamp:
                     need(args.toolchain_stamp.is_file(), "toolchain identity stamp is missing")
                     command += ["--toolchain-stamp", args.toolchain_stamp.resolve()]

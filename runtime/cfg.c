@@ -31,33 +31,35 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
     "ANTIALIASING",
-    "AB", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "AB", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_LATENCY", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_WINDOW", "BARRIER_ELIDE", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MENU", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
-    "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BINDS_PLAYER", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
+    "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y", "CONFIRM_BUTTON", "CONFIRM_SWAP",
+    "BIND_ZL", "BIND_ZR", "BINDS_PLAYER", "BLOCK_VIEWS_3D", "BUTTON_PROMPTS", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
     "EXEFS", "EXPERIMENTAL_GEOMETRY", "FEEDBACK", "FIX_C0", "FIX_INDIRECT_RESET", "FIX_VS_FAULT", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "HDR", "HDR_GAME_NITS", "HDR_PEAK_NITS", "HDR_UI_NITS",
     "FLIGHT_THUMBS", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
+    "HANG_SECONDS", "HANG_TEST", "SWAPCHAIN_TEST", "DRAW_CRUMBS", "DRAW_CRUMBS_TEST",
     "EXPERIMENTAL_RATE", "RATE_DIAG", "RATE_UNLOCK", "FS_DIAG", "GPU_INDEX", "GPU_NAME", "GPU_WRITE_DIAG", "HIGHFPS_FIX", "INPUT", "INPUT_FEED", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
-    "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LOCALE", "LOD_GUARD", "MEMORY", "MENU_LANG", "MENU_TEST",
+    "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LINKED_SAVES", "LOCALE", "LOD_GUARD", "MEMORY", "MENU_LANG", "MENU_TEST",
     "KSPIN_US", "REC_SPIN_US",
     "MEMX",
-    "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "NX2_READ_NOWAIT",
+    "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "MUTE_UNFOCUSED", "NX2_READ_NOWAIT",
     "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES",
     "P2_BIND_A", "P2_BIND_B", "P2_BIND_X", "P2_BIND_Y", "P2_BIND_LCLICK", "P2_BIND_RCLICK", "P2_BIND_L", "P2_BIND_R", "P2_BIND_ZL", "P2_BIND_ZR", "P2_BIND_PLUS", "P2_BIND_MINUS", "P2_BIND_LEFT", "P2_BIND_UP", "P2_BIND_RIGHT", "P2_BIND_DOWN", "P2_BIND_LSTICK_LEFT", "P2_BIND_LSTICK_UP", "P2_BIND_LSTICK_RIGHT", "P2_BIND_LSTICK_DOWN", "P2_BIND_RSTICK_LEFT", "P2_BIND_RSTICK_UP", "P2_BIND_RSTICK_RIGHT", "P2_BIND_RSTICK_DOWN", "P2_BIND_MENU",
     "PAD_LAYOUT", "PATCH_OUTPUT", "PATCH_SCENE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SCENE", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "PLAYER1_DEVICE", "PLAYER1_TYPE", "PLAYER2_DEVICE", "PLAYER2_TYPE",
     "PRESENT_HOLD", "PREWARM_XLATE", "PRIORITY_DIAG", "PROBE_MOVIE", "PROBE_MOVIE_SHOT", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
     "PROFILE_BUSY", "PROFILE_IP_ONLY", "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_END", "REEXEC",
-    "RENDER_SCALE", "REPLAY_ASYNC", "RUNTIME_MEMORY_DIAG", "MEMORY_TRIM_PROBE", "COPY_PACK", "DUMP_TRIGGER", "NATIVE_1080", "GPU_READBACK_DIAG", "GPU_QUADS", "VERTEX_CACHE", "INDIRECT_BATCH", "SCENE_RES", "DISPLAY_POOL_TEST", "DUMP_METADATA",
+    "RENDER_SCALE", "REPLAY_ASYNC", "RUNTIME_MEMORY_DIAG", "MEMORY_TRIM_PROBE", "COPY_PACK", "DUMP_TRIGGER", "DUMP_ON_TARGET", "NATIVE_1080", "GPU_READBACK_DIAG", "GPU_QUADS", "VERTEX_CACHE", "INDIRECT_BATCH", "SCENE_RES", "DISPLAY_POOL_TEST", "DUMP_METADATA",
     "REPLAY_CHECK", "RESOLVE_CHECK", "ROMFS", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
     "SCENE_SHARPNESS", "SHADER_MEMO", "SHARED_FONTS", "SPIRV_TRIM", "CS_PREBUILD", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SHOTS_LATEST", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SWKBD_ANSWER",
     "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "SMALL_MEMORY_POOLS", "COPY_RECLAIM", "SOURCE_COMPRESS", "LAZY_HEAP", "LAZY_HEAP_KIB", "LAZY_HEAP_AUTO_FREE_MB", "VS_OUTS",
-    "TEMPORAL", "TEMPORAL_JITTER", "TEMPORAL_MV", "TEMPORAL_DEBUG", "TEMPORAL_LOG", "FSR_QUALITY", "FSR_JITTER_SIGN",
+    "TEMPORAL", "TEMPORAL_CHARS", "TEMPORAL_DROP", "TEMPORAL_JITTER", "TEMPORAL_MV", "TEMPORAL_DEBUG", "TEMPORAL_LOG", "FSR_QUALITY", "FSR_JITTER_SIGN",
     "FSR_DEBUG", "FSR_MODEL", "FSR_VERSION",
+    "DLSS_BIAS", "DLSS_DIR", "DLSS_JITTER_SIGN", "DLSS_LOG", "DLSS_NGX", "DLSS_QUALITY", "FRAME_GEN", "FRAME_GEN_NGX",
     "WB_EXACT", "WB_FENCE_LIMIT", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PREFETCH", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
@@ -68,17 +70,18 @@ static const struct { const char *key, *section; } sections[] = {
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
     {"GPU_INDEX", "display"}, {"OUTPUT_RES", "display"}, {"RENDER_SCALE", "display"}, {"UPSCALER", "display"},
     {"TEMPORAL", "display"}, {"FSR_QUALITY", "display"}, {"FSR_VERSION", "display"}, {"SCENE_SHARPNESS", "display"},
+    {"DLSS_QUALITY", "display"}, {"FRAME_GEN", "display"},
     {"SHARPNESS", "display"}, {"ASPECT", "display"}, {"FOV", "display"}, {"COLOR_PRESET", "display"},
     {"ANTIALIASING", "display"},
     {"COLOR_BRIGHTNESS", "display"}, {"COLOR_CONTRAST", "display"}, {"COLOR_SATURATION", "display"},
     {"COLOR_GAMMA", "display"},
     {"HDR", "display"}, {"HDR_PEAK_NITS", "display"}, {"HDR_GAME_NITS", "display"}, {"HDR_UI_NITS", "display"},
-    {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"},
+    {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"}, {"LINKED_SAVES", "language"},
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
-    {"VOLUME", "audio"},
+    {"VOLUME", "audio"}, {"MUTE_UNFOCUSED", "audio"}, {"AUDIO_LATENCY", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
     {"P2_BIND_A", "input"}, {"P2_BIND_B", "input"}, {"P2_BIND_X", "input"}, {"P2_BIND_Y", "input"}, {"P2_BIND_LCLICK", "input"}, {"P2_BIND_RCLICK", "input"}, {"P2_BIND_L", "input"}, {"P2_BIND_R", "input"}, {"P2_BIND_ZL", "input"}, {"P2_BIND_ZR", "input"}, {"P2_BIND_PLUS", "input"}, {"P2_BIND_MINUS", "input"}, {"P2_BIND_LEFT", "input"}, {"P2_BIND_UP", "input"}, {"P2_BIND_RIGHT", "input"}, {"P2_BIND_DOWN", "input"}, {"P2_BIND_LSTICK_LEFT", "input"}, {"P2_BIND_LSTICK_UP", "input"}, {"P2_BIND_LSTICK_RIGHT", "input"}, {"P2_BIND_LSTICK_DOWN", "input"}, {"P2_BIND_RSTICK_LEFT", "input"}, {"P2_BIND_RSTICK_UP", "input"}, {"P2_BIND_RSTICK_RIGHT", "input"}, {"P2_BIND_RSTICK_DOWN", "input"}, {"P2_BIND_MENU", "input"},
-    {"BINDS_PLAYER", "input"}, {"PAD_LAYOUT", "input"}, {"PLAYER1_DEVICE", "input"}, {"PLAYER1_TYPE", "input"}, {"PLAYER2_DEVICE", "input"},
+    {"BINDS_PLAYER", "input"}, {"PAD_LAYOUT", "input"}, {"BUTTON_PROMPTS", "input"}, {"CONFIRM_BUTTON", "input"}, {"PLAYER1_DEVICE", "input"}, {"PLAYER1_TYPE", "input"}, {"PLAYER2_DEVICE", "input"},
     {"PLAYER2_TYPE", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
@@ -87,8 +90,10 @@ static const struct { const char *key, *section; } sections[] = {
     {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
     {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"}, {"BIND_MENU", "input"},
     {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"FREE_CORES", "performance"},
-    {"KSPIN_US", "performance"}, {"REC_SPIN_US", "performance"},
+    {"KSPIN_US", "performance"}, {"REC_SPIN_US", "performance"}, {"VK_RECORDER", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"},
+    {"XLATE_PREFETCH", "performance"}, {"LAZY_HEAP", "performance"}, {"SMALL_MEMORY_POOLS", "performance"},
+    {"SOURCE_COMPRESS", "performance"},
     {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"PIPE_PREBUILD", "performance"},
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
     {"EXPERIMENTAL_GEOMETRY", "performance"},
@@ -97,7 +102,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"MEMX", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
     {"VK_DYN_VERTEX", "performance"}, {"VK_DYN_A2C", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
-    {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
+    {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"}, {"DRAW_CRUMBS", "diagnostics"},
     {"WB_FENCE_LIMIT", "diagnostics"}, {"WB_EXACT", "diagnostics"}, {"NX2_READ_NOWAIT", "diagnostics"},
     {"NVN2_MODE_TRACE", "diagnostics"},
     {"NVN2_MODE_TRACE_START_MS", "diagnostics"}, {"NVN2_MODE_TRACE_DURATION_MS", "diagnostics"},
@@ -114,7 +119,8 @@ static const CfgMeta metas[] = {
     {"VK_PRESENT", "mailbox", "mailbox|fifo|immediate", LIVE}, {"GPU_INDEX", "", NULL, RESTART},
     {"PERF_OVERLAY", "off", "off|fps|full", LIVE},
 #if RT_TARGET_HWAOI
-    {"OUTPUT_RES", "1920x1080", "1280x720|1920x1080|2560x1440|3840x2160", RESTART},
+    // auto: the screen's own size as far as the graphics card's memory allows (resolution.c auto_output)
+    {"OUTPUT_RES", "auto", "auto|1280x720|1920x1080|2560x1440|3840x2160", RESTART},
     {"RENDER_SCALE", "100", "100|game", RESTART},
 #else
     {"OUTPUT_RES", "1920x1080", NULL, RESTART}, {"RENDER_SCALE", "game", "game|50|67|75|100|125|150|200", RESTART},
@@ -122,14 +128,19 @@ static const CfgMeta metas[] = {
     {"UPSCALER", "fsr", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
     {"ANTIALIASING", "off", "off|smaa", LIVE},   // SMAA on the present (vk_smaa.c)
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
-    // temporal AA / upscaling (vk_temporal.c): device extensions and the scene size are set at start; FSR sharpens by
-    // SHARPNESS
-    {"TEMPORAL", "off", "off|fsr", RESTART}, {"FSR_QUALITY", "native", "native|quality|balanced|performance", RESTART},
-    {"FSR_VERSION", "auto", NULL, RESTART},
+    // temporal AA / upscaling (vk_temporal.c), one upscaler at a time: device extensions and the scene size are set at
+    // start; FSR sharpens by SHARPNESS. dlss: NVIDIA DLSS through Streamline, which starts before the Vulkan instance
+    // (vk_dlss.c); dlaa: the same at the scene's own size whatever DLSS_QUALITY says (the 0.1.2 value)
+    {"TEMPORAL", "off", "off|fsr|dlss|dlaa", RESTART},
+    {"FSR_QUALITY", "native", "native|quality|balanced|performance", RESTART}, {"FSR_VERSION", "auto", NULL, RESTART},
+    {"DLSS_QUALITY", "native", "native|quality|balanced|performance", RESTART},
+    // NVIDIA DLSS frame generation (aod_dlss.cpp): frames shown per rendered one; with any TEMPORAL value, as it
+    // takes the scene's depth and motion from the same path. Streamline loads its part before the instance exists.
+    {"FRAME_GEN", "off", "off|2|3|4|5|6", RESTART},
     // the game's own sharpening while temporal AA runs: unset = off then (FSR sharpens), game, or 0..100; read once
     {"SCENE_SHARPNESS", "", NULL, RESTART},
     // colour adjustment (vk_color.c); the preset is the menu's, the four values are what the present uses
-    {"COLOR_PRESET", "default", "default|vivid|clarity|custom", LIVE}, {"COLOR_BRIGHTNESS", "0", "-30..30", LIVE},
+    {"COLOR_PRESET", "default", "default|vivid|clarity|oled|custom", LIVE}, {"COLOR_BRIGHTNESS", "0", "-30..30", LIVE},
     {"COLOR_CONTRAST", "100", "70..150", LIVE}, {"COLOR_SATURATION", "100", "50..200", LIVE},
     {"COLOR_GAMMA", "1", "0.8..1.2", LIVE},
     // HDR10 output (vk_hdr.c): the SDR picture on an HDR10 swapchain at GAME_NITS; on at start, the nits apply at once
@@ -138,7 +149,7 @@ static const CfgMeta metas[] = {
     {"DEVICE_PROFILE", "auto", "auto|desktop|deck", RESTART},
     // Game
 #if RT_TARGET_HWAOI
-    {"FPS_LIMIT", "60", "30|60|90|120", LIVE},
+    {"FPS_LIMIT", "60", "30|60", LIVE},
 #else
     {"FPS_LIMIT", "60", "30|40|45|60|90|120|144|display", LIVE},
 #endif
@@ -148,16 +159,26 @@ static const CfgMeta metas[] = {
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR", RESTART},
     {"OPERATION_MODE", "docked", "docked|handheld", LIVE},
     {"ASSUME_FOCUS", "1", "0|1", LIVE},   // read on every focus change (ov_system.c)
+    {"LINKED_SAVES", "1", "0|1", LIVE},   // other games' save data for the data-link bonuses, read when the game asks (fs_host.c)
     // Sound, Controls, Menu
-    {"VOLUME", "100", "0..200", LIVE},
+    {"VOLUME", "100", "0..300", LIVE}, {"MUTE_UNFOCUSED", "0", "0|1", LIVE},
+    {"AUDIO_LATENCY", "low", "low|normal|high", RESTART},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
-    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
+    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE},
+    // Every button where a Switch controller has it, whatever the value: no row shows it since 0.2.0, and the other
+    // values are older names a settings file may still hold (input_pad_layout_pick).
+    {"PAD_LAYOUT", "auto", "auto|xbox|nintendo|xbox_prompts", LIVE},
+    // The game's own button pictures (hud_prompts.c): the device in use, one maker's gamepad, or as the game draws them
+    {"BUTTON_PROMPTS", "auto", "auto|xbox|playstation|nintendo|game", LIVE},
+    // The game's menus confirm with the bottom button and go back with the right one (input.c input_confirm_bottom):
+    // auto with a gamepad of another maker than Nintendo in use, bottom with any gamepad, right never (the game's way)
+    {"CONFIRM_BUTTON", "auto", "auto|bottom|right", LIVE},
     // Players (input.c assign): auto | keyboard | none | pad:<SDL GUID>:<n>; controller type pro (Pro Controller) | dual (Joy-Con pair)
     {"PLAYER1_DEVICE", "auto", NULL, LIVE}, {"PLAYER1_TYPE", "pro", "pro|dual", LIVE},
     {"PLAYER2_DEVICE", "auto", NULL, LIVE}, {"PLAYER2_TYPE", "pro", "pro|dual", LIVE},
     {"BINDS_PLAYER", "1", "1|2", LIVE},   // the player whose bindings the Controls tab remap rows edit
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
-    {"MENU_LANG", "", "en|ru|zh-Hans", LIVE},
+    {"MENU_LANG", "", "en|ru|it|zh-Hans", LIVE},
     // Advanced: scheduling
     {"LAZY_HEAP", "auto", "auto|0|1", RESTART}, // Windows-only demand-commit heap; auto: only when commit is short (memory.c)
     {"LAZY_HEAP_KIB", "2048", "64|256|2048", RESTART},
@@ -173,6 +194,7 @@ static const CfgMeta metas[] = {
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     {"KSPIN_US", "20", "0..1000", RESTART},   // kernel waits poll before they sleep; off below 6 logical CPUs
     {"REC_SPIN_US", "0", "0..1000", RESTART}, // recorder idle poll by the clock; 0: 4096 pauses
+    {"VK_RECORDER", "auto", "auto|0|1", RESTART}, // auto: on, except on AMD's own driver (vk_rec.c rec_begin)
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
     {"PIPE_SCENE", "1", "0|1", RESTART},       // new-scene draws may wait for background shaders
@@ -195,6 +217,7 @@ static const CfgMeta metas[] = {
     {"VK_DYN_A2C", "", "0|1", RESTART}, {"VK_SUBGROUP_PIN", "1", "0|1", RESTART},
     // diagnostics
     {"TRACE", "", NULL, RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
+    {"DRAW_CRUMBS", "0", "0|1", RESTART},   // a GPU breadcrumb per draw, for the report of a lost device (vk_crumbs.c)
     {"WB_FENCE_LIMIT", "65536", "0..1073741824", RESTART}, {"WB_EXACT", "1", "0|1", RESTART},
     {"NX2_READ_NOWAIT", "0", "0|1", RESTART},
     {"NVN2_MODE_TRACE", "0", "0|1", RESTART},
@@ -319,26 +342,33 @@ static int profile_of(void) {
 
 const char *cfg_device_profile(void) { return profile_of() ? "deck" : "desktop"; }
 
-// DKB_X in the environment stands for TOTK_X and wins over it: the TOTK_ names come from TotK Recomp and stay, so its
-// fixes keep applying without a rename.
-static const char *dkb_alias(const char *name) {
+static const char *env_lookup(const char *name, char *out, size_t size) {
     char alias[96];
-    if (strncmp(name, PREFIX, PREFIX_LEN) || strlen(name) >= sizeof alias - 1) return NULL;
-    snprintf(alias, sizeof alias, "DKB_%s", name + PREFIX_LEN);
-    return getenv(alias);
-}
-
-static const char *env_of(const char *name) {
     // This fork's settings win; old DKB_/TOTK_ names remain compatibility aliases.
-    char alias[96];
     if (!strncmp(name, PREFIX, PREFIX_LEN) && strlen(name) < sizeof alias - 8) {
         snprintf(alias, sizeof alias, "HWAOI_%s", name + PREFIX_LEN);
         const char *hwaoi = getenv(alias);
-        if (hwaoi) return hwaoi;
+        if (hwaoi) {
+            if (out && size) snprintf(out, size, "%s", alias);
+            return hwaoi;
+        }
     }
-    const char *e = dkb_alias(name);
-    return e ? e : getenv(name);
+    // DKB_X in the environment stands for TOTK_X and wins over it: the TOTK_ names come from TotK Recomp and stay, so
+    // its fixes keep applying without a rename.
+    if (!strncmp(name, PREFIX, PREFIX_LEN) && strlen(name) < sizeof alias - 1) {
+        snprintf(alias, sizeof alias, "DKB_%s", name + PREFIX_LEN);
+        const char *dkb = getenv(alias);
+        if (dkb) {
+            if (out && size) snprintf(out, size, "%s", alias);
+            return dkb;
+        }
+    }
+    const char *value = getenv(name);
+    if (value && out && size) snprintf(out, size, "%s", name);
+    return value;
 }
+
+static const char *env_of(const char *name) { return env_lookup(name, NULL, 0); }
 
 static const char *raw_get(const char *name) {
     const char *e = env_of(name);
@@ -363,6 +393,7 @@ int cfg_is_set(const char *name) { return raw_get(name) != NULL; }
 unsigned cfg_version(void) { return __atomic_load_n(&version, __ATOMIC_ACQUIRE); }
 
 int cfg_from_env(const char *name) { return env_of(name) != NULL; }
+int cfg_env_name(const char *name, char *out, size_t size) { return env_lookup(name, out, size) != NULL; }
 
 void cfg_set(const char *name, const char *value) {
     if (strncmp(name, PREFIX, PREFIX_LEN) || !value) return;
@@ -719,13 +750,15 @@ static void load_ini(void) {
     for (int i = 0; i < n_entries; i++) {
         char var[128];
         snprintf(var, sizeof var, PREFIX "%s", entries[i].key);
-        if (env_of(var)) rt_log("cfg: %s (or its DKB_ name) is set in the environment and overrides totk.ini", var);
+        char actual[128];
+        if (cfg_env_name(var, actual, sizeof actual))
+            rt_log("cfg: %s is set in the environment and overrides " RT_GAME_INI, actual);
     }
 }
 
 void cfg_init(void) {
     load_ini();
     if (profile_of())
-        rt_log("cfg: device profile Steam Deck: defaults for the keys totk.ini does not set (TOTK_DEVICE_PROFILE=desktop "
+        rt_log("cfg: device profile Steam Deck: defaults for the keys " RT_GAME_INI " does not set (HWAOI_DEVICE_PROFILE=desktop "
                "turns it off)");
 }

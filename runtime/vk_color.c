@@ -11,10 +11,12 @@
 // the output image is shared by all slots, and each frame's first barrier orders it after the previous frame's reads.
 #include "vk.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
 #include "color_grade_spv.h"
+#include "color_presets.h"
 #include "host.h"
 
 #define SLOTS 8
@@ -87,7 +89,7 @@ static int ensure_image(VkCtx *c, uint32_t w, uint32_t h) {
     if (C.img && C.w == w && C.h == h) return 1;
     // another crop size (a resolution change): earlier presents may still read the old image
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_idle(c->device);
     vk_queue_unlock();
     free_image(c);
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -111,15 +113,17 @@ static int ensure_image(VkCtx *c, uint32_t w, uint32_t h) {
     return 1;
 }
 
-// The four values from the settings, re-read when they change. 1 when any differs from "unchanged".
+// The four values, re-read when the settings change: a named profile's from color_presets.h (the launcher and
+// RecompLauncher write only its name), "custom" the player's own. 1 when any differs from "unchanged".
 static int adjusting(void) {
     unsigned v = cfg_version();
     if (v != C.seen) {
         C.seen = v;
-        C.adj[0] = (float)cfg_double("TOTK_COLOR_BRIGHTNESS") / 100.0f;
-        C.adj[1] = (float)cfg_double("TOTK_COLOR_CONTRAST") / 100.0f;
-        C.adj[2] = (float)cfg_double("TOTK_COLOR_SATURATION") / 100.0f;
-        C.adj[3] = (float)cfg_double("TOTK_COLOR_GAMMA");
+        const ColorPreset *p = color_preset_find(cfg_value("TOTK_COLOR_PRESET"));
+        C.adj[0] = (float)(p ? strtod(p->brightness, NULL) : cfg_double("TOTK_COLOR_BRIGHTNESS")) / 100.0f;
+        C.adj[1] = (float)(p ? strtod(p->contrast, NULL) : cfg_double("TOTK_COLOR_CONTRAST")) / 100.0f;
+        C.adj[2] = (float)(p ? strtod(p->saturation, NULL) : cfg_double("TOTK_COLOR_SATURATION")) / 100.0f;
+        C.adj[3] = (float)(p ? strtod(p->gamma, NULL) : cfg_double("TOTK_COLOR_GAMMA"));
     }
     return C.adj[0] != 0.0f || C.adj[1] != 1.0f || C.adj[2] != 1.0f || C.adj[3] != 1.0f;
 }

@@ -7,6 +7,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <restartmanager.h>
 #include <shellapi.h>
 #include <timeapi.h>
@@ -587,14 +588,18 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
 
 static void (*crash_fn)(const PlatCrash *c);
 
+static const char *crash_what(DWORD code) {
+    return code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
+         : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
+         : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
+         : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
+         : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
+         : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+}
+
 static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    const char *what = code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
-                     : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
-                     : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
-                     : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
-                     : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
-                     : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+    const char *what = crash_what(code);
     if (!what) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
     MODULEINFO mi;
@@ -605,6 +610,66 @@ static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
         c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
     crash_fn(&c);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// A fault outside this executable (a GPU driver, the C runtime, SDL) that no handler of that code takes would end the
+// process with its exception code and no line in the log, as Intel's Vulkan driver did on its first pipeline cache
+// copy. The top-level filter, called only for such an unhandled exception, reports it like the faults above, naming
+// the module, the thread and the frames of this executable that led there (unwound from the fault's context).
+static LPTOP_LEVEL_EXCEPTION_FILTER crash_prev_filter;
+
+static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    const char *what = crash_what(code);
+    MODULEINFO mi;
+    if (!what || !crash_fn || !GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi))
+        return crash_prev_filter ? crash_prev_filter(ep) : EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip, base = (uintptr_t)mi.lpBaseOfDll;
+    PlatCrash c = {what, (uint32_t)code, rip, rip - base, -1, 0};
+    c.base = base;
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+        c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
+    static char module[MAX_PATH * 3], thread[192];
+    HMODULE m = NULL;
+    if (rip - base >= mi.SizeOfImage) {
+        snprintf(module, sizeof module, "an unknown module");
+        wchar_t w[MAX_PATH];
+        DWORD n;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)rip, &m) && (n = GetModuleFileNameW(m, w, MAX_PATH)) && n < MAX_PATH) {
+            const wchar_t *leaf = w;
+            for (const wchar_t *p = w; *p; p++)
+                if (*p == L'\\' || *p == L'/') leaf = p + 1;
+            if (!WideCharToMultiByte(CP_UTF8, 0, leaf, -1, module, sizeof module, NULL, NULL))
+                snprintf(module, sizeof module, "an unknown module");
+            c.offset = rip - (uintptr_t)m;
+        }
+        c.module = module;
+    }
+    PWSTR desc = NULL;
+    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &desc)) && desc && *desc &&
+        WideCharToMultiByte(CP_UTF8, 0, desc, -1, thread, sizeof thread, NULL, NULL))
+        c.thread = thread;
+    if (desc) LocalFree(desc);
+    // The frames in this executable, innermost first: unwound from the fault's context, which a leaf function (no
+    // unwind data) leaves with its return address at rsp.
+    CONTEXT ctx = *ep->ContextRecord;
+    for (int depth = 0; depth < 96 && ctx.Rip && c.nframes < (int)(sizeof c.frames / sizeof *c.frames); depth++) {
+        if (ctx.Rip - base < mi.SizeOfImage && ctx.Rip != rip) c.frames[c.nframes++] = ctx.Rip;
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &image, NULL);
+        if (fe) {
+            void *handler_data;
+            DWORD64 frame;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, fe, &ctx, &handler_data, &frame, NULL);
+        } else if (plat_mem_readable(ctx.Rsp, 8)) {
+            ctx.Rip = *(const DWORD64 *)(uintptr_t)ctx.Rsp, ctx.Rsp += 8;
+        } else {
+            break;
+        }
+    }
+    crash_fn(&c);   // ends the process (71)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -634,9 +699,63 @@ static void invalid_parameter(const wchar_t *expr, const wchar_t *func, const wc
     crash_from_runtime("invalid parameter to a C runtime function", 0xc0000417u);   // STATUS_INVALID_CRUNTIME_PARAMETER
 }
 
+// While a thread is suspended nothing here may take a lock it could hold (the heap's, the C runtime's): only its
+// context is read and its stack unwound, into memory that exists already. Names and the callback come after it runs
+// again.
+int plat_threads_report(void (*fn)(const PlatThreadStack *t, void *arg), void *arg) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    DWORD pid = GetCurrentProcessId(), self = GetCurrentThreadId();
+    THREADENTRY32 te = {.dwSize = sizeof te};
+    int n = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE,
+                              te.th32ThreadID);
+        if (!h) continue;
+        static PlatThreadStack t;   // one report at a time (the caller's own guard)
+        static CONTEXT ctx;
+        memset(&t, 0, sizeof t);
+        t.id = te.th32ThreadID;
+        if (SuspendThread(h) != (DWORD)-1) {
+            ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+            if (GetThreadContext(h, &ctx)) {
+                for (int depth = 0; depth < 96 && ctx.Rip && t.nframes < (int)(sizeof t.frames / sizeof *t.frames); depth++) {
+                    t.frames[t.nframes++] = (uintptr_t)ctx.Rip;
+                    DWORD64 image = 0;
+                    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &image, NULL);
+                    if (fe) {
+                        void *handler_data;
+                        DWORD64 frame;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, fe, &ctx, &handler_data, &frame, NULL);
+                    } else {   // a leaf function: its return address is at rsp
+                        MEMORY_BASIC_INFORMATION mbi;
+                        if (!VirtualQuery((void *)(uintptr_t)ctx.Rsp, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+                            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                            break;
+                        ctx.Rip = *(const DWORD64 *)(uintptr_t)ctx.Rsp, ctx.Rsp += 8;
+                    }
+                }
+            }
+            ResumeThread(h);
+        }
+        PWSTR desc = NULL;
+        if (SUCCEEDED(GetThreadDescription(h, &desc)) && desc && *desc)
+            WideCharToMultiByte(CP_UTF8, 0, desc, -1, t.name, sizeof t.name, NULL, NULL);
+        t.name[sizeof t.name - 1] = 0;
+        if (desc) LocalFree(desc);
+        CloseHandle(h);
+        fn(&t, arg);
+        n++;
+    }
+    CloseHandle(snap);
+    return n;
+}
+
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     AddVectoredExceptionHandler(0, crash_veh);
+    crash_prev_filter = SetUnhandledExceptionFilter(crash_unhandled);
     signal(SIGABRT, abort_signal);
     _set_invalid_parameter_handler(invalid_parameter);
 }
@@ -1101,6 +1220,13 @@ size_t plat_getenv(const char *name, char *out, size_t cap) {
 
 uint32_t plat_thread_id(void) { return GetCurrentThreadId(); }
 
+int plat_display_size(int *w, int *h) {
+    DEVMODEW dm = {.dmSize = sizeof dm};   // the mode in pixels, whatever the display scale
+    if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) || !dm.dmPelsWidth || !dm.dmPelsHeight) return 0;
+    *w = (int)dm.dmPelsWidth, *h = (int)dm.dmPelsHeight;
+    return 1;
+}
+
 const char *plat_ui_language(void) {
     static char tag[LOCALE_NAME_MAX_LENGTH];
     static int done;
@@ -1418,6 +1544,42 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb) {
     PROCESS_MEMORY_COUNTERS_EX pmc;
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc))
         *proc_mb = (double)(pmc.PrivateUsage >> 20);
+}
+
+double plat_commit_growth_mb(void) {
+    // NtQuerySystemInformation(SystemPageFileInformationEx): each page file's size and its minimum and maximum, in
+    // pages. A page file Windows manages itself ("?:\pagefile.sys") reports the most it may grow to.
+    typedef struct {
+        ULONG next, size, in_use, peak;
+        struct { USHORT length, maximum; PWSTR buffer; } name;
+        ULONG minimum, maximum;
+    } PageFileEx;
+    typedef LONG(NTAPI *QueryFn)(ULONG, PVOID, ULONG, PULONG);
+    QueryFn query = (QueryFn)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
+    if (!query) return 0;
+    ULONG_PTR buf[2048];   // 16 KiB, aligned for the entries
+    ULONG len = 0;
+    if (query(144, buf, sizeof buf, &len) < 0 || len < sizeof(PageFileEx)) return 0;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    double page_mb = si.dwPageSize / 1048576.0, growth = 0;
+    for (const unsigned char *p = (const unsigned char *)buf;;) {
+        const PageFileEx *e = (const PageFileEx *)p;
+        if (e->maximum > e->size) {
+            double room = (double)(e->maximum - e->size) * page_mb, disk = 0;
+            // The name is "\??\C:\pagefile.sys": the disk is the letter before the first colon
+            const wchar_t *colon = e->name.buffer ? wmemchr(e->name.buffer, L':', e->name.length / 2) : NULL;
+            ULARGE_INTEGER free_bytes;
+            if (colon && colon > e->name.buffer) {
+                wchar_t root[4] = {colon[-1], L':', L'\\', 0};
+                if (GetDiskFreeSpaceExW(root, &free_bytes, NULL, NULL)) disk = free_bytes.QuadPart / 1048576.0 - 2048;
+            }
+            growth += room < disk ? room : disk > 0 ? disk : 0;
+        }
+        if (!e->next || (size_t)(p - (const unsigned char *)buf) + e->next + sizeof(PageFileEx) > len) break;
+        p += e->next;
+    }
+    return growth;
 }
 
 void plat_commit_in(const uint64_t *base, const uint64_t *size, int n, uint64_t *in) {

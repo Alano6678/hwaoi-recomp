@@ -5,8 +5,8 @@
 //
 // F1 or Esc on the keyboard and Minus and Plus held together (consumed in poll_merged, input_menu_gate in input.h) open it;
 // F1, Esc, B or "Continue" close it. While it is open the game gets no input (input_menu, input.h) and keeps running; the
-// cursor is released from the mouse camera. Tabs Screen, Game, Sound, Controls and Menu (L / R or Q / E switch them) hold
-// option rows (ui/option_rows.h) over the cfg settings; the bottom row has "Continue" and "Quit game".
+// cursor is released from the mouse camera. The rail's Screen, Game, Sound, Controls, Menu and Advanced pages (L / R or
+// Q / E switch them) hold option rows (ui/option_rows.h); the action bar has "Quit game" and "Continue".
 // Test hooks (ui/menu.cpp): TOTK_MENU_TEST=<frame>[:<frames per page>] opens the menu at that presented frame and saves
 // one swapchain shot per tab into TOTK_MENU_TEST_DIR; TOTK_MENU_TEST_SET=<frame>:<key>=<value>[,...][;...] sets settings
 // at given frames without input (SAVE=1 writes totk.ini).
@@ -64,6 +64,8 @@ int menu_font_check(void);
 // ---- what the menu asks of the platform side (gfx_window_win.c, gfx_window_sdl.c)
 void gfx_window_apply_settings(void);     // TOTK_FULLSCREEN or TOTK_WINDOW_SIZE changed: the window follows
 void gfx_window_request_close(void);      // as the window's close button: the process ends
+int gfx_restart_available(void);          // the launcher starts the game again on AOD_RESTART_EXIT (gfx_present.c)
+void gfx_request_restart(void);           // close as above, ending with that exit code
 int gfx_window_monitor_size(int *w, int *h);   // pixels of the monitor the window is on; 0 when unknown
 double gfx_window_refresh_hz(void);            // its refresh rate (TOTK_FPS_LIMIT=display); 0 when unknown
 unsigned gfx_window_dpi(void);                 // the window's DPI (96 at 100% display scale); any thread

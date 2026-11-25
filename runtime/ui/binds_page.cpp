@@ -7,6 +7,7 @@
 #include "imgui.h"
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
+#include "ui/theme.h"
 
 extern "C" {
 #include "cfg.h"
@@ -95,10 +96,42 @@ static const char *key_label(int k, char *buf, size_t n) {
     return buf;
 }
 
-// A gamepad button: the label the open pad has on a face button, else its place on the pad.
+// The gamepad of the player whose bindings the rows show (binds_rows); g_pad_ok 0 when that player has none, and the
+// cells then name buttons as the gamepad the menu shows.
+static InputPadInfo g_pad;
+static bool g_pad_ok;
+
+static int pad_family_of_type(int type) {   // SDL_GamepadType: 2, 3 Xbox; 4..6 PlayStation; 7..11 Nintendo
+    return type == 2 || type == 3 ? PAD_FAMILY_XBOX : type >= 4 && type <= 6 ? PAD_FAMILY_PLAYSTATION
+         : type >= 7 ? PAD_FAMILY_NINTENDO : PAD_FAMILY_GENERIC;
+}
+
+// A gamepad button as that gamepad names it: the label on a face button, the maker's own name of a shoulder button,
+// trigger, stick click or menu button (LB / L1 / L, View / Create / -), else its place on the pad.
 static const char *pad_label(int p) {
     if (p == PAD_NONE) return "";
-    switch (input_pad_label(p)) {
+    int type = g_pad_ok ? g_pad.type : input_pad_type();
+    int family = g_pad_ok ? g_pad.family : pad_family_of_type(type);
+    if (family == PAD_FAMILY_XBOX) {
+        switch (p) {
+        case PAD_L: return "LB"; case PAD_R: return "RB"; case PAD_ZL: return "LT"; case PAD_ZR: return "RT";
+        case PAD_LSTICK: return "LS"; case PAD_RSTICK: return "RS";
+        case PAD_START: return "Menu"; case PAD_BACK: return "View";
+        }
+    } else if (family == PAD_FAMILY_PLAYSTATION) {
+        switch (p) {
+        case PAD_L: return "L1"; case PAD_R: return "R1"; case PAD_ZL: return "L2"; case PAD_ZR: return "R2";
+        case PAD_LSTICK: return "L3"; case PAD_RSTICK: return "R3";
+        case PAD_START: return type == 4 ? "Start" : "Options";
+        case PAD_BACK: return type == 6 ? "Create" : type == 5 ? "Share" : "Select";
+        }
+    } else if (family == PAD_FAMILY_NINTENDO) {
+        switch (p) {
+        case PAD_L: return "L"; case PAD_R: return "R"; case PAD_ZL: return "ZL"; case PAD_ZR: return "ZR";
+        case PAD_START: return "+"; case PAD_BACK: return "-";
+        }
+    }
+    switch (g_pad_ok && p >= PAD_SOUTH && p <= PAD_NORTH ? g_pad.labels[p - PAD_SOUTH] : input_pad_label(p)) {
     case PAD_LABEL_A: return "A";
     case PAD_LABEL_B: return "B";
     case PAD_LABEL_X: return "X";
@@ -111,10 +144,34 @@ static const char *pad_label(int p) {
     return menu_text((UiTextId)(UI_PAD_SOUTH + (p - PAD_SOUTH)));
 }
 
-// The layout the gamepad cells show: the one in effect, or without a gamepad the one the setting names (Xbox for auto).
-static int shown_layout(void) {
+// The layout the hints show: the one in effect for the gamepad the menu shows, or without a gamepad the one the
+// setting names.
+static int hint_layout(void) {
     int l = input_pad_layout();
-    return l >= 0 ? l : input_pad_layout_pick(cfg_value("TOTK_PAD_LAYOUT"), 0);
+    return l >= 0 ? l : input_pad_layout_pick(cfg_value("TOTK_PAD_LAYOUT"));
+}
+
+// The layout the gamepad cells show and change: the shown player's gamepad's, else as the hints.
+static int shown_layout(void) {
+    if (g_pad_ok) return g_pad.layout;
+    int l = input_pad_layout();
+    return l >= 0 ? l : input_pad_layout_pick(cfg_value("TOTK_PAD_LAYOUT"));
+}
+
+const char *binds_pad_hint(int action, const char *fallback, int *face_label) {
+    if (face_label) *face_label = PAD_LABEL_NONE;
+    InputMap m;
+    input_map_snapshot_player(0, &m);
+    uint8_t p[INPUT_PAD_BINDING_MAX];
+    int n = input_map_pads_of(&m, action, hint_layout(), p, INPUT_PAD_BINDING_MAX);
+    if (!n) return fallback;
+    if (face_label) *face_label = input_pad_label(p[0]);
+    if (p[0] >= PAD_SOUTH && p[0] <= PAD_NORTH && input_pad_label(p[0]) == PAD_LABEL_NONE) return fallback;
+    bool rows_pad = g_pad_ok;   // the hints name the gamepad the menu shows, not the bindings rows' player's
+    g_pad_ok = false;
+    const char *name = pad_label(p[0]);
+    g_pad_ok = rows_pad;
+    return name;
 }
 
 // Writes the bind_ line of every action whose line for m differs from the one set; a line at the defaults goes away.
@@ -228,7 +285,10 @@ static void capture_window(void) {
         int left = CAPTURE_SECONDS - (int)((now - g_cap.start) / 1000000000ull);
         snprintf(t, sizeof t, menu_text(UI_BINDS_CANCEL_HINT), left < 1 ? 1 : left);
         ImGui::TextDisabled("%s", t);
-        ImGui::Button(menu_text(UI_BINDS_UNBIND));   // acted on through the capture above
+        const char *unbind = menu_text(UI_BINDS_UNBIND);
+        float scale = theme::fonts().text->FontSize / 25.0f;
+        // Acted on through the capture above.
+        theme::button(unbind, ImVec2(ImGui::CalcTextSize(unbind).x + 40 * scale, 50 * scale), scale, false);
         g_unbind_hot = !g_cap.done && ImGui::IsItemHovered();
         if (g_cap.done && now - g_cap.done > kDoneNs) {
             ImGui::CloseCurrentPopup();
@@ -252,6 +312,7 @@ void binds_rows(float scale) {
     g_player = strcmp(cfg_value("TOTK_BINDS_PLAYER"), "2") ? 0 : 1;
     InputMap m;
     input_map_snapshot_player(g_player, &m);
+    g_pad_ok = input_player_pad(g_player, &g_pad) != 0;
     int layout = shown_layout();
     opt_group(UI_BINDS_GROUP_BUTTONS);
     // Which player's bindings the rows below show and change; A or a click switches player
@@ -261,6 +322,8 @@ void binds_rows(float scale) {
     if (shown != g_player) {   // the rows below follow at once
         g_player = shown;
         input_map_snapshot_player(g_player, &m);
+        g_pad_ok = input_player_pad(g_player, &g_pad) != 0;
+        layout = shown_layout();
     }
     opt_text(UI_BINDS_HELP);
     opt_bind_header(UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD);

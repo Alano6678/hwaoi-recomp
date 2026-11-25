@@ -6,9 +6,10 @@
 // player 1 is the handheld controller (id 0x20, style bit 1) while the game accepts handheld; HWAoI's two-player mode
 // drops handheld from its styles, and player 1 is then id 0 again, as on a console with its Joy-Cons detached. Each
 // player's controller is a Pro Controller (full-key, style bit 0) or a Joy-Con pair (bit 2) after TOTK_PLAYER<n>_TYPE.
-// Player 2 is connected only while it has a device. Mouse and keyboard report no input. Each controller has two
-// vibration devices (left, right) played on its player's gamepad motors (TOTK_RUMBLE=0: none) and a six-axis sensor fed
-// by its gamepad's gyro and accelerometer (TOTK_MOTION=0, live: reads at rest). State layouts follow libnx HID.
+// Player 2 is connected only while it has a device. Mouse and keyboard report no input (the game makes neither: see
+// ov_initialize_mouse). Each controller has two vibration devices (left, right) played on its player's gamepad motors
+// (TOTK_RUMBLE=0: none) and a six-axis sensor fed by its gamepad's gyro and accelerometer (TOTK_MOTION=0, live: reads
+// at rest). State layouts follow libnx HID.
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -138,6 +139,11 @@ static void npad_read_state(NpadState *out, uint32_t id, uint32_t want) {
     else
         s.buttons = 0, s.lx = s.ly = s.rx = s.ry = 0;
     *out = s;
+    // The menus' confirm and back follow the device just polled (input.h input_confirm_bottom), before the game's
+    // input manager reads its actions from this state in the same frame.
+    static int confirm_set = -2;
+    if (confirm_set == -2) confirm_set = rt_patch_set("hwaoi_confirm");
+    if (confirm_set >= 0) rt_patch_switch(confirm_set, input_confirm_bottom());
 }
 static void npad_states(Cpu *c, uint32_t want) {
     int max = (int)arg_x(c, 1);
@@ -226,11 +232,19 @@ static void ov_controller_support(Cpu *c) {
     ret_x(c, 0);
 }
 
+// The USB mouse and keyboard. HWAoI 1.0.3 never calls these: its engine's mouse and keyboard devices (main 0x70006f73fc
+// and 0x70006f5b0c, polled by its input manager at 0x70006c2580) are made only when the manager's settings ask for
+// them, and this build's do not (none of these calls in a start, the title menus and the world map, 13,440 frames).
+// Its map cursor moves with the left stick. The Joy-Con 2's mouse (the SDK's MouseHandle overloads) is not imported.
+// So a connected mouse here would change nothing: the PC mouse plays through the controller (input_map.c, the mouse
+// camera). The log says if a game version ever makes them.
 static void ov_initialize_mouse(Cpu *c) {
     (void)c;
     plat_mutex_lock(&lock);
     mouse_ready = 1;
     plat_mutex_unlock(&lock);
+    static volatile int32_t logged;
+    if (!plat_xchg32(&logged, 1)) rt_log("hid: the game initialized the mouse (reported as not connected)");
 }
 
 static void ov_initialize_keyboard(Cpu *c) {
@@ -238,6 +252,8 @@ static void ov_initialize_keyboard(Cpu *c) {
     plat_mutex_lock(&lock);
     keyboard_ready = 1;
     plat_mutex_unlock(&lock);
+    static volatile int32_t logged;
+    if (!plat_xchg32(&logged, 1)) rt_log("hid: the game initialized the keyboard (reported with no key down)");
 }
 
 // int GetMouseStates(MouseState *out, int count): a mouse that is not connected

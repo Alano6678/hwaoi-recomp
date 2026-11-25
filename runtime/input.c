@@ -17,6 +17,13 @@
 #include "host.h"
 #include "input.h"
 #include "input_map.h"
+#if __has_include("aod_nintendo.h")
+#include "aod_nintendo.h"
+#else
+static inline int aod_nintendo_start(const char *path, int test) { (void)path; (void)test; return 0; }
+static inline void aod_nintendo_tick(void) {}
+static inline void aod_nintendo_stop(void) {}
+#endif
 #include "input_wsys.h"
 #include "nvn_api.h"
 #include "ui/menu.h"
@@ -37,18 +44,45 @@ typedef struct {
     SDL_JoystickID id;
     char name[64], guid[33];
     int rumble;                      // has rumble motors
-    int east_a;                      // labels its east face button A (Nintendo layout under TOTK_PAD_LAYOUT=auto)
     int layout;                      // PAD_LAYOUT_* in effect, -1 to pick again; live (cfg_version)
     unsigned layout_seen;
     int32_t labels[4];               // labels of its south, east, west, north buttons (PAD_LABEL_*)
     int sensor_set, sensor_ok;       // the motion thread set its sensors up; it has both, enabled
+    int type, switch2;               // SDL_GamepadType; a Switch 2 controller (by USB ids)
+    int trigger_rumble, motion, light, back_buttons;   // what SDL says it has
+    uint64_t used_ns;                // when a button or a stick of it was last held (plat_now_ns), 0 never
 } Pad;
 static Pad pads[MAX_PADS];
 static int npads;
 static unsigned pads_version;        // bumped whenever a gamepad opens or closes
+static uint64_t kb_used_ns;          // when a key or the mouse was last used (under lock, or the window thread's note)
+static volatile int32_t kb_active;   // the keyboard or the mouse was used after every gamepad (any thread)
+
+// The host window is not an SDL window. Gate virtual and physical pads explicitly,
+// including a held button when returning from the launcher's overlay. Under lock.
+static int pad_focus_gate(int slot, uint64_t *buttons, int32_t left[2], int32_t right[2]) {
+    static unsigned seen[INPUT_PLAYERS + 2];
+    static uint64_t blocked[INPUT_PLAYERS + 2];
+    unsigned epoch = gfx_window_focus_messages();
+    if (SDL_GetHintBoolean("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", false)) {
+        seen[slot] = epoch; blocked[slot] = 0; return 0;
+    }
+    int focused = ikb_foreground(), reset = !focused || seen[slot] != epoch;
+    if (reset) blocked[slot] |= *buttons;
+    seen[slot] = epoch;
+    blocked[slot] &= *buttons;
+    *buttons &= ~blocked[slot];
+    if (!focused) {
+        *buttons = 0;
+        left[0] = left[1] = right[0] = right[1] = 0;
+    }
+    return reset;
+}
 
 static volatile int32_t pad_labels[4];           // player 1's gamepad's face labels, for the menu (any thread)
+static volatile int32_t pad_type_shown;
 static volatile int32_t pad_layout_shown = -1;   // player 1's gamepad's layout for the menu (any thread), -1 without one
+static volatile int32_t pad_family_shown = -1;   // its PAD_FAMILY_* (input_confirm_bottom; any thread), -1 without one
 static int motion_thread;            // 0 not started, 1 running, -1 off (TOTK_MOTION=0, no SDL)
 
 // SDL buttons of the gamepad inputs (input_map.h PAD_*), by position; PAD_ZL and PAD_ZR are the triggers (axes).
@@ -330,18 +364,30 @@ static void scan_pads(void) {
         snprintf(p->name, sizeof p->name, "%s", name && *name ? name : "Gamepad");
         SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), p->guid, sizeof p->guid);
         p->rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(g), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
-        p->east_a = SDL_GetGamepadButtonLabel(g, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
         for (int k = 0; k < 4; k++) p->labels[k] = label_of(SDL_GetGamepadButtonLabel(g, pad_sdl[PAD_SOUTH + k]));
         pads_version++;
         int motion = SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL);
+        SDL_PropertiesID props = SDL_GetGamepadProperties(g);
+        uint16_t vendor = SDL_GetGamepadVendor(g), product = SDL_GetGamepadProduct(g);
+        p->type = (int)SDL_GetGamepadType(g);
+        // Switch 2: Joy-Con 2 right and left, Pro Controller 2, the NSO GameCube controller
+        p->switch2 = vendor == 0x057e && (product == 0x2066 || product == 0x2067 || product == 0x2069 || product == 0x2073);
+        p->motion = motion;
+        p->trigger_rumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+        p->light = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false) ||
+                   SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_PLAYER_LED_BOOLEAN, false);
+        p->back_buttons = SDL_GamepadHasButton(g, SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) ||
+                          SDL_GamepadHasButton(g, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1);
         rt_log("input: gamepad \"%s\" (%s, %s, east button %s)", p->name, p->rumble ? "rumble" : "no rumble",
-               motion ? "gyro and accelerometer" : "no motion sensors", p->east_a ? "labelled A" : "not labelled A");
+               motion ? "gyro and accelerometer" : "no motion sensors",
+               p->labels[PAD_EAST - PAD_SOUTH] == PAD_LABEL_A ? "labelled A" : "not labelled A");
     }
     SDL_free(ids);
 }
 
 // Under lock: look for gamepads plugged in or out (once a second) and read the open ones' current reports.
 static void pads_tick(void) {
+    aod_nintendo_tick();
     uint64_t now_ms = plat_now_ns() / 1000000u;
     if (now_ms >= next_scan) {
         next_scan = now_ms + RESCAN_MS;
@@ -357,9 +403,11 @@ static int pad_layout_get(Pad *p) {
     p->layout_seen = ver;
     int was = p->layout;
     const char *set = cfg_value("TOTK_PAD_LAYOUT");
-    p->layout = input_pad_layout_pick(set, p->east_a);
+    p->layout = input_pad_layout_pick(set);
     if (p->layout != was)
-        rt_log("input: \"%s\" layout %s (pad_layout = %s)", p->name, p->layout == PAD_LAYOUT_XBOX ? "xbox" : "nintendo", set);
+        rt_log("input: \"%s\" layout %s (pad_layout = %s)", p->name,
+               p->layout == PAD_LAYOUT_XBOX ? "xbox: A is the bottom button" : "nintendo: every button where a Switch controller has it",
+               set);
     return p->layout;
 }
 
@@ -384,6 +432,9 @@ static const char *player_device(int p) {
     return v && *v ? v : "auto";
 }
 
+static unsigned shown_seen = ~0u;    // shown_update below: the settings and gamepads it last looked at
+static int shown_pad = -2;           // ... and the gamepad it chose (-1 none)
+
 // Under lock: pad_owner and kb_owner for the current settings and gamepads; logs each change.
 static void assign(void) {
     unsigned v = cfg_version();
@@ -396,10 +447,24 @@ static void assign(void) {
     for (int p = 0; p < INPUT_PLAYERS; p++) {
         if (!strcmp(dev[p], "keyboard") && kb_owner < 0) kb_owner = p;
         if (strncmp(dev[p], "pad:", 4)) continue;
-        for (int i = 0; i < npads; i++) {
+        int found = 0;
+        for (int i = 0; i < npads && !found; i++) {
             char val[64];
             pad_value(i, val, sizeof val);
-            if (pad_owner[i] < 0 && !strcmp(val, dev[p])) { pad_owner[i] = p; break; }
+            if (pad_owner[i] < 0 && !strcmp(val, dev[p])) pad_owner[i] = p, found = 1;
+        }
+        // Launchers up to 0.1.2 counted the gamepads of one model from 1, the runtime from 0: a value that names one
+        // past the last connected gamepad of its model is the last one.
+        const char *colon = strrchr(dev[p], ':');
+        size_t stem = colon ? (size_t)(colon - dev[p]) + 1 : 0;
+        for (int i = npads - 1; i >= 0 && !found && stem; i--) {
+            char val[64], next[64];
+            pad_value(i, val, sizeof val);
+            if (pad_owner[i] >= 0 || strncmp(val, dev[p], stem)) continue;
+            snprintf(next, sizeof next, "%.*s%d", (int)stem, val, atoi(val + stem) + 1);
+            int later = 0;
+            for (int j = i + 1; j < npads; j++) later |= !strcmp(pads[j].guid, pads[i].guid);
+            if (!later && !strcmp(next, dev[p])) pad_owner[i] = p, found = 1;
         }
     }
     for (int p = 0; p < INPUT_PLAYERS; p++) {
@@ -425,12 +490,34 @@ static void assign(void) {
         snprintf(last, sizeof last, "%s", summary);
         rt_log("input: %s", summary);
     }
-    // The menu's labels and layout follow player 1's gamepad.
-    int first = -1;
-    for (int i = 0; i < npads && first < 0; i++)
-        if (pad_owner[i] == 0) first = i;
-    plat_xchg32(&pad_layout_shown, first < 0 ? -1 : pad_layout_get(&pads[first]));
-    for (int k = 0; k < 4; k++) plat_xchg32(&pad_labels[k], first < 0 ? PAD_LABEL_NONE : pads[first].labels[k]);
+    shown_seen = ~0u;   // the gamepad the menu shows is picked again (shown_update)
+}
+
+static int pad_family(const Pad *p);
+
+// Under lock: the gamepad whose labels and layout the menu shows: the one used last, else player 1's first; and
+// whether the keyboard or the mouse was used after every gamepad.
+static void shown_update(void) {
+    int last = -1;
+    for (int i = 0; i < npads; i++)
+        if (pads[i].used_ns && (last < 0 || pads[i].used_ns > pads[last].used_ns)) last = i;
+    plat_xchg32(&kb_active, kb_used_ns && (last < 0 || kb_used_ns > pads[last].used_ns));
+    for (int i = 0; i < npads && last < 0; i++)
+        if (pad_owner[i] == 0) last = i;
+    unsigned ver = cfg_version() + pads_version * 65537u;
+    if (last == shown_pad && ver == shown_seen) return;
+    shown_pad = last, shown_seen = ver;
+    plat_xchg32(&pad_layout_shown, last < 0 ? -1 : pad_layout_get(&pads[last]));
+    plat_xchg32(&pad_type_shown, last < 0 ? 0 : pads[last].type);
+    plat_xchg32(&pad_family_shown, last < 0 ? -1 : pad_family(&pads[last]));
+    for (int k = 0; k < 4; k++) plat_xchg32(&pad_labels[k], last < 0 ? PAD_LABEL_NONE : pads[last].labels[k]);
+}
+
+int input_confirm_bottom(void) {
+    const char *v = cfg_value("TOTK_CONFIRM_BUTTON");
+    if (!v || !strcmp(v, "right") || plat_cas32(&kb_active, 0, 0)) return 0;
+    int family = (int)plat_cas32(&pad_family_shown, 0, 0);
+    return family >= 0 && (!strcmp(v, "bottom") || family != PAD_FAMILY_NINTENDO);
 }
 
 // The TOTK_BIND_* values last applied, one per line; the tables are built again when one changes (the menu's remapping rows write
@@ -487,12 +574,28 @@ static void test_pad_attach(void) {
     rt_log("input: test gamepad attached, sticks at %d,%d %d,%d", v[0], v[1], v[2], v[3]);
 }
 
+// SDL's own HIDAPI drivers for every pad the game can be played with, so they work natively (rumble, gyro, Joy-Con
+// pairs) without Steam Input or virtual drivers: DualShock 4, DualSense, Switch Pro, Joy-Con (paired into one pad),
+// Switch 2 Pro Controller and Joy-Con 2, NSO GameCube. libusb is asked for where SDL has it (wired Switch 2 pads on
+// Windows). Default priority: an SDL_* environment variable the player set still wins. Names as strings, so an older
+// SDL without a hint simply ignores it.
+static void hidapi_hints(void) {
+    static const char *const on[] = {
+        "SDL_JOYSTICK_HIDAPI", "SDL_JOYSTICK_HIDAPI_PS4", "SDL_JOYSTICK_HIDAPI_PS5", "SDL_JOYSTICK_HIDAPI_SWITCH",
+        "SDL_JOYSTICK_HIDAPI_SWITCH2", "SDL_JOYSTICK_HIDAPI_JOY_CONS", "SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS",
+        "SDL_JOYSTICK_HIDAPI_GAMECUBE", "SDL_HIDAPI_LIBUSB",
+    };
+    for (size_t i = 0; i < sizeof on / sizeof *on; i++) SDL_SetHintWithPriority(on[i], "1", SDL_HINT_DEFAULT);
+}
+
 static void start(void) {
     binds_refresh();
     const char *e = cfg_get("TOTK_INPUT");
     if (e && !strcmp(e, "none")) { state = -1; rt_log("input: disabled (TOTK_INPUT=none)"); return; }
+    hidapi_hints();
     if (!SDL_Init(SDL_INIT_GAMEPAD)) { state = -1; rt_log("input: SDL gamepad init failed (%s), keyboard only", SDL_GetError()); }
     else state = 1;
+    if (state == 1 && aod_nintendo_start(getenv("AOD_NINTENDO_BRIDGE"), 0)) atexit(aod_nintendo_stop);
     if (state == 1) test_pad_attach();
     if (state == 1) {
         scan_pads();
@@ -536,6 +639,10 @@ static int pad_read(Pad *pp, const InputMap *map, uint64_t *b, int32_t sl[2], in
     int32_t l[2], r[2];
     stick(pp->g, SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, dead, l);
     stick(pp->g, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, dead, r);
+    // In use: a button held, or a stick pushed past half way (a resting stick that drifts does not count)
+    int used = abs(l[0]) > STICK_DIR || abs(l[1]) > STICK_DIR || abs(r[0]) > STICK_DIR || abs(r[1]) > STICK_DIR;
+    for (int p = PAD_SOUTH; p < PAD_COUNT && !used; p++) used = pd[p];
+    if (used) pp->used_ns = plat_now_ns();
     pick(&sl[0], &sl[1], l[0], l[1]);
     pick(&sr[0], &sr[1], r[0], r[1]);
     return 1;
@@ -603,6 +710,7 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
     int connected = p == 0;
+    int focus_reset = 0;
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state > 0) {
@@ -612,7 +720,9 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
         if (state == 1)
             for (int i = 0; i < npads; i++)
                 if (pad_owner[i] == p) connected |= 1, pad_read(&pads[i], input_map_player(p), &b, sl, sr);
+        shown_update();
         if (kb_owner == p) connected = 1;
+        focus_reset = pad_focus_gate(p, &b, sl, sr);
         if (kb_owner == p && ikb_foreground()) {
             uint8_t down[KEY_COUNT] = {0};
             // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
@@ -637,6 +747,9 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
             pick(&sr[0], &sr[1], k[0], k[1]);
             mouse_camera(k);
             pick(&sr[0], &sr[1], k[0], k[1]);
+            int used = k[0] || k[1];
+            for (int i = 1; i < KEY_COUNT && !used; i++) used = down[i];
+            if (used) kb_used_ns = plat_now_ns();
         }
     }
     if (p == 0) {
@@ -651,6 +764,7 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
     static uint64_t menu_down_at[INPUT_PLAYERS];
     static int menu_held_minus[INPUT_PLAYERS], menu_press_ignored[INPUT_PLAYERS];
     int menu_tap = 0;
+    if (focus_reset) { menu_down_at[p] = 0; menu_held_minus[p] = 0; menu_press_ignored[p] = 1; }
     if (b & 1ull << B_MENU) {
         uint64_t t = plat_now_ns();
         if (!menu_down_at[p]) menu_down_at[p] = t ? t : 1, menu_press_ignored[p] = menu_binding_capture();
@@ -765,13 +879,150 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     if (state > 0) binds_refresh();
     if (state == 1) {
         pads_tick();
+        assign();
         for (int i = 0; i < npads; i++) ok |= pad_read(&pads[i], &input_map, &b, sl, sr);
+        shown_update();
     }
+    pad_focus_gate(INPUT_PLAYERS, &b, sl, sr);
     plat_mutex_unlock(&lock);
     *buttons = b;
     *lx = sl[0];
     *ly = sl[1];
     return ok;
+}
+
+// ---- the connected devices, for the menu
+static int pad_family(const Pad *p) {
+    return p->type == SDL_GAMEPAD_TYPE_XBOX360 || p->type == SDL_GAMEPAD_TYPE_XBOXONE ? PAD_FAMILY_XBOX
+         : p->type == SDL_GAMEPAD_TYPE_PS3 || p->type == SDL_GAMEPAD_TYPE_PS4 || p->type == SDL_GAMEPAD_TYPE_PS5
+               ? PAD_FAMILY_PLAYSTATION
+         : p->type >= SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || p->switch2 || p->labels[PAD_EAST - PAD_SOUTH] == PAD_LABEL_A
+               ? PAD_FAMILY_NINTENDO   // also a pad of another maker that prints A on its east button
+               : PAD_FAMILY_GENERIC;
+}
+
+static void pad_info(int i, InputPadInfo *o) {
+    const Pad *p = &pads[i];
+    memset(o, 0, sizeof *o);
+    pad_value(i, o->value, sizeof o->value);
+    int same = 0, k = 0;
+    for (int j = 0; j < npads; j++) same += !strcmp(pads[j].guid, p->guid), k += j < i && !strcmp(pads[j].guid, p->guid);
+    if (same > 1) snprintf(o->name, sizeof o->name, "%s #%d", p->name, k + 1);
+    else snprintf(o->name, sizeof o->name, "%s", p->name);
+    o->type = p->type, o->switch2 = p->switch2;
+    o->family = pad_family(p);
+    o->player = pad_owner[i];
+    SDL_JoystickConnectionState c = SDL_GetGamepadConnectionState(p->g);
+    o->wired = c == SDL_JOYSTICK_CONNECTION_WIRED ? 1 : c == SDL_JOYSTICK_CONNECTION_WIRELESS ? 0 : -1;
+    int percent = -1;
+    SDL_PowerState power = SDL_GetGamepadPowerInfo(p->g, &percent);
+    o->battery = power == SDL_POWERSTATE_ERROR || power == SDL_POWERSTATE_UNKNOWN || power == SDL_POWERSTATE_NO_BATTERY
+                     ? -1 : percent;
+    o->rumble = p->rumble, o->trigger_rumble = p->trigger_rumble, o->motion = p->motion, o->light = p->light;
+    o->back_buttons = p->back_buttons;
+    o->layout = pad_layout_get(&pads[i]);
+    for (int b = 0; b < 4; b++) o->labels[b] = p->labels[b];
+}
+
+int input_pads(InputPadInfo *out, int max) {
+    int n = 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state == 1) {
+        pads_tick();
+        assign();
+        for (; n < npads && n < max; n++) pad_info(n, &out[n]);
+    }
+    plat_mutex_unlock(&lock);
+    return n;
+}
+
+int input_player_pad(int player, InputPadInfo *out) {
+    int found = 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state == 1) {
+        pads_tick();
+        assign();
+        for (int i = 0; i < npads && !found; i++)
+            if (pad_owner[i] == player) pad_info(i, out), found = 1;
+    }
+    plat_mutex_unlock(&lock);
+    return found;
+}
+
+int input_keyboard_player(void) {
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state > 0) assign();
+    int p = state > 0 ? kb_owner : -1;
+    plat_mutex_unlock(&lock);
+    return p;
+}
+
+int input_pad_identify(int index) {
+    int ok = 0;
+    plat_mutex_lock(&lock);
+    if (state == 1 && index >= 0 && index < npads && pads[index].rumble)
+        ok = SDL_RumbleGamepad(pads[index].g, 0x5000, 0x9000, 350);
+    plat_mutex_unlock(&lock);
+    return ok;
+}
+
+int input_rumble_preview(void) {
+    // A game rumble of middle strength on each motor (the HD rumble's usual amplitudes), as ov_input.c drives it
+    double s = cfg_double("TOTK_RUMBLE_STRENGTH"), c = cfg_double("TOTK_RUMBLE_CURVE");
+    float strength = (float)(s < 0 ? 0 : s > 300 ? 3 : s / 100), curve = (float)(c < 0.2 ? 0.2 : c > 1.5 ? 1.5 : c);
+    uint16_t low = rumble_motor(0.35f, curve, strength), high = rumble_motor(0.6f, curve, strength);
+    int triggers = input_rumble_triggers_enabled(), ok = 0;
+    plat_mutex_lock(&lock);
+    for (int i = 0; state == 1 && i < npads; i++) {
+        if (!pads[i].rumble) continue;
+        ok |= SDL_RumbleGamepad(pads[i].g, low, high, 300);
+        if (triggers) SDL_RumbleGamepadTriggers(pads[i].g, high, high, 300);   // unsupported pads return false
+    }
+    plat_mutex_unlock(&lock);
+    return ok;
+}
+
+int input_keyboard_active(void) { return (int)plat_cas32(&kb_active, 0, 0); }
+
+void input_prompt_state(InputPromptState *o) {
+    memset(o, 0, sizeof *o);
+    o->keyboard = 1;
+    o->layout = -1;
+    plat_mutex_lock(&lock);
+    if (state > 0) {   // never the call that starts the input: this runs on the graphics threads
+        binds_refresh();
+        int pad = -1;
+        if (state == 1) {
+            pads_tick();
+            assign();
+            shown_update();
+            pad = shown_pad;
+        }
+        if (pad >= 0 && pad < npads) {
+            o->keyboard = kb_active != 0;
+            o->family = pad_family(&pads[pad]);
+            o->layout = pad_layout_get(&pads[pad]);
+            for (int k = 0; k < 4; k++) o->labels[k] = pads[pad].labels[k];
+        }
+        const InputMap *pm = input_map_player(pad >= 0 && pad < npads && pad_owner[pad] > 0 ? pad_owner[pad] : 0);
+        const InputMap *km = input_map_player(kb_owner > 0 ? kb_owner : 0);
+        for (int a = 0; a < 24; a++) {
+            uint8_t pads_of[INPUT_PAD_BINDING_MAX], keys_of[INPUT_BINDING_MAX];
+            if (a < 16 && o->layout >= 0 && input_map_pads_of(pm, a, o->layout, pads_of, INPUT_PAD_BINDING_MAX))
+                o->pad[a] = pads_of[0];
+            if (input_map_keys_of(km, a, keys_of, INPUT_BINDING_MAX)) o->key[a] = keys_of[0];
+        }
+    }
+    plat_mutex_unlock(&lock);
+}
+
+// Any thread (the window's): not under lock, a torn read only moves the hint by one event.
+void input_note_keyboard(void) {
+    kb_used_ns = plat_now_ns();
+    plat_xchg32(&kb_active, 1);
 }
 
 uint16_t rumble_motor(float a, float curve, float strength) {
@@ -786,7 +1037,25 @@ int input_pad_layout(void) {
 
 int input_pad_label(int pad_id) {
     if (pad_id < PAD_SOUTH || pad_id > PAD_NORTH) return PAD_LABEL_NONE;
-    return (int)plat_cas32(&pad_labels[pad_id - PAD_SOUTH], 0, 0);
+    int label = (int)plat_cas32(&pad_labels[pad_id - PAD_SOUTH], 0, 0);
+    if (label) return label;
+    const char *pad = getenv("RECOMPLAUNCHER_PAD");
+    if (pad && !strcmp(pad, "playstation")) {
+        static const int labels[] = {PAD_LABEL_CROSS, PAD_LABEL_CIRCLE, PAD_LABEL_SQUARE, PAD_LABEL_TRIANGLE};
+        return labels[pad_id - PAD_SOUTH];
+    }
+    if (pad && !strcmp(pad, "xbox")) {
+        static const int labels[] = {PAD_LABEL_A, PAD_LABEL_B, PAD_LABEL_X, PAD_LABEL_Y};
+        return labels[pad_id - PAD_SOUTH];
+    }
+    return PAD_LABEL_NONE;
+}
+int input_pad_type(void) {
+    int type = (int)plat_cas32(&pad_type_shown, 0, 0);
+    if (type) return type;
+    const char *pad = getenv("RECOMPLAUNCHER_PAD");
+    return pad && !strcmp(pad, "playstation") ? SDL_GAMEPAD_TYPE_PS5
+         : pad && !strcmp(pad, "xbox") ? SDL_GAMEPAD_TYPE_XBOXONE : 0;
 }
 
 void input_map_snapshot_player(int player, InputMap *m) {
@@ -812,6 +1081,11 @@ int input_capture(int reset, int *id) {
         pads_tick();
         for (int i = 0; i < npads; i++) pad_physical(&pads[i], p);   // any gamepad can be the one being bound
     }
+    uint64_t physical = 0;
+    for (int i = 0; i < PAD_COUNT; i++) if (p[i]) physical |= 1ull << i;
+    int32_t neutral_left[2] = {0, 0}, neutral_right[2] = {0, 0};
+    pad_focus_gate(INPUT_PLAYERS + 1, &physical, neutral_left, neutral_right);
+    for (int i = 0; i < PAD_COUNT; i++) p[i] = (physical >> i) & 1;
     plat_mutex_unlock(&lock);
     int got = INPUT_CAPTURE_NONE;
     if (!reset) {

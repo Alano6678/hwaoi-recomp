@@ -27,6 +27,7 @@
 #include "ui/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
+#include "ui/aod_game_icon.h"
 
 static SDL_Window *g_win;
 static uint32_t g_ev_base;               // SDL_RegisterEvents: the user events below
@@ -82,11 +83,13 @@ unsigned gfx_window_dpi(void) {
     return scale > 0 ? (unsigned)(scale * 96 + 0.5f) : 96;
 }
 
-// The window's size in its units for w x h pixels.
+// The window's size in its units for w x h pixels: pixels per window unit is the window's pixel density (the scale on
+// Wayland with high density, 1 on X11), not the desktop's display scale, which on X11 is above 1 on a scaled desktop
+// and made a 1920x1080 window 1280x720 at 150 %.
 static void set_pixel_size(int w, int h) {
-    float scale = SDL_GetWindowDisplayScale(g_win);
-    if (!(scale > 0)) scale = 1;
-    SDL_SetWindowSize(g_win, (int)(w / scale + 0.5f), (int)(h / scale + 0.5f));
+    float density = SDL_GetWindowPixelDensity(g_win);
+    if (!(density > 0)) density = 1;
+    SDL_SetWindowSize(g_win, (int)(w / density + 0.5f), (int)(h / density + 0.5f));
 }
 
 static void set_fullscreen(int on) {
@@ -258,6 +261,14 @@ static void open_window(void *arg) {
     if (!g_win) {
         rt_log("gfx: SDL_CreateWindow failed (%s)", SDL_GetError());
         return;
+    }
+    // The window's icon where the desktop takes one from the window (X11, Wayland compositors with the toplevel icon
+    // protocol); elsewhere the desktop file named by the app id gives it.
+    SDL_Surface *icon = SDL_CreateSurfaceFrom(AOD_GAME_ICON_W, AOD_GAME_ICON_H, SDL_PIXELFORMAT_RGBA32,
+                                              (void *)aod_game_icon, AOD_GAME_ICON_W * 4);
+    if (icon) {
+        SDL_SetWindowIcon(g_win, icon);
+        SDL_DestroySurface(icon);
     }
     set_pixel_size(w, h);   // w x h were window units; the setting is in pixels
     density_update();

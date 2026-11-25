@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aod_dlss.h"
 #include "cfg.h"
 #include "flight.h"
 #include "fs.h"
@@ -56,6 +57,26 @@ void gfx_window_focus_changed(int in) {
     rt_log("gfx: window %s the focus", in ? "gained" : "lost");
 }
 
+// The in-game menu's Restart (ui/menu.cpp): the launcher that started the game sets AOD_RESTART_EXIT to the exit code
+// on which it starts the game again (Age of Decomp's game.rs: 75). Unset or out of 1..254: no Restart button.
+static volatile int32_t g_exit_code;
+
+static int restart_code(void) {
+    const char *v = getenv("AOD_RESTART_EXIT");
+    int code = v ? atoi(v) : 0;
+    return code > 0 && code < 255 ? code : 0;
+}
+
+int gfx_restart_available(void) { return restart_code() != 0; }
+
+void gfx_request_restart(void) {
+    int code = restart_code();
+    if (!code) return;
+    plat_xchg32(&g_exit_code, code);
+    rt_log("gfx: restart requested; the launcher starts the game again");
+    gfx_window_request_close();
+}
+
 // The window was closed: the process ends with it, as in MNG, once a save Commit still running in the background is
 // done.
 void gfx_window_closed(void) {
@@ -63,7 +84,7 @@ void gfx_window_closed(void) {
     fs_save_flush();
     vk_pipeline_save();
     prof_write();   // plat_exit runs no atexit handlers
-    plat_exit(0);
+    plat_exit(plat_xchg32(&g_exit_code, 0));
 }
 
 // TOTK_FULLSCREEN=1: borderless window over the monitor. TOTK_WINDOW_SIZE=<w>x<h>: client area of the window (the
@@ -129,6 +150,10 @@ static VkDeviceSize g_cap_size;
 static int g_cap_w, g_cap_h, g_cap_valid;
 static int g_flip_on;            // vk_present_blit submitted the blit of swapchain image g_flip_idx; vk_present_flip presents it
 static uint32_t g_flip_idx;
+// Frame generation (aod_dlss.h): the game's frame the next vk_present_image call shows (vk_present_frame), and what
+// the waiting present tells Streamline: that frame, whether only the game's picture is on the image, and where.
+static uint32_t g_fg_next;
+static AodFgPresent g_flip_fg;
 
 // ---- TOTK_FLIGHT thumbnails (flight.c; g_pl): each present also blits the swapchain image down into slot frame % g_th_n
 // of a host-visible ring. A slot's tag names the frame it holds complete; recording a new frame clears the tag first,
@@ -255,12 +280,18 @@ static VkPresentModeKHR pick_present_mode(VkPhysicalDevice pd) {
     vkGetPhysicalDeviceSurfacePresentModesKHR(pd, g_surface, &n, m);
     VkPresentModeKHR got = VK_PRESENT_MODE_FIFO_KHR;
     for (uint32_t i = 0; i < n; i++) if (m[i] == want) got = want;
+    // Frame generation shows several frames per rendered one, from a thread of Streamline's, and DLSS-G on Vulkan
+    // works only without vertical sync (the SDK's ProgrammingGuideDLSS_G.md, 22.5; with mailbox or fifo it warns at
+    // every present): immediate while it is loaded, whatever the setting says.
+    int fg = aod_fg_ready() && got != VK_PRESENT_MODE_IMMEDIATE_KHR;
+    for (uint32_t i = 0; i < n && fg; i++) if (m[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) got = m[i];
     const char *name = got == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : got == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo";
     __atomic_store_n(&g_present_got, name, __ATOMIC_RELEASE);
     static int logged = -1;   // the mode last logged: a change from the menu shows in the log
     if ((int)got != logged) {
         logged = (int)got;
-        rt_log("gfx: present mode %s (TOTK_VK_PRESENT=%s)", name, e);
+        rt_log("gfx: present mode %s (TOTK_VK_PRESENT=%s%s)", name, e,
+               fg && got == VK_PRESENT_MODE_IMMEDIATE_KHR ? "; frame generation runs without vertical sync" : "");
     }
     return got;
 }
@@ -277,7 +308,8 @@ static void flip_locked(void) {
                            .pWaitSemaphores = &g_render_done[g_flip_idx], .swapchainCount = 1, .pSwapchains = &g_sc,
                            .pImageIndices = &g_flip_idx};
     vk_queue_lock();
-    VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
+    // through Streamline while DLSS or frame generation runs (the generated frames go out from a thread of its own)
+    VkResult r = aod_dlss_present(vk_ctx()->gfx_queue, &pi, &g_flip_fg);
     vk_queue_unlock();
     vk_device_fault_report(r);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
@@ -296,19 +328,32 @@ static void free_capture(void) {
 static int create_swapchain(void) {
     flip_locked();   // the acquired image goes out before its swapchain is replaced
     VkCtx *c = vk_ctx();
+    // The mark is taken before the size is read: a resize that arrives while the swapchain is being made (the window
+    // going fullscreen at start) marks it stale again, and the next present makes another. Cleared after the swapchain
+    // was made, that resize was lost and the picture stayed at the old size in the window's top-left corner.
+    plat_xchg32(&g_dirty, 0);
     VkSurfaceCapabilitiesKHR caps;
-    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps) != VK_SUCCESS) return 0;
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps) != VK_SUCCESS) return plat_xchg32(&g_dirty, 1), 0;
     int cw = 0, ch = 0;
     wsys_client_size(&cw, &ch);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
                                                             : (VkExtent2D){(uint32_t)cw, (uint32_t)ch};
-    if (!ext.width || !ext.height) return 0;
+    if (!ext.width || !ext.height) return plat_xchg32(&g_dirty, 1), 0;
+    // TOTK_SWAPCHAIN_TEST=1 (developer): the window changes size once, right here, between the size just read and the
+    // swapchain made with it: the resize that used to be lost. The log must then show another swapchain, of the new size.
+    static int tested;
+    const char *test = cfg_get("TOTK_SWAPCHAIN_TEST");
+    if (!tested && test && atoi(test) && cw > 400 && ch > 300) {
+        tested = 1;
+        rt_log("gfx: swapchain test: the window goes from %dx%d to %dx%d while its swapchain is made", cw, ch, cw - 160, ch - 90);
+        wsys_resize(cw - 160, ch - 90);
+    }
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, NULL);
     VkSurfaceFormatKHR fmts[64];
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, fmts);
-    if (!nf) return 0;
+    if (!nf) return plat_xchg32(&g_dirty, 1), 0;
     // The menu and optional colour/FSR passes operate on display-encoded values. Keep the
     // swapchain UNORM, and reinterpret sRGB game sources through an exact copy before them.
     // A direct sRGB -> UNORM blit would decode the source without re-encoding the destination.
@@ -329,8 +374,22 @@ static int create_swapchain(void) {
     if (count > 8) count = 8;
 
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    aod_fg_pause();                // with frame generation: Streamline stops generating, and its own queues drain too
+    vk_device_idle(c->device);
     VkSwapchainKHR old = g_sc;
+    int fg = aod_fg_ready();
+    if (fg && old) {
+        // Streamline's swapchain stands in front of the real one, which it makes itself: the old one goes before its
+        // successor is made, with no oldSwapchain to hand over (as Streamline's own sample does).
+        for (uint32_t i = 0; i < g_sc_n; i++) {
+            vkDestroySemaphore(c->device, g_render_done[i], NULL);
+            if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
+            g_sc_view[i] = VK_NULL_HANDLE;
+        }
+        g_sc_n = 0;
+        aod_fg_destroy_swapchain(c->device, old);
+        old = g_sc = VK_NULL_HANDLE;
+    }
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
@@ -339,11 +398,12 @@ static int create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = pick_present_mode(c->phys), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VkResult r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
+    VkResult r = aod_fg_create_swapchain(c->device, &ci, &g_sc);
     if (r != VK_SUCCESS) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
         g_sc = old;
         vk_queue_unlock();
+        plat_xchg32(&g_dirty, 1);
         return 0;
     }
     for (uint32_t i = 0; i < g_sc_n; i++) {
@@ -351,14 +411,36 @@ static int create_swapchain(void) {
         if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
         g_sc_view[i] = VK_NULL_HANDLE;
     }
-    if (old) vkDestroySwapchainKHR(c->device, old, NULL);
+    if (old) aod_fg_destroy_swapchain(c->device, old);
     g_sc_fmt = sf.format;
     g_sc_hdr = hdr;
     vk_hdr_set_active(hdr);
-    if (hdr) vk_hdr_metadata(g_sc, 1);
+    // The display's peak goes to the real swapchain, which with frame generation only Streamline holds: skipped then
+    // (the HDR10 colour space alone still makes the output HDR).
+    if (hdr && !fg) vk_hdr_metadata(g_sc, 1);
+    // A swapchain of another size than the last one is worth a line: with the window's size beside it, a log shows at
+    // once whether the picture fills the window (the first one is logged where the game starts presenting).
+    if (g_sc_ext.width && (g_sc_ext.width != ext.width || g_sc_ext.height != ext.height))
+        rt_log("gfx: swapchain %ux%u for a window of %dx%d (was %ux%u)", ext.width, ext.height, cw, ch, g_sc_ext.width,
+               g_sc_ext.height);
     g_sc_ext = ext;
-    g_sc_n = MAX_IMAGES;
-    vkGetSwapchainImagesKHR(c->device, g_sc, &g_sc_n, g_sc_img);
+    // With frame generation the images are Streamline's own. The count is asked first: Streamline's call fills the
+    // array without bringing a larger count down to what it has.
+    uint32_t n_img = 0;
+    VkResult ri = aod_fg_swapchain_images(c->device, g_sc, &n_img, NULL);
+    if (n_img > MAX_IMAGES) n_img = MAX_IMAGES;
+    memset(g_sc_img, 0, sizeof g_sc_img);
+    if (ri == VK_SUCCESS && n_img) ri = aod_fg_swapchain_images(c->device, g_sc, &n_img, g_sc_img);
+    while (n_img && !g_sc_img[n_img - 1]) n_img--;
+    g_sc_n = ri == VK_SUCCESS || ri == VK_INCOMPLETE ? n_img : 0;
+    if (!g_sc_n) {
+        rt_log("gfx: the swapchain gave no images (%d)", (int)ri);
+        aod_fg_destroy_swapchain(c->device, g_sc);
+        g_sc = VK_NULL_HANDLE;
+        vk_queue_unlock();
+        plat_xchg32(&g_dirty, 1);
+        return 0;
+    }
     VkSemaphoreCreateInfo semi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (uint32_t i = 0; i < g_sc_n; i++) {
         vkCreateSemaphore(c->device, &semi, NULL, &g_render_done[i]);
@@ -369,7 +451,22 @@ static int create_swapchain(void) {
     }
     free_capture();
     vk_queue_unlock();
-    plat_xchg32(&g_dirty, 0);
+    // The window may have changed size since the surface was asked, with no message yet, and some drivers go on
+    // presenting a swapchain of another size without saying so: ask the surface once more. A few times in a row at
+    // most, so a surface that never agrees with itself cannot rebuild the swapchain at every present.
+    static int again;
+    VkSurfaceCapabilitiesKHR now;
+    if (caps.currentExtent.width != UINT32_MAX &&
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &now) == VK_SUCCESS &&
+        now.currentExtent.width != UINT32_MAX && now.currentExtent.width && now.currentExtent.height &&
+        (now.currentExtent.width != ext.width || now.currentExtent.height != ext.height) && again < 8) {
+        again++;
+        rt_log("gfx: the window is now %ux%u, the new swapchain %ux%u: making it again", now.currentExtent.width,
+               now.currentExtent.height, ext.width, ext.height);
+        plat_xchg32(&g_dirty, 1);
+    } else {
+        again = 0;
+    }
     return 1;
 }
 
@@ -632,17 +729,19 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         perf_present_gpu((uint64_t)((double)(tv[1] - tv[0]) * g_ts_period));
     g_ts_on[slot] = 0;
     uint32_t idx = 0;
-    VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    uint32_t fg_frame = g_fg_next;   // the game's frame this image shows (vk_present_frame), 0 when none was named
+    g_fg_next = 0;
+    VkResult r = aod_fg_acquire(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         plat_xchg32(&g_dirty, 1);
         if (!create_swapchain()) goto out;
-        r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+        r = aod_fg_acquire(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     }
     vk_device_fault_report(r);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
     if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     vkResetFences(c->device, 1, &g_fence[slot]);
-    if (g_sc_hdr) vk_hdr_metadata(g_sc, 0);   // a changed peak or white goes to the display
+    if (g_sc_hdr && !aod_fg_ready()) vk_hdr_metadata(g_sc, 0);   // a changed peak or white goes to the display
     if (g_th_pending[slot]) {   // that fence has signalled: the thumbnail its submission wrote is complete
         g_th_tag[g_th_pending[slot] % (uint64_t)g_th_n] = g_th_pending[slot];
         g_th_pending[slot] = 0;
@@ -780,7 +879,10 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         last_write = 0;
         record_thumb(cb, dst, slot);
     }
-    sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
+    // With frame generation the image is Streamline's own, which it copies to the real swapchain image: it takes it
+    // as a transfer source, not as an image ready to present (Vulkan's validation says so of its commands).
+    sync_barrier(cb, dst, last, aod_fg_ready() ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
     vk_crumb(cb, VK_CRUMB_PRESENT_END, crumb);
     if (timed) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool, 2 * slot + 1);
     vkEndCommandBuffer(cb);
@@ -800,6 +902,11 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         g_ts_on[slot] = (uint8_t)timed;
         g_flip_on = 1;
         g_flip_idx = idx;
+        // Frames are generated up to this one only when it is the game's picture alone: our menu over it is no moving
+        // scene.
+        g_flip_fg = (AodFgPresent){.frame = fg_frame, .generate = !menu_is_open(),
+                                   .width = g_sc_ext.width, .height = g_sc_ext.height, .format = g_sc_fmt,
+                                   .images = g_sc_n, .rect = {to[0], to[1], to[2], to[3]}};
         if (!defer) flip_locked();
     } else {
         vk_device_fault_report(r);
@@ -832,6 +939,12 @@ void vk_present_flip(void) {
     plat_rmutex_unlock(&g_pl);
 }
 
+void vk_present_frame(uint32_t fg_frame) {
+    plat_rmutex_lock(&g_pl);
+    g_fg_next = fg_frame;
+    plat_rmutex_unlock(&g_pl);
+}
+
 void gfx_window_resize(int cw, int chh) {
     gfx_window_start();
     wsys_resize(cw, chh);
@@ -846,7 +959,8 @@ void gfx_window_release_vk(void) {
     plat_rmutex_lock(&g_pl);
     if (c && g_started) {
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        aod_fg_pause();
+        vk_device_idle(c->device);
         vk_queue_unlock();
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
         if (g_ts_pool) vkDestroyQueryPool(c->device, g_ts_pool, NULL);
@@ -873,8 +987,8 @@ void gfx_window_release_vk(void) {
             g_sc_view[i] = VK_NULL_HANDLE;
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
-        if (g_sc) vkDestroySwapchainKHR(c->device, g_sc, NULL);
-        if (g_surface) vkDestroySurfaceKHR(c->instance, g_surface, NULL);
+        if (g_sc) aod_fg_destroy_swapchain(c->device, g_sc);
+        if (g_surface) aod_fg_destroy_surface(c->instance, g_surface);
         g_sc = VK_NULL_HANDLE; g_surface = VK_NULL_HANDLE; g_pool = VK_NULL_HANDLE; g_sc_n = 0;
         g_started = 0;     // the window and its thread stay; the next gfx_window_start makes a new surface
     }

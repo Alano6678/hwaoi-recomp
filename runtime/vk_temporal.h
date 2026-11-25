@@ -4,9 +4,10 @@
 #pragma once
 #include "vk_exec.h"
 
-int vk_temporal_wanted(void);   // HWAOI_TEMPORAL=fsr (fixed for the run)
-int vk_temporal_active(void);   // wanted and FSR is usable on this device (vk_ffx_available), not failed
+int vk_temporal_wanted(void);   // TEMPORAL = fsr, dlss or dlaa (fixed for the run)
+int vk_temporal_active(void);   // wanted and its upscaler is usable on this device, not failed
 int vk_temporal_running(void);  // the same without its first-call log
+int vk_temporal_sharpens(void); // running with an upscaler that sharpens its own result (FSR; DLSS does not)
 // vk_exec_pass_begin, after the targets are resolved: the G-buffer and the lighting target arm the frame
 void vk_temporal_pass(VkExec *ex);
 // prepare_draw, once the draw's shaders are known (the pass is open): the camera from the lighting draw, and at the

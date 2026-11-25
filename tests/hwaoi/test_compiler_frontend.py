@@ -75,9 +75,14 @@ class CompilerFrontendTests(unittest.TestCase):
                     backend.extract_game_exefs(path, folder / "bad-exefs")
             self.assertEqual(path.read_bytes(), raw)
 
+    # A required bundle file that synchronization verifies when it is used: Windows bundles carry their compiler,
+    # Linux bundles only the shader translator (clang, lld and Ninja are the system's).
+    TOOL = "bin/ninja.exe" if os.name == "nt" else "translator/totk_xlate"
+
     def bundle(self, root):
-        names = ("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe", "bin/zlib1.dll",
-                 "translator/totk_xlate.exe", "translator/totk_xlate.id", "deps/include/vma/vk_mem_alloc.h",
+        names = (("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe", "bin/zlib1.dll",
+                  "translator/totk_xlate.exe", "translator/totk_xlate.id", "deps/include/vma/vk_mem_alloc.h")
+                 if os.name == "nt" else ("translator/totk_xlate", "translator/totk_xlate.id")) + (
                  "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py")
         files = {}
         for name in names:
@@ -95,7 +100,7 @@ class CompilerFrontendTests(unittest.TestCase):
             root.mkdir()
             manifest = self.bundle(root)
             self.assertEqual(backend.bundle_check(root)["source_revision"], "synthetic")
-            (root / "bin/ninja.exe").write_bytes(b"different")
+            (root / self.TOOL).write_bytes(b"different")
             with self.assertRaisesRegex(ValueError, "changed"):
                 backend.bundle_check(root)
             backend.bundle_check(root, defer_materialized=True)  # unused compiler input is verified by synchronization
@@ -105,7 +110,7 @@ class CompilerFrontendTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "changed"):
                     backend.bundle_check(root, defer_materialized=True)
             manifest = self.bundle(root)
-            del manifest["files"]["bin/ninja.exe"]
+            del manifest["files"][self.TOOL]
             (root / "bundle.json").write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "Incomplete"):
                 backend.bundle_check(root)
@@ -153,6 +158,34 @@ class CompilerFrontendTests(unittest.TestCase):
             for key in ("HWAOI_FPS_LIMIT", "TOTK_EXEFS", "DKB_XLATE", "PYTHONPATH"):
                 self.assertNotIn(key, env)
             self.assertNotIn("F:/Python", env["PATH"])
+
+
+class ShaderPreparationTests(unittest.TestCase):
+    """compiler/backend.py prepare_shaders: the shaders met in play are prepared at the end of a build; neither a first
+    build without them nor a game program that cannot run stops the build, and no seed file is left behind."""
+
+    def run_prepare(self, game, bundle):
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            backend.prepare_shaders(bundle, game)
+        return out.getvalue()
+
+    def test_a_first_build_has_no_shaders_met_in_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            said = self.run_prepare(game, game)
+            self.assertIn("No shaders met in play yet", said)
+            self.assertEqual(sorted(p.name for p in game.iterdir()), [])
+
+    def test_a_game_program_that_cannot_run_leaves_the_build_as_it_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            for kind in ("answers", "programs"):   # recorded files with a header and one byte more
+                (game / f"shader-{kind}.bin").write_bytes(b"TOTKSANS" + bytes(9))
+            said = self.run_prepare(game, game)   # no hwaoi program in this folder
+            self.assertIn("could not be prepared now", said)
+            self.assertEqual(sorted(p.name for p in game.iterdir()), ["shader-answers.bin", "shader-programs.bin"])
 
 
 if __name__ == "__main__":

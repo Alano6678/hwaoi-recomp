@@ -600,7 +600,7 @@ def pick_jobs(requested):
     cpus = os.cpu_count() or 4
     readings = [n for n in (hostmem.available_ram(), hostmem.available_commit()) if n is not None]
     free = min(readings) if readings else None
-    ceiling = min(requested or 8, cpus)
+    ceiling = min(requested or hostmem.build_threads(cpus), cpus)   # automatic: all processors but one in eight
     if free is None:
         return min(ceiling, 2), f'{cpus} CPUs, free memory unknown: conservative two-worker limit'
     by_mem = max(1, int(free * MEM_SHARE) // WORKER_MEM)

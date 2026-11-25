@@ -172,6 +172,8 @@ void vk_exec_frame_log(const tex_t *presented, uint64_t frame);
 // textures, samplers) and images.txt (per image value statistics). The hooks run only when vk_dump_armed is set.
 extern int vk_dump_armed;
 extern int vk_dump_polling;              // optional file trigger pending; draw/dispatch hooks remain off
+extern int vk_dump_watching;             // TOTK_DUMP_ON_TARGET pending: render pass ends are checked for its size
+void vk_dump_watch_pass(const VkExec *ex);   // after vkCmdEndRendering while watching
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds

@@ -961,6 +961,12 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
     fault_install();
 }
 
+// Not on Linux yet: stopping another thread to read its stack needs a signal round trip per thread.
+int plat_threads_report(void (*fn)(const PlatThreadStack *t, void *arg), void *arg) {
+    (void)fn, (void)arg;
+    return 0;
+}
+
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     fault_install();
@@ -1212,6 +1218,34 @@ static void locale_tag(const char *const *names, int n, char *tag, size_t cap) {
     if (v && strcmp(v, "C") && strncmp(v, "C.", 2) && strcmp(v, "POSIX"))
         for (; v[k] && v[k] != '.' && v[k] != '@' && k < cap - 1; k++) tag[k] = v[k] == '_' ? '-' : v[k];
     tag[k] = 0;
+}
+
+// The largest first mode among the connected outputs the kernel lists (/sys/class/drm/card*-*/status and modes; the
+// first mode is the preferred one). A handheld's panel may be mounted on its side: the long side is the width.
+int plat_display_size(int *w, int *h) {
+    DIR *d = opendir("/sys/class/drm");
+    if (!d) return 0;
+    int bw = 0, bh = 0;
+    for (struct dirent *e; (e = readdir(d));) {
+        char path[512], line[64];
+        if (strncmp(e->d_name, "card", 4) || !strchr(e->d_name, '-')) continue;
+        snprintf(path, sizeof path, "/sys/class/drm/%s/status", e->d_name);
+        FILE *f = fopen(path, "r");
+        int on = f && fgets(line, sizeof line, f) && !strncmp(line, "connected", 9);
+        if (f) fclose(f);
+        if (!on) continue;
+        snprintf(path, sizeof path, "/sys/class/drm/%s/modes", e->d_name);
+        int mw = 0, mh = 0;
+        if ((f = fopen(path, "r"))) {
+            if (fgets(line, sizeof line, f) && sscanf(line, "%dx%d", &mw, &mh) == 2 && (long)mw * mh > (long)bw * bh)
+                bw = mw > mh ? mw : mh, bh = mw > mh ? mh : mw;
+            fclose(f);
+        }
+    }
+    closedir(d);
+    if (!bw || !bh) return 0;
+    *w = bw, *h = bh;
+    return 1;
 }
 
 const char *plat_ui_language(void) {
@@ -1611,6 +1645,8 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb) {
     plat_process_memory(&resident, &private_bytes);
     if (private_bytes) *proc_mb = (double)(private_bytes >> 20);
 }
+
+double plat_commit_growth_mb(void) { return 0; }   // the commit limit does not grow by itself here
 
 // ---- child processes
 

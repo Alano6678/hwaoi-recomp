@@ -28,6 +28,7 @@ struct Machine {
     u32 constant = 0;
     u32 active_lanes = ~0U;
     std::array<u32, 32> lane_values{};
+    u32 lane = 0;   // what S2R SR_LANEID reads
     u32 shared_value = 0;
     bool carry_flag = false;
     std::array<float, 4> texture_values{};
@@ -117,7 +118,26 @@ struct Machine {
             }
             else if ((top & ~1U) == 0x50d8) value = active_lanes;
             else if ((word >> 52) == 0xef1) value = lane_values.at((word >> 20) & 31);
-            else if ((word >> 56) == 4) value = read(a) & imm;
+            else if ((word >> 56) == 4) {   // LOP32I: AND, OR, XOR in bits 53-54
+                const u32 operation = (word >> 53) & 3;
+                check(operation < 3, "tested LOP32I mode");
+                value = operation == 0 ? read(a) & imm : operation == 1 ? read(a) | imm : read(a) ^ imm;
+            } else if (top == 0xf0c8) {
+                check(((word >> 20) & 255) == 0, "tested S2R register is SR_LANEID");
+                value = lane;
+            } else if ((top & ~1U) == 0x5c28) {   // SHR by a register, unsigned or signed
+                const u32 shift = read(b);
+                if (top & 1) value = static_cast<u32>(static_cast<s32>(read(a)) >> (std::min)(shift, 31U));
+                else value = shift < 32 ? read(a) >> shift : 0;
+            } else if ((top & ~7U) == 0x5be0) {   // LOP3.LUT, no predicate output
+                check(((word >> 36) & 3) == 0 && (top & 7) == 7, "tested LOP3 without predicate output");
+                const u32 lut = (word >> 28) & 255, c = read((word >> 39) & 255), x = read(a), y = read(b);
+                value = 0;
+                for (u32 bit = 0; bit < 32; ++bit) {
+                    const u32 index = ((x >> bit) & 1) << 2 | ((y >> bit) & 1) << 1 | ((c >> bit) & 1);
+                    value |= ((lut >> index) & 1) << bit;
+                }
+            }
             else if ((top & ~7U) == 0x5c40) {
                 const u32 rhs = (word & (u64{1} << 40)) ? ~read(b) : read(b);
                 const u32 mode = (word >> 41) & 3;
@@ -522,6 +542,44 @@ int main() try {
         check(!lower(op(0xb63, 5, 8, 0x3000070c, 0x000e8f00 | reg)), "half gather scratch split rejected");
         ++checks;
     }
+    // Age of Decomp (GitHub #13): a warp state register saved and written around quad shuffles, F2F from a constant
+    // or a uniform register, .NDV on FSWZADD and on a general TEX, and MOV with a quad lane mask.
+    {
+        const std::array code{op(0xf55, 15, 26, 0, 0), op(0xf56, 15, 26, 0, 0x00100000), op(0xf56, 15, 26, 0, 0),
+                              exit_op};
+        Machine m; m.r[15] = 0x1234;
+        m.run(LowerToMaxwell(code));
+        check(m.r[15] == 0, "warp state save reads zero"); ++checks;
+        check(!lower(op(0xf55, 15, 25, 0, 0)), "other warp state register rejected"); ++checks;
+        check(!lower(op(0xf56, 15, 26, 0, 0x00200000)), "unknown warp state write mode rejected"); ++checks;
+        check(!lower(op(0xf55, 250, 26, 0, 0)), "warp state save into scratch rejected"); ++checks;
+    }
+    for (float f : {1.5f, -0.25f, 65504.0f, 3.0e-5f}) {
+        Machine m; m.constant = std::bit_cast<u32>(f);
+        m.run(lower(op(0xb04, 3, 0, (208U << 6) | (3U << 22), 0x00200800)));
+        check(m.r[3] == Machine::nearest_half(f), "F2F from a constant"); ++checks;
+        Machine n; n.r[220] = std::bit_cast<u32>(f);
+        n.run(lower(op(0xd04, 3, 0, 0x80000004, 0x08200800)));
+        check(n.r[3] == Machine::nearest_half(-f), "F2F from a negated uniform register"); ++checks;
+    }
+    check(!lower(op(0xb04, 3, 0, (208U << 6) | (3U << 22), 0x00200801)), "F2F constant mode rejected"); ++checks;
+    check(!lower(op(0xd04, 3, 0, 0x80000004, 0x00200800)), "F2F uniform form without its marker rejected"); ++checks;
+    {
+        const auto r = lower(op(0x822, 4, 5, 0xcc, 0x2006));
+        check(bool(r) && ((r.instructions.at(0) >> 38) & 1) && ((r.instructions.at(0) >> 20) & 255) == 6,
+              "FSWZADD .NDV kept"); ++checks;
+        check(!lower(op(0x822, 4, 5, 0xcc, 0x4006)), "FSWZADD unknown mode rejected"); ++checks;
+        const auto t = lower(op(0xb60, 4, 8, 0x5080070a, 0x000e21ff));   // 3D, implicit LOD, red, .NDV
+        bool ndv = false;
+        for (u64 w : t.instructions) if ((w >> 56) == 0xc0) ndv = (w >> 35) & 1;
+        check(bool(t) && ndv, "general TEX .NDV kept"); ++checks;
+    }
+    for (u32 lanes : {1U, 2U, 4U, 8U, 5U, 0xeU}) for (u32 lane = 0; lane < 8; ++lane) {
+        Machine m; m.lane = lane; m.r[4] = 0xaaaa0000 + lane; m.r[9] = 0x5555;
+        m.run(lower(op(0x202, 4, 0, 9, lanes << 8)));
+        check(m.r[4] == (((lanes >> (lane & 3)) & 1) ? 0x5555U : 0xaaaa0000U + lane), "MOV quad lane mask"); ++checks;
+    }
+    check(!lower(op(0x202, 246, 0, 9, 1U << 8)), "lane mask MOV into scratch rejected"); ++checks;
     ProgramCaptureState capture;
     check(capture.Observe(op(0x94d, 0, 0, 0, 1U << 23), 0) == ProgramCaptureState::Result::Continue,
           "DKB secondary EXIT predicate capture preserved"); ++checks;

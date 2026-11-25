@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <imm.h>
 
+#include "aod_dlss.h"
 #include "cfg.h"
 #include "game_target.h"
 #include "flight.h"
@@ -283,7 +284,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 static void window_main(void *arg) {
     (void)arg;
     HINSTANCE inst = GetModuleHandleW(NULL);
-    // Icon resource 1 of totk.rc (runtime/totk.ico): the title bar, the taskbar button and Alt+Tab.
+    // Icon resource 1 of the executable (tools/build_game.py: the cover of the player's own copy when it has one,
+    // else runtime/ui/aod_game.ico): the title bar, the taskbar button and Alt+Tab.
     WNDCLASSEXW wc = {.cbSize = sizeof wc, .lpfnWndProc = wnd_proc, .hInstance = inst,
                       .hIcon = LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
                                           GetSystemMetrics(SM_CYICON), LR_SHARED),
@@ -300,6 +302,8 @@ static void window_main(void *arg) {
     // button flashes until it is brought up, and TOTK_FULLSCREEN waits for that first activation.
     // TOTK_BACKGROUND_WINDOW=1 (test runs): no flashing, never fullscreen at start, and F11 keeps the window's place.
     int background = g_background = cfg_get("TOTK_BACKGROUND_WINDOW") && atoi(cfg_get("TOTK_BACKGROUND_WINDOW"));
+    const char *launcher_mode = getenv("RECOMPLAUNCHER_MODE");
+    int bigpicture = !background && launcher_mode && !strcmp(launcher_mode, "bigpicture");
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, RT_GAME_TITLE_W, WND_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, ow, oh, NULL,
                              NULL, inst, NULL);
     if (!g_hwnd) {
@@ -314,8 +318,16 @@ static void window_main(void *arg) {
         // The frame was measured at the system DPI; the window may have opened on a monitor at another scale.
         plat_xchg32(&g_dpi, (int32_t)GetDpiForWindow(g_hwnd));
         outer_size(g_hwnd, cw, ch, &ow, &oh);
-        SetWindowPos(g_hwnd, HWND_BOTTOM, 0, 0, ow, oh, SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (!background) {
+        if (bigpicture) {
+            // This launch mode is a deliberate Play action from a controller UI.
+            // Size the fullscreen window before the first present and request focus.
+            SetWindowPos(g_hwnd, HWND_TOP, 0, 0, ow, oh, SWP_NOMOVE | SWP_SHOWWINDOW);
+            if (cfg_fullscreen()) toggle_fullscreen(g_hwnd);
+            SetForegroundWindow(g_hwnd);
+        } else {
+            SetWindowPos(g_hwnd, HWND_BOTTOM, 0, 0, ow, oh, SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        if (!background && !bigpicture) {
             FLASHWINFO fw = {.cbSize = sizeof fw, .hwnd = g_hwnd, .dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG};
             FlashWindowEx(&fw);
             g_fs_pending = cfg_fullscreen();
@@ -345,10 +357,9 @@ int wsys_open(void) {
 }
 
 VkSurfaceKHR wsys_surface(VkInstance inst) {
-    VkWin32SurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                                      .hinstance = GetModuleHandleW(NULL), .hwnd = g_hwnd};
     VkSurfaceKHR surface = VK_NULL_HANDLE;
-    VkResult r = vkCreateWin32SurfaceKHR(inst, &si, NULL, &surface);
+    // through Streamline while frame generation runs (it keeps which window a surface belongs to), else the loader's
+    VkResult r = aod_fg_win32_surface(inst, GetModuleHandleW(NULL), g_hwnd, &surface);
     if (r != VK_SUCCESS) rt_log("gfx: vkCreateWin32SurfaceKHR failed (%d)", (int)r);
     return r == VK_SUCCESS ? surface : VK_NULL_HANDLE;
 }

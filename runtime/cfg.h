@@ -1,5 +1,6 @@
 // Settings: the TOTK_* environment variables, with totk.ini next to totk.exe behind them.
 #pragma once
+#include <stddef.h>
 
 // getenv for a setting: the environment variable when set, else the totk.ini key (the name without "TOTK_", any
 // case), else the device profile's default (cfg.c: the Steam Deck), else NULL. Same string semantics as getenv; the pointer stays valid for the process (a value cfg_set replaces
@@ -21,6 +22,8 @@ void cfg_set(const char *name, const char *value);
 unsigned cfg_version(void);
 // 1 when the environment sets name: cfg_set cannot change what cfg_get returns (the menu greys the setting out).
 int cfg_from_env(const char *name);
+// Writes the name of the environment variable that overrides this setting, if any.
+int cfg_env_name(const char *name, char *out, size_t size);
 // 1 when the player set name (the environment or totk.ini), 0 when cfg_get gives a device profile's default or NULL.
 int cfg_is_set(const char *name);
 // The device profile in use, "deck" or "desktop" (TOTK_DEVICE_PROFILE, else what the machine is).
